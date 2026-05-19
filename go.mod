@@ -5,7 +5,7 @@ go 1.25.10
 require (
 	github.com/Eyevinn/mp4ff v0.52.0
 	github.com/asticode/go-astits v1.15.0
-	github.com/bluenviron/gortsplib/v5 v5.5.2
+	github.com/bluenviron/gortsplib/v5 v5.5.3
 	github.com/bluenviron/mediacommon/v2 v2.8.3
 	github.com/datarhei/gosrt v0.11.0
 	github.com/go-chi/chi/v5 v5.2.5
