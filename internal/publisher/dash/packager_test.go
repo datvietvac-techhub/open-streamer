@@ -324,6 +324,62 @@ func TestPackager_PairingTimeout_VideoOnly(t *testing.T) {
 	<-doneCh
 }
 
+// TestPackager_NonPackShard_DropsIncomingAACFrames — when PackAudio=false
+// (typical ABR non-primary shard), incoming AAC frames must not enqueue.
+// Cut returns AudioCount=0 because audioSR=0, so the drain branch in
+// writeSegments never fires; without an early return in handleAAC the
+// queue grows unbounded, eventually firing "audio frame queue overflow"
+// warnings while wasting CPU on ADTS splitting + init-segment I/O.
+//
+// Verifies: audio queue stays at 0, no init_a.mp4 file appears,
+// audioFrameSeen stays false (so tryCut's pairing wait isn't gated on
+// audio that this shard isn't responsible for).
+func TestPackager_NonPackShard_DropsIncomingAACFrames(t *testing.T) {
+	p, bs, id, done := setupPackager(t, false) // PackAudio=false
+	defer done()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sub, err := bs.Subscribe(id)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer bs.Unsubscribe(id, sub)
+
+	doneCh := make(chan struct{})
+	go func() {
+		p.Run(ctx, sub)
+		close(doneCh)
+	}()
+
+	// Push 50 AAC frames simulating sustained audio arrival on a
+	// non-primary shard.
+	for i := 0; i < 50; i++ {
+		pushAV(t, bs, id, domain.AVCodecAAC, testADTSFrame, uint64(i)*23, uint64(i)*23, false) //nolint:gosec
+	}
+
+	// Give the Run loop time to consume them.
+	time.Sleep(300 * time.Millisecond)
+
+	cancel()
+	<-doneCh
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if got := p.queue.AudioLen(); got != 0 {
+		t.Errorf("audio queue len = %d, want 0 (non-pack shard must not enqueue)", got)
+	}
+	if p.audioFrameSeen {
+		t.Error("audioFrameSeen = true on non-pack shard; should stay false")
+	}
+	if p.audioInit != nil {
+		t.Error("audioInit built on non-pack shard; should stay nil")
+	}
+	if _, err := os.Stat(filepath.Join(p.cfg.StreamDir, "init_a.mp4")); !os.IsNotExist(err) {
+		t.Errorf("init_a.mp4 unexpectedly present on non-pack shard: %v", err)
+	}
+}
+
 // TestPackager_SessionBoundary_DropsPendingQueue — push a partial
 // in-progress segment, then a packet with SessionStart=true, then
 // new-session frames. The new segment should NOT include old-session

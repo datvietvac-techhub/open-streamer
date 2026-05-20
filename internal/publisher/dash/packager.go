@@ -408,7 +408,19 @@ func (p *Packager) pushVideoWithDiag(f VideoFrame) {
 // payload (AV path under bursty source pacing) commonly contains
 // 4–8 access units. splitADTSBundle splits them and assigns
 // per-frame PTS — see splitADTSBundle's docstring for why.
+//
+// Non-pack shards skip the entire AAC path. In ABR mode at most one
+// shard has PackAudio=true; the others receive AAC frames from the
+// shared buffer hub but never emit audio segments. Without this
+// early return the queue would accumulate every frame indefinitely
+// (Cut returns AudioCount=0 when audioSR=0, so the drain branch
+// at writeSegments is unreachable), eventually firing "audio frame
+// queue overflow — dropping oldest" warnings while wasting CPU on
+// ADTS splitting and init-segment I/O.
 func (p *Packager) handleAAC(av *domain.AVPacket) {
+	if !p.cfg.PackAudio {
+		return
+	}
 	p.audioFrameSeen = true
 	frames := splitADTSBundle(av.Data, av.PTSms)
 	if len(frames) == 0 {
