@@ -538,11 +538,22 @@ func (s *Service) startPushRegistration(streamID domain.StreamCode, input domain
 // change, change the constants in domain/defaults.go.
 func (s *Service) normaliserConfig() timeline.Config {
 	return timeline.Config{
-		Enabled:          true,
-		JumpThresholdMs:  domain.DefaultPTSJumpThresholdMs,
-		MaxAheadMs:       domain.DefaultPTSMaxAheadMs,
-		MaxBehindMs:      domain.DefaultPTSMaxBehindMs,
-		CrossTrackSnapMs: 1000,
+		Enabled:           true,
+		JumpThresholdMs:   domain.DefaultPTSJumpThresholdMs,
+		MaxAheadMs:        domain.DefaultPTSMaxAheadMs,
+		MaxBehindMs:       domain.DefaultPTSMaxBehindMs,
+		CrossTrackSnapMs:  1000,
+		SameTimebaseMaxMs: 5000,
+		// Hold the first track's first packets for up to 1 s while
+		// waiting for the partner track's first packet so the joint
+		// anchor preserves source-side V/A offset. Without this, feeds
+		// whose multicast scheduler emits audio pre-buffered ahead of
+		// video by several hundred ms lose that offset to the wallclock
+		// arrival fallback, producing visible audio lag in the player.
+		// 1 s is comfortably above worst-case observed first-packet
+		// arrival skew (~80 ms) and bounds startup latency for single-
+		// track streams (audio-only / video-only).
+		SeedHoldTimeoutMs: 1000,
 	}
 }
 

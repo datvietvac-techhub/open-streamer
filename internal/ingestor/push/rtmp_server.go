@@ -513,16 +513,18 @@ func (p *pubState) OnReadRtmpAvMsg(msg base.RtmpMsg) {
 		// Anchor PTS/DTS via the Normaliser. Push-mode encoders are
 		// normally already wallclock-aligned, so the drift cap rarely
 		// fires — but skip the buffer write when the Normaliser drops a
-		// packet (sustained input ahead of wallclock past MaxAheadMs).
-		if !p.normaliser.Apply(cl, time.Now()) {
-			continue
-		}
-		if err := p.buf.Write(p.bufferWriteID, buffer.Packet{AV: cl}); err != nil {
-			slog.Debug("rtmp server: buffer write failed",
-				"key", p.key, "err", err)
-		}
-		if p.cb.OnMedia != nil {
-			p.cb.OnMedia(cl)
+		// packet (sustained input ahead of wallclock past MaxAheadMs) or
+		// holds it during joint-seed hold. Joint-seed completion emits
+		// the buffered packets alongside the current one — iterate so
+		// each lands in the buffer hub with its stamped PTS/DTS.
+		for _, q := range p.normaliser.Apply(cl, time.Now()) {
+			if err := p.buf.Write(p.bufferWriteID, buffer.Packet{AV: q}); err != nil {
+				slog.Debug("rtmp server: buffer write failed",
+					"key", p.key, "err", err)
+			}
+			if p.cb.OnMedia != nil {
+				p.cb.OnMedia(q)
+			}
 		}
 	}
 }

@@ -420,15 +420,21 @@ func (n *Normaliser) runDemux() {
 // through timeline.Normaliser, re-mux via astits.Muxer. Runs on the
 // demuxer goroutine; Process is blocked on the ack chan so n.outBuf /
 // n.muxer / n.norm have no contention.
+//
+// The Normaliser may emit 0 packets (dropped or held during joint-seed),
+// 1 packet (steady state, returned slice is just [av]), or N packets
+// (joint-seed completion — buffered partner-track packets are drained
+// alongside the current one). The per-packet `isVideo` recomputes from
+// each emitted packet's codec because the slice may contain packets of
+// both kinds when joint-seed completes.
 func (n *Normaliser) handlePES(st astits.StreamType, pes *astits.PESData) {
-	av, isVideo, ok := buildAVPacketFromPES(st, pes)
+	av, _, ok := buildAVPacketFromPES(st, pes)
 	if !ok {
 		return
 	}
-	if !n.norm.Apply(av, time.Now()) {
-		return
+	for _, q := range n.norm.Apply(av, time.Now()) {
+		n.writeMuxed(q, q.Codec.IsVideo())
 	}
-	n.writeMuxed(av, isVideo)
 }
 
 // writeMuxed routes a normalised AVPacket to the astits muxer's PID
