@@ -21,7 +21,16 @@ import (
 // tsBufferMaxBytes caps the demuxer-side TS backlog. Overflow drops
 // the stale backlog rather than blocking the writer; the demuxer
 // resyncs from the next PAT/PMT after the gap.
-const tsBufferMaxBytes = 2 << 20 // 2 MiB
+//
+// Sized to hold one bursty HLS-pull chunk plus a safety margin: a
+// 10 Mbps live source at 8 s chunk duration delivers ~10 MB at once,
+// and a 2 MiB cap forced an overflow drop on every chunk — observed
+// in production as continuous warnings on customer streams at >5 Mbps
+// (single 5 Mbps × 4 s chunk = 2.5 MB > 2 MiB cap) with the resulting
+// truncated NALU bytes triggering player decode failures
+// (CHUNK_DEMUXER_ERROR_APPEND_FAILED). 16 MiB accommodates up to
+// ~16 Mbps × 8 s without losing any chunk content.
+const tsBufferMaxBytes = 16 << 20 // 16 MiB
 
 // tsBuffer is a thread-safe bytes pipe between a producer goroutine
 // (writing aligned 188-byte TS packets) and a consumer goroutine
