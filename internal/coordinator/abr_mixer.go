@@ -347,11 +347,10 @@ func (c *Coordinator) abrMixerVideoForward(ctx context.Context, entry *abrMixerE
 			if !p.Codec.IsVideo() {
 				continue
 			}
-			if !norm.Apply(&p, time.Now()) {
-				continue
-			}
-			if err := c.buf.Write(downBufID, buffer.Packet{AV: &p}); err == nil {
-				entry.lastPacketAtNanos.Store(time.Now().UnixNano())
+			for _, q := range norm.Apply(&p, time.Now()) {
+				if err := c.buf.Write(downBufID, buffer.Packet{AV: q}); err == nil {
+					entry.lastPacketAtNanos.Store(time.Now().UnixNano())
+				}
 			}
 		}
 	}
@@ -448,11 +447,9 @@ func (c *Coordinator) abrMixerAudioForwardABR(
 			if !p.Codec.IsAudio() {
 				continue
 			}
-			if !norm.Apply(&p, time.Now()) {
-				continue
+			for _, q := range norm.Apply(&p, time.Now()) {
+				c.fanOutToRenditions(downBufIDs, buffer.Packet{AV: q}, entry)
 			}
-			pkt := buffer.Packet{AV: &p}
-			c.fanOutToRenditions(downBufIDs, pkt, entry)
 		}
 	}
 }
@@ -486,10 +483,9 @@ func (c *Coordinator) abrMixerAudioForwardDirect(
 			}
 			// Subscriber receives a clone of the original Packet, so mutating
 			// AV in place here only affects this consumer's view — safe.
-			if !norm.Apply(pkt.AV, time.Now()) {
-				continue
+			for _, q := range norm.Apply(pkt.AV, time.Now()) {
+				c.fanOutToRenditions(downBufIDs, buffer.Packet{AV: q}, entry)
 			}
-			c.fanOutToRenditions(downBufIDs, pkt, entry)
 		}
 	}
 }

@@ -470,36 +470,47 @@ func writeOnePacket(wctx writeContext, p *domain.AVPacket) error {
 		return writeRawTSChunk(wctx, p.Data)
 	}
 	cl := p.Clone()
-	// Anchor PTS/DTS via the Normaliser. Returns false when the
+	// Anchor PTS/DTS via the Normaliser. Returns an empty slice when the
 	// Normaliser dropped the packet (input running ahead of wallclock
-	// past MaxAheadMs); in that case skip the buffer write so downstream
-	// consumers see a wallclock-paced stream.
-	if !wctx.normaliser.Apply(cl, time.Now()) {
+	// past MaxAheadMs) or buffered it during joint-seed hold; in either
+	// case skip the per-call buffer write. Joint-seed completion emits
+	// >1 packet (drained buffered packets + the current one) in output-
+	// PTS order — iterate over the slice so each lands in the buffer
+	// hub with its stamped PTS/DTS.
+	emits := wctx.normaliser.Apply(cl, time.Now())
+	if len(emits) == 0 {
 		return nil
 	}
-	if err := wctx.buf.Write(wctx.bufferWriteID, buffer.Packet{AV: cl}); err != nil {
-		slog.Error("ingestor: buffer write failed",
-			"stream_code", wctx.streamID,
-			"input_priority", wctx.input.Priority,
-			"err", err,
-		)
-		return err
+	for _, q := range emits {
+		if err := wctx.buf.Write(wctx.bufferWriteID, buffer.Packet{AV: q}); err != nil {
+			slog.Error("ingestor: buffer write failed",
+				"stream_code", wctx.streamID,
+				"input_priority", wctx.input.Priority,
+				"err", err,
+			)
+			return err
+		}
 	}
 	if wctx.lastWriteAt != nil {
 		wctx.lastWriteAt.Store(time.Now().UnixNano())
 	}
 	cb := wctx.cb
-	if cb != nil && cb.onPacket != nil {
-		cb.onPacket(wctx.streamID, wctx.input.Priority)
+	if cb == nil {
+		return nil
 	}
-	if cb != nil && cb.onPacketBytes != nil {
-		cb.onPacketBytes(wctx.streamID, wctx.input.Priority, len(p.Data))
-	}
-	if cb != nil && cb.onMedia != nil {
-		// Observer must not retain p.Data; if it needs persisted bytes
-		// (e.g. SPS extracted on a keyframe) it should copy them out itself.
-		pCopy := *p
-		cb.onMedia(wctx.streamID, wctx.input.Priority, &pCopy)
+	for _, q := range emits {
+		if cb.onPacket != nil {
+			cb.onPacket(wctx.streamID, wctx.input.Priority)
+		}
+		if cb.onPacketBytes != nil {
+			cb.onPacketBytes(wctx.streamID, wctx.input.Priority, len(q.Data))
+		}
+		if cb.onMedia != nil {
+			// Observer must not retain q.Data; if it needs persisted bytes
+			// (e.g. SPS extracted on a keyframe) it should copy them out itself.
+			qCopy := *q
+			cb.onMedia(wctx.streamID, wctx.input.Priority, &qCopy)
+		}
 	}
 	return nil
 }

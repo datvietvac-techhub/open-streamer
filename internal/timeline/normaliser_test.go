@@ -48,9 +48,9 @@ func TestPassthroughCases(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			origPTS, origDTS := tc.p.PTSms, tc.p.DTSms
-			keep := tc.n.Apply(tc.p, startWall)
-			if !keep {
-				t.Fatalf("pass-through case dropped: %+v", tc.p)
+			emits := tc.n.Apply(tc.p, startWall)
+			if len(emits) != 1 || emits[0] != tc.p {
+				t.Fatalf("pass-through case dropped or replaced: emits=%v", emits)
 			}
 			if tc.p.PTSms != origPTS || tc.p.DTSms != origDTS {
 				t.Fatalf("pass-through mutated packet: pts %d→%d dts %d→%d",
@@ -64,16 +64,18 @@ func TestPassthroughCases(t *testing.T) {
 
 	t.Run("nil receiver", func(t *testing.T) {
 		var n *Normaliser
-		if !n.Apply(&domain.AVPacket{}, startWall) {
-			t.Fatal("nil receiver must pass-through, not drop")
+		emits := n.Apply(&domain.AVPacket{}, startWall)
+		if len(emits) != 1 {
+			t.Fatalf("nil receiver must pass-through, not drop; emits=%v", emits)
 		}
 		n.OnSession(&domain.StreamSession{ID: 1})
 		n.Reset()
 	})
 
 	t.Run("nil packet", func(t *testing.T) {
-		if !New(DefaultConfig()).Apply(nil, startWall) {
-			t.Fatal("nil packet must return keep=true")
+		emits := New(DefaultConfig()).Apply(nil, startWall)
+		if len(emits) != 0 {
+			t.Fatalf("nil packet must return empty slice, got %v", emits)
 		}
 	})
 }
@@ -162,8 +164,8 @@ func TestDriftCapAhead(t *testing.T) {
 	// One frame "in the future" — input claims +2000 ms, wallclock at +200 ms.
 	// Expected drift = 2000 - 200 = 1800 > MaxAheadMs(500) → drop.
 	future := vPkt(2000, 2000)
-	if keep := n.Apply(future, startWall.Add(200*time.Millisecond)); keep {
-		t.Fatalf("drift-cap-ahead must drop packet that races wallclock; got keep=true, dts=%d", future.DTSms)
+	if emits := n.Apply(future, startWall.Add(200*time.Millisecond)); len(emits) != 0 {
+		t.Fatalf("drift-cap-ahead must drop packet that races wallclock; got emits=%v dts=%d", emits, future.DTSms)
 	}
 	diag := n.LastDiagnostic()
 	if !diag.Dropped {
@@ -189,8 +191,8 @@ func TestDriftCapBehind(t *testing.T) {
 	// Wallclock leaps 2 s while the source delivers a single +80 ms frame.
 	// Expected drift = 80 - 2080 = -2000 < -MaxBehindMs(-500) → re-anchor.
 	lag := vPkt(80, 80)
-	keep := n.Apply(lag, startWall.Add(2080*time.Millisecond))
-	if !keep {
+	emits := n.Apply(lag, startWall.Add(2080*time.Millisecond))
+	if len(emits) == 0 {
 		t.Fatal("behind-drift packet must NOT be dropped (only ahead-drift drops)")
 	}
 	if !n.LastDiagnostic().HardReanchored {
@@ -481,5 +483,212 @@ func TestDefaultConfigMatchesPTSRebaser(t *testing.T) {
 	}
 	if c.CrossTrackSnapMs != 1000 {
 		t.Fatalf("DefaultConfig CrossTrackSnapMs = %d, want 1000 (parity)", c.CrossTrackSnapMs)
+	}
+	if c.SeedHoldTimeoutMs != 0 {
+		t.Fatalf("DefaultConfig SeedHoldTimeoutMs = %d, want 0 (joint-seed opt-in)", c.SeedHoldTimeoutMs)
+	}
+}
+
+// jointSeedConfig returns a Normaliser config with joint-seed enabled
+// and a tight hold window so timeout tests run quickly.
+func jointSeedConfig(holdMs int64) Config {
+	c := DefaultConfig()
+	c.SeedHoldTimeoutMs = holdMs
+	return c
+}
+
+// TestJointSeedAudioLeadsVideo — the user-facing bug scenario. Source
+// emits the first audio packet ~500 ms BEFORE the first video packet
+// in source-PTS terms (the multicast scheduler had audio frames pre-
+// buffered ahead of video). The two arrive on the wire ~80 ms apart
+// in WALLCLOCK. Joint seed must:
+//
+//   - Anchor the EARLIER-source track (audio here) at output PTS=0.
+//   - Anchor the LATER-source track (video here) at output PTS=+475.
+//   - Preserve that V/A offset in the output timeline, NOT replace it
+//     with the network arrival skew (the bug fixed by this feature).
+//
+// Output PTS for same source moment X (assuming calibrated encoder
+// with audio.inPTS == video.inPTS for source moment X) is:
+//
+//	audio_out(X) = 0 + (X − audio_origin) = X − audio_origin
+//	video_out(X) = 475 + (X − video_origin) = X − video_origin + 475
+//
+// With audio_origin=A, video_origin=A+475, the two reduce to
+// audio_out(X) == video_out(X) — lip-sync preserved.
+func TestJointSeedAudioLeadsVideo(t *testing.T) {
+	n := New(jointSeedConfig(1000))
+
+	const audioOrigin uint64 = 69_579_246
+	const videoOrigin uint64 = 69_579_721 // 475 ms LATER than audio in source-DTS
+
+	// Video first packet arrives first in WALLCLOCK at t=0.
+	v := vPkt(videoOrigin, videoOrigin)
+	emits := n.Apply(v, startWall)
+	if len(emits) != 0 {
+		t.Fatalf("first video packet must be held during joint-seed; got %d emits", len(emits))
+	}
+
+	// Audio first packet arrives at t=78 ms (the observed worst-case
+	// network skew that the old wallclock-arrival fallback baked into
+	// the output PTS).
+	a := aPkt(audioOrigin, audioOrigin)
+	emits = n.Apply(a, startWall.Add(78*time.Millisecond))
+	if len(emits) != 2 {
+		t.Fatalf("joint-seed completion must emit drained + current = 2 packets; got %d", len(emits))
+	}
+
+	// Audio anchors at 0 (earlier in source). Audio packet emits first.
+	// Buffered packets are value-copied, so identity-compare only the
+	// current packet (a), not drained.
+	if !emits[0].Codec.IsAudio() {
+		t.Fatalf("current audio (earlier source) must emit first; got codec=%v", emits[0].Codec)
+	}
+	if emits[0] != a {
+		t.Fatal("current packet identity must be preserved (audio passed in by caller)")
+	}
+	if a.DTSms != 0 {
+		t.Fatalf("audio anchor: want DTS=0, got %d", a.DTSms)
+	}
+
+	// Video anchors at +475 (later in source by 475 ms). Drained packet
+	// is a copy of the buffered video, not the original v pointer.
+	if !emits[1].Codec.IsVideo() {
+		t.Fatalf("buffered video (later source) must emit second; got codec=%v", emits[1].Codec)
+	}
+	if emits[1].DTSms != 475 {
+		t.Fatalf("video anchor: want DTS=475 (preserving source delta), got %d", emits[1].DTSms)
+	}
+
+	// Sanity-check the post-seed steady state: subsequent video and
+	// audio packets for the SAME source moment must produce equal
+	// output PTS.
+	v2 := vPkt(videoOrigin+40, videoOrigin+40)
+	a2 := aPkt(audioOrigin+40, audioOrigin+40)
+	emitsV := n.Apply(v2, startWall.Add(118*time.Millisecond))
+	emitsA := n.Apply(a2, startWall.Add(119*time.Millisecond))
+	if len(emitsV) != 1 || len(emitsA) != 1 {
+		t.Fatalf("post-seed steady-state must emit one packet each; got v=%v a=%v", emitsV, emitsA)
+	}
+	// audio_origin+40 vs video_origin+40 differ by 475 in input space.
+	// With audio anchor 0 and video anchor 475, video subsequent →
+	// 0 + (videoOrigin+40 - videoOrigin) + 475 = 40 + 475 = 515 — wait
+	// no: video.outputAnchor=475, video.inputOrigin=videoOrigin. Output
+	// = 475 + (videoOrigin+40 - videoOrigin) = 515.
+	if v2.DTSms != 515 {
+		t.Fatalf("video subsequent: want DTS=515, got %d", v2.DTSms)
+	}
+	if a2.DTSms != 40 {
+		t.Fatalf("audio subsequent: want DTS=40, got %d", a2.DTSms)
+	}
+}
+
+// TestJointSeedVideoLeadsAudio — symmetric to TestJointSeedAudioLeadsVideo
+// but with the source emitting video first in source-DTS terms (the
+// normal case). Joint-seed must anchor video at 0 and audio at +delta.
+func TestJointSeedVideoLeadsAudio(t *testing.T) {
+	n := New(jointSeedConfig(1000))
+
+	const videoOrigin uint64 = 1_000_000
+	const audioOrigin uint64 = 1_000_055 // 55 ms LATER than video in source-DTS
+
+	// Audio arrives first in WALLCLOCK at t=0.
+	a := aPkt(audioOrigin, audioOrigin)
+	emits := n.Apply(a, startWall)
+	if len(emits) != 0 {
+		t.Fatalf("first audio packet must be held during joint-seed; got %d emits", len(emits))
+	}
+
+	// Video arrives at t=20 ms.
+	v := vPkt(videoOrigin, videoOrigin)
+	emits = n.Apply(v, startWall.Add(20*time.Millisecond))
+	if len(emits) != 2 {
+		t.Fatalf("joint-seed completion must emit 2 packets; got %d", len(emits))
+	}
+
+	// Video anchors at 0 (earlier in source). Video emits first.
+	if !emits[0].Codec.IsVideo() {
+		t.Fatalf("current video (earlier source) must emit first; got codec=%v", emits[0].Codec)
+	}
+	if emits[0] != v {
+		t.Fatal("current packet identity must be preserved (video passed in by caller)")
+	}
+	if v.DTSms != 0 {
+		t.Fatalf("video anchor: want DTS=0, got %d", v.DTSms)
+	}
+	// Audio anchors at +55. Drained packet is a copy of buffered audio.
+	if !emits[1].Codec.IsAudio() {
+		t.Fatalf("buffered audio (later source) must emit second; got codec=%v", emits[1].Codec)
+	}
+	if emits[1].DTSms != 55 {
+		t.Fatalf("audio anchor: want DTS=55, got %d", emits[1].DTSms)
+	}
+}
+
+// TestJointSeedTimeout — when the partner track never arrives, the
+// pending buffer drains via the wallclock-anchor fallback so a single-
+// track stream is not stalled forever.
+func TestJointSeedTimeout(t *testing.T) {
+	const holdMs int64 = 100
+	n := New(jointSeedConfig(holdMs))
+
+	// Video at t=0 — held during the joint-seed window.
+	v1 := vPkt(1000, 1000)
+	if emits := n.Apply(v1, startWall); len(emits) != 0 {
+		t.Fatalf("first video held during joint-seed; got %d emits", len(emits))
+	}
+	// Another video at t=40 — still held.
+	v2 := vPkt(1040, 1040)
+	if emits := n.Apply(v2, startWall.Add(40*time.Millisecond)); len(emits) != 0 {
+		t.Fatalf("second video held while still within hold window; got %d emits", len(emits))
+	}
+
+	// Third video at t=150 — past the 100 ms hold window. Drain triggers
+	// before processing v3: 2 drained + v3 itself = 3 packets.
+	v3 := vPkt(1080, 1080)
+	emits := n.Apply(v3, startWall.Add(150*time.Millisecond))
+	if len(emits) != 3 {
+		t.Fatalf("timeout drain must emit 2 drained + current = 3 packets; got %d", len(emits))
+	}
+	// Drained packets are value-copies of v1 and v2; only v3 retains the
+	// caller's original pointer. Stamped against pending anchor=0
+	// (wallclock-arrival fallback): v1 at origin → DTS=0; v2 → DTS=40;
+	// v3 (post-seed) → expected = anchor + (in − origin) = 0 + (1080 −
+	// 1000) = 80.
+	if emits[0].DTSms != 0 {
+		t.Fatalf("drained v1 DTS: want 0, got %d", emits[0].DTSms)
+	}
+	if emits[1].DTSms != 40 {
+		t.Fatalf("drained v2 DTS: want 40, got %d", emits[1].DTSms)
+	}
+	if emits[2] != v3 {
+		t.Fatal("current packet (v3) identity must be preserved")
+	}
+	if v3.DTSms != 80 {
+		t.Fatalf("v3 DTS: want 80, got %d", v3.DTSms)
+	}
+}
+
+// TestJointSeedOnSessionClearsPending — OnSession must clear the
+// pending buffer so a session boundary mid-hold doesn't leak stale
+// packets into the next session's output.
+func TestJointSeedOnSessionClearsPending(t *testing.T) {
+	n := New(jointSeedConfig(1000))
+
+	// Buffer one packet, then start a new session.
+	n.Apply(vPkt(1000, 1000), startWall)
+	n.OnSession(&domain.StreamSession{ID: 99})
+
+	// New session: audio arrives first. No buffered video should leak.
+	a := aPkt(50_000_000, 50_000_000)
+	emits := n.Apply(a, startWall.Add(100*time.Millisecond))
+	if len(emits) != 0 {
+		t.Fatalf("post-OnSession audio must be held (no stale buffer); got %d emits", len(emits))
+	}
+
+	v := vPkt(2000, 2000)
+	emits = n.Apply(v, startWall.Add(150*time.Millisecond))
+	if len(emits) != 2 {
+		t.Fatalf("post-OnSession joint-seed completion: want 2 emits, got %d", len(emits))
 	}
 }
