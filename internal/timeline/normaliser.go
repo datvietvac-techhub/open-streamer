@@ -24,11 +24,27 @@
 package timeline
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/ntt0601zcoder/open-streamer/internal/domain"
 )
+
+// trackKeyName returns a human-readable label for log fields. Kept in
+// the package so the diagnostic slog below stays self-contained.
+func trackKeyName(tk trackKey) string {
+	switch tk {
+	case trackVideo:
+		return "video"
+	case trackAudio:
+		return "audio"
+	case numTracks:
+		return "invalid"
+	default:
+		return "unknown"
+	}
+}
 
 // Config controls Normaliser behaviour. The zero value is valid and
 // produces a disabled Normaliser whose Apply is a pass-through — handy
@@ -61,6 +77,25 @@ type Config struct {
 	// last emitted DTS. Mirrors ptsrebaser.crossTrackSnapMs (1000 ms),
 	// exposed here as a knob so tests can vary it.
 	CrossTrackSnapMs int64
+
+	// SameTimebaseMaxMs is the maximum source-DTS gap at which the
+	// newly-seeded track is treated as sharing a clock with the other
+	// track (e.g. MPEG-TS PCR — V/A first-packet inDts within ms of each
+	// other). Within this threshold the new track's outputAnchor is
+	// computed as `other.outputAnchor + (inDts - other.inputOrigin)` so
+	// the source-side intrinsic A/V offset survives — independent of the
+	// transcoder's per-track wallclock arrival skew (B-frame decoder
+	// reorder buffers video by reorder_depth × frame_dur, e.g. 160 ms
+	// for 4-frame H.264 High Profile, while audio passes through
+	// immediately; without this branch the Normaliser would treat that
+	// arrival skew as the intrinsic offset and bake `audio_leads_video`
+	// into the output PTS).
+	//
+	// Above this gap the two source clocks are presumed independent
+	// (RTSP per-track RTP timebases differ by hours) and the new track
+	// falls back to the wallclock-arrival anchor — same behaviour as
+	// before this knob existed.
+	SameTimebaseMaxMs int64
 }
 
 // DefaultConfig matches ptsrebaser.DefaultConfig so a side-by-side run
@@ -68,9 +103,10 @@ type Config struct {
 // tests that want the stricter ahead / behind cap can override per call.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:          true,
-		JumpThresholdMs:  2000,
-		CrossTrackSnapMs: 1000,
+		Enabled:           true,
+		JumpThresholdMs:   2000,
+		CrossTrackSnapMs:  1000,
+		SameTimebaseMaxMs: 5000,
 	}
 }
 
@@ -156,6 +192,9 @@ func New(cfg Config) *Normaliser {
 	}
 	if cfg.JumpThresholdMs <= 0 {
 		cfg.JumpThresholdMs = 2000
+	}
+	if cfg.SameTimebaseMaxMs <= 0 {
+		cfg.SameTimebaseMaxMs = 5000
 	}
 	return &Normaliser{cfg: cfg}
 }
@@ -311,6 +350,34 @@ func (n *Normaliser) Apply(p *domain.AVPacket, now time.Time) bool {
 		track.lastOutputDts = target
 		assignTimes(p, target, cto)
 		n.totalReanch++
+		// Diagnostic log so operators can correlate visible A/V drift
+		// with the per-track re-anchor events that caused it. Independent
+		// per-track re-anchors (only V fires while A doesn't, or vice
+		// versa) shift the relative A/V offset by `drift` milliseconds
+		// without notifying consumers. Rate-limited to 1st event + every
+		// 50th so a session with sustained re-anchors doesn't flood the
+		// journal.
+		if n.totalReanch == 1 || n.totalReanch%50 == 0 {
+			var reason string
+			switch {
+			case regressed:
+				reason = "monotonic_regress"
+			case tooFarAhead:
+				reason = "jump_threshold"
+			case tooFarBehind:
+				reason = "max_behind"
+			}
+			slog.Info("timeline: hard re-anchor",
+				"session_id", n.sessionID,
+				"track", trackKeyName(tk),
+				"reason", reason,
+				"drift_ms", drift,
+				"actual_now_ms", actualNowMs,
+				"expected_dts_ms", expectedDts,
+				"new_anchor_ms", target,
+				"total_reanch", n.totalReanch,
+			)
+		}
 		n.lastDiag = Diagnostic{
 			Track:          tk,
 			Drift:          drift,
@@ -335,20 +402,49 @@ func (n *Normaliser) Apply(p *domain.AVPacket, now time.Time) bool {
 }
 
 // seedTrackLocked installs the per-track anchor on the first observed
-// packet of a track within the current session. Mirrors ptsrebaser's
-// progression-based cross-track snap: if the OTHER track has already
-// progressed more than CrossTrackSnapMs since its own seed, the new
-// track lands at the other track's lastOutputDts so V and A start in
-// lockstep regardless of how the upstream chose to interleave them.
+// packet of a track within the current session. Three cases:
+//
+//  1. Other track has progressed > CrossTrackSnapMs (mixer / burst):
+//     snap onto its lastOutputDts so the new track joins the live edge.
+//     Source-DTS delta wouldn't make sense — bursty mixer sources can
+//     have arbitrary intra-burst PTS span.
+//  2. Other track seeded recently AND source-DTS delta fits within
+//     SameTimebaseMaxMs (normal MPEG-TS startup): anchor at
+//     `other.outputAnchor + (inDts - other.inputOrigin)`. This preserves
+//     the encoder's intrinsic V/A offset that the wallclock-arrival
+//     anchor would otherwise lose to transcoder pipeline delay
+//     (decoder B-frame reorder buffers video by reorder_depth × frame_dur,
+//     audio passes through immediately — a 4-frame H.264 High Profile
+//     GOP injects 160 ms of audio-leading-video if we anchored both
+//     tracks at their respective wallclock arrival times).
+//  3. Source-DTS delta exceeds SameTimebaseMaxMs (RTSP per-track RTP
+//     with hour-scale timebase offsets): fall back to the wallclock
+//     arrival anchor — the source clocks are independent so the delta
+//     has no meaning.
 func (n *Normaliser) seedTrackLocked(
 	track *trackState, tk trackKey, inDts, actualNowMs, cto int64, p *domain.AVPacket,
 ) {
 	anchor := actualNowMs
 	otherTrack := &n.tracks[numTracks-1-tk]
+	anchorReason := "wallclock_first_track"
 	if otherTrack.seeded {
 		otherProgression := otherTrack.lastOutputDts - otherTrack.outputAnchor
 		if otherProgression > n.cfg.CrossTrackSnapMs {
 			anchor = otherTrack.lastOutputDts
+			anchorReason = "snap_to_other_live_edge"
+		} else {
+			sourceDelta := inDts - otherTrack.inputOrigin
+			if absInt64(sourceDelta) <= n.cfg.SameTimebaseMaxMs {
+				proposed := otherTrack.outputAnchor + sourceDelta
+				if proposed >= 0 {
+					anchor = proposed
+					anchorReason = "source_dts_delta"
+				} else {
+					anchorReason = "wallclock_proposed_negative"
+				}
+			} else {
+				anchorReason = "wallclock_independent_timebase"
+			}
 		}
 	}
 	track.seeded = true
@@ -356,6 +452,22 @@ func (n *Normaliser) seedTrackLocked(
 	track.outputAnchor = anchor
 	track.lastOutputDts = anchor
 	assignTimes(p, anchor, cto)
+
+	// Operator-visible seed log so a deploy can be verified by reading
+	// the journal: same source moment ⇒ V and A should land at the same
+	// output anchor (delta ≈ source-side intrinsic offset, NOT the
+	// pipeline arrival skew).
+	slog.Info("timeline: seed track",
+		"session_id", n.sessionID,
+		"track", trackKeyName(tk),
+		"reason", anchorReason,
+		"in_dts_ms", inDts,
+		"actual_now_ms", actualNowMs,
+		"anchor_ms", anchor,
+		"other_seeded", otherTrack.seeded,
+		"other_input_origin_ms", otherTrack.inputOrigin,
+		"other_output_anchor_ms", otherTrack.outputAnchor,
+	)
 }
 
 // LastDiagnostic returns a copy of the most recent Apply outcome. Used
