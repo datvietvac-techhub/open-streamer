@@ -1,0 +1,283 @@
+package native
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+
+	pb "github.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto"
+)
+
+// Server is the gRPC service handler that the per-stream transcoder
+// subprocess registers. One Run stream per stream lifetime — the
+// supervisor in the main open-streamer process opens it once on
+// Service.Start and closes it on Stop. Inside that stream we
+// instantiate exactly ONE StreamPipeline.
+//
+// Server is intentionally minimal: no per-process state, no
+// connection multiplexing. The subprocess is single-tenant (one
+// stream per subprocess) so all the lifecycle state lives inside
+// the Run method's local pipeline.
+type Server struct {
+	pb.UnimplementedTranscoderServer
+}
+
+// NewServer returns a ready-to-register gRPC handler. Kept as a
+// constructor (instead of zero-value &Server{}) so future server-
+// wide fields (metrics, logger) can be wired without changing call
+// sites.
+func NewServer() *Server {
+	return &Server{}
+}
+
+// Run is the bidi entry point. Lifecycle:
+//
+//  1. Read the first message — MUST be Configure, anything else is a
+//     protocol error and we terminate the stream.
+//  2. Build a StreamPipeline from the Configure body.
+//  3. Loop reading further Request messages:
+//     - Packet  → pipeline.ProcessPacket → emit each output packet
+//     as an Event_Packet on the response stream.
+//     - Switch  → pipeline.SwitchInput   → emit any flushed packets
+//     from the old decoder under the encoder's continuing PTS.
+//     - Stop    → flush pipeline, emit tail, return nil.
+//  4. If the client closes the stream (io.EOF on Recv), perform the
+//     same flush-then-return as Stop so we don't leak frames.
+//
+// Errors from the pipeline are sent back as a terminal Event_Error
+// and the stream returns the original error so gRPC surfaces it to
+// the client too.
+func (s *Server) Run(stream pb.Transcoder_RunServer) error {
+	first, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("native server: first recv: %w", err)
+	}
+	cfg := first.GetConfigure()
+	if cfg == nil {
+		return errors.New("native server: first message must be Configure")
+	}
+
+	pipeline, err := NewStreamPipeline(pipelineConfigFromProto(cfg))
+	if err != nil {
+		_ = stream.Send(terminalError(fmt.Sprintf("pipeline init: %s", err)))
+		return fmt.Errorf("native server: pipeline init: %w", err)
+	}
+	defer pipeline.Close()
+
+	slog.Info("native server: stream started",
+		"stream_code", cfg.GetStreamCode(),
+		"targets", len(cfg.GetTargets()),
+		"hw_backend", cfg.GetHwBackend().String(),
+	)
+
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			// Client half-closed. Flush + exit normally so the encoder
+			// tail makes it back over the wire.
+			return s.flushAndSend(stream, pipeline)
+		}
+		if err != nil {
+			return fmt.Errorf("native server: recv: %w", err)
+		}
+
+		if err := s.dispatch(stream, pipeline, req); err != nil {
+			_ = stream.Send(terminalError(err.Error()))
+			return err
+		}
+		// Stop body ends the stream cleanly after flushing.
+		if req.GetStop() != nil {
+			return nil
+		}
+	}
+}
+
+// dispatch routes one Request to the pipeline and sends back any
+// resulting events. Returns the first error from pipeline or send;
+// caller wraps it in a terminal Error event.
+func (s *Server) dispatch(stream pb.Transcoder_RunServer, p *StreamPipeline, req *pb.Request) error {
+	switch {
+	case req.GetPacket() != nil:
+		pkt := req.GetPacket()
+		// PTS / DTS not yet on the InputPacket proto — decoder uses
+		// in-band PES timing from the Annex-B bytes for B-frame reorder
+		// and the encoder derives its own monotonic output PTS via
+		// NextPTS, so passing 0 is correct for now. Adding wire-level
+		// PTS becomes important when audio joins the pipeline (P6).
+		out, err := p.ProcessPacket(pkt.GetData(), 0, 0)
+		if err != nil {
+			return fmt.Errorf("process packet: %w", err)
+		}
+		return s.sendOutputs(stream, out, 0)
+	case req.GetSwitch() != nil:
+		flushed, err := p.SwitchInput(DecoderConfig{
+			Codec: codecFromProto(req.GetSwitch().GetNewRawIngestBufId()),
+		})
+		if err != nil {
+			return fmt.Errorf("switch input: %w", err)
+		}
+		return s.sendOutputs(stream, flushed, 0)
+	case req.GetStop() != nil:
+		return s.flushAndSend(stream, p)
+	case req.GetConfigure() != nil:
+		// Reconfigure mid-stream is not supported in P4 — the
+		// pipeline's encoder dims / framerate are fixed at construct
+		// time. A future phase may forward a subset of Configure
+		// fields (watermark hot-reload, bitrate ladder swap) to the
+		// pipeline; for now reject so callers don't think it worked.
+		return errors.New("reconfigure after init is not supported in this phase")
+	default:
+		return errors.New("unknown Request body variant")
+	}
+}
+
+func (s *Server) flushAndSend(stream pb.Transcoder_RunServer, p *StreamPipeline) error {
+	tail, err := p.Flush()
+	if err != nil {
+		return fmt.Errorf("flush: %w", err)
+	}
+	return s.sendOutputs(stream, tail, 0)
+}
+
+// sendOutputs wraps each encoded packet in an Event_Packet and sends
+// it on the gRPC stream. targetIndex is forwarded so the supervisor
+// knows which rendition buffer to write into; today the pipeline only
+// emits one target (P3) so we hardcode 0.
+func (s *Server) sendOutputs(stream pb.Transcoder_RunServer, outs [][]byte, targetIndex int32) error {
+	for _, b := range outs {
+		if err := stream.Send(&pb.Event{
+			Body: &pb.Event_Packet{
+				Packet: &pb.OutputPacket{
+					TargetIndex: targetIndex,
+					Data:        b,
+				},
+			},
+		}); err != nil {
+			return fmt.Errorf("stream send: %w", err)
+		}
+	}
+	return nil
+}
+
+// terminalError builds an Event_Error with terminal=true so the
+// supervisor knows the subprocess is about to exit.
+func terminalError(msg string) *pb.Event {
+	return &pb.Event{
+		Body: &pb.Event_Error{
+			Error: &pb.Error{
+				Message:     msg,
+				TargetIndex: -1,
+				Terminal:    true,
+			},
+		},
+	}
+}
+
+// pipelineConfigFromProto adapts the wire-level ConfigureRequest into
+// the in-process PipelineConfig the StreamPipeline understands.
+//
+// P4 scope: only the first target is materialised into Encoder /
+// Scaler configs — multi-rendition fan-out lands in a future phase
+// where Pipeline grows to accept N encoders sharing one decoder.
+func pipelineConfigFromProto(c *pb.ConfigureRequest) PipelineConfig {
+	// Audio config is parsed via AudioConfigFromProto for forward-compat
+	// (caller surfaces it in logs) but not yet plumbed into
+	// StreamPipeline — the P3 pipeline is video-only.
+	_ = AudioConfigFromProto(c.GetAudio())
+	cfg := PipelineConfig{
+		Decoder: DecoderConfig{Codec: "h264"},
+	}
+	if len(c.GetTargets()) > 0 {
+		t := c.GetTargets()[0]
+		cfg.Encoder = EncoderConfig{
+			Codec:       encoderCodecForBackend(c.GetHwBackend(), t.GetCodec()),
+			Width:       int(t.GetWidth()),
+			Height:      int(t.GetHeight()),
+			Framerate:   framerateOrDefault(t.GetFramerate()),
+			BitrateKbps: int(t.GetBitrateKbps()),
+			MaxBitrate:  int(t.GetMaxBitrateKbps()),
+			GOPSize:     int(t.GetGopSeconds()) * framerateOrDefault(t.GetFramerate()),
+			MaxBFrames:  bframesOrDefault(t.GetBframesOrNeg1()),
+			Options:     map[string]string{},
+		}
+		if t.GetPreset() != "" {
+			cfg.Encoder.Options["preset"] = t.GetPreset()
+		}
+		if t.GetProfile() != "" {
+			cfg.Encoder.Options["profile"] = t.GetProfile()
+		}
+		if t.GetLevel() != "" {
+			cfg.Encoder.Options["level"] = t.GetLevel()
+		}
+		cfg.Scaler = ScalerConfig{
+			DstWidth:    int(t.GetWidth()),
+			DstHeight:   int(t.GetHeight()),
+			DstPixelFmt: 0, // PixelFormatYuv420P; filled by NewScaler default. P5 will probe per-backend.
+		}
+	}
+	return cfg
+}
+
+// AudioConfigFromProto narrows the proto AudioConfig to the
+// PipelineConfig's audio struct. Exposed for use by future
+// audio pipeline wiring; not yet consumed by StreamPipeline.
+func AudioConfigFromProto(a *pb.AudioConfig) AudioConfig {
+	if a == nil {
+		return AudioConfig{}
+	}
+	return AudioConfig{
+		Copy:       a.GetCopy(),
+		Codec:      a.GetCodec(),
+		BitrateK:   int(a.GetBitrateK()),
+		SampleRate: int(a.GetSampleRate()),
+		Channels:   int(a.GetChannels()),
+		Normalize:  a.GetNormalize(),
+	}
+}
+
+// encoderCodecForBackend resolves the per-backend libavcodec encoder
+// name. P4 falls back to libx264 when explicit codec is empty (matches
+// EncoderConfig defaults). P5 will fold per-backend H.265 + AV1 in.
+func encoderCodecForBackend(hw pb.HWBackend, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	switch hw {
+	case pb.HWBackend_HW_BACKEND_NVENC:
+		return "h264_nvenc"
+	case pb.HWBackend_HW_BACKEND_VAAPI:
+		return "h264_vaapi"
+	case pb.HWBackend_HW_BACKEND_VIDEOTOOLBOX:
+		return "h264_videotoolbox"
+	case pb.HWBackend_HW_BACKEND_QSV:
+		return "h264_qsv"
+	case pb.HWBackend_HW_BACKEND_CPU, pb.HWBackend_HW_BACKEND_UNSPECIFIED:
+		fallthrough
+	default:
+		return "libx264"
+	}
+}
+
+func framerateOrDefault(f float64) int {
+	if f <= 0 {
+		return 25
+	}
+	return int(f)
+}
+
+func bframesOrDefault(v int32) int {
+	if v < 0 {
+		return -1 // encoder default per EncoderConfig contract
+	}
+	return int(v)
+}
+
+// codecFromProto today returns "h264" — the SwitchInput proto carries
+// only the new raw ingest buffer ID; the codec is implied by the
+// upstream's media info which the supervisor will probe separately
+// and pass via a future proto extension. Until then we always pick
+// h264 because that is what all production sources speak.
+func codecFromProto(_ string) string {
+	return "h264"
+}
