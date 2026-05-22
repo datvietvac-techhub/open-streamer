@@ -146,40 +146,6 @@ func profileErrMsg(i int) string {
 	return "crash-" + string(rune('0'+i))
 }
 
-// stderrTail is the diagnostic ring that turns "exit status 8" into actionable
-// error context (filter-not-found, codec init failure, …). It must keep newest
-// at the end and cap at the configured size.
-func TestStderrTail_PushAndCap(t *testing.T) {
-	t.Parallel()
-	tail := newStderrTail(3)
-	for i := 0; i < 5; i++ {
-		tail.push(profileErrMsg(i))
-	}
-	got := tail.snapshot()
-	require.Len(t, got, 3, "ring buffer must cap at configured size")
-	require.Equal(t, []string{"crash-2", "crash-3", "crash-4"}, got, "oldest dropped, newest kept at end")
-}
-
-func TestStderrTail_SnapshotIsDefensiveCopy(t *testing.T) {
-	t.Parallel()
-	tail := newStderrTail(4)
-	tail.push("first")
-	snap := tail.snapshot()
-	tail.push("second")
-	require.Equal(t, []string{"first"}, snap, "snapshot must not see post-snapshot mutations")
-}
-
-func TestFormatStderrTail(t *testing.T) {
-	t.Parallel()
-	require.Equal(t, "", formatStderrTail(nil), "no lines → empty (caller skips appending)")
-	require.Equal(t, "", formatStderrTail([]string{}), "empty slice → empty")
-	require.Equal(t, "only line", formatStderrTail([]string{"only line"}))
-	require.Equal(t,
-		"No such filter: 'pad_cuda' | Error initializing simple filtergraph",
-		formatStderrTail([]string{
-			"No such filter: 'pad_cuda'",
-			"Error initializing simple filtergraph",
-		}),
-		"multi-line joined with ' | ' for compact one-line embedding",
-	)
-}
+// Stderr-tail tests deleted along with the FFmpeg subprocess implementation —
+// the native pipeline raises errors via go-astiav return codes, no stderr to
+// parse. See the `native` subpackage for the replacement diagnostics surface.

@@ -1,0 +1,151 @@
+// transcoder.proto is the wire contract between the main open-streamer
+// process and a per-stream open-streamer-transcoder subprocess.
+//
+// One Unix-domain socket per stream. The supervisor in
+// internal/transcoder/service.go opens a bidi stream and pushes raw
+// ingest TS bytes + control messages; the subprocess returns encoded
+// MPEG-TS chunks per rendition + health / error events.
+//
+// Single bidi stream (not unary RPCs) so a missed packet on the wire
+// kills the stream and the supervisor respawns the subprocess — keeps
+// failure semantics identical to crash recovery.
+//
+// P0 SCOPE: contract sketch only. Code generation (protoc → .pb.go) is
+// deferred to P4 when the gRPC supervisor lands. Until then the file
+// documents the intended wire layout for review.
+
+syntax = "proto3";
+
+package transcoder.v1;
+
+option go_package = "github.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto;transcoderpb";
+
+service Transcoder {
+  // Run is the per-stream bidi stream. The supervisor sends ConfigureRequest
+  // first (always), then a stream of InputPacket / SwitchInput / Stop
+  // messages; the subprocess streams back OutputPacket / Health / Error
+  // until the stream ends or an Error with terminal=true arrives.
+  rpc Run(stream Request) returns (stream Event);
+}
+
+message Request {
+  oneof body {
+    ConfigureRequest configure = 1;
+    InputPacket      packet    = 2;
+    SwitchInput      switch    = 3;
+    Stop             stop      = 4;
+  }
+}
+
+message Event {
+  oneof body {
+    OutputPacket packet = 1;
+    Health       health = 2;
+    Error        error  = 3;
+  }
+}
+
+// ─── Control ────────────────────────────────────────────────────────────
+
+message ConfigureRequest {
+  string  stream_code        = 1;
+  string  raw_ingest_buf_id  = 2;
+  HWBackend hw_backend       = 3;
+  repeated Target targets    = 4;
+  AudioConfig audio          = 5;
+  WatermarkConfig watermark  = 6;
+}
+
+enum HWBackend {
+  HW_BACKEND_UNSPECIFIED  = 0;
+  HW_BACKEND_CPU          = 1;  // libx264 / libx265
+  HW_BACKEND_NVENC        = 2;  // NVIDIA
+  HW_BACKEND_VAAPI        = 3;  // Intel / AMD on Linux
+  HW_BACKEND_VIDEOTOOLBOX = 4;  // macOS
+  HW_BACKEND_QSV          = 5;  // Intel Quick Sync
+}
+
+message Target {
+  string output_buf_id     = 1;
+  int32  index             = 2;
+  int32  width             = 3;
+  int32  height            = 4;
+  int32  bitrate_kbps      = 5;
+  int32  max_bitrate_kbps  = 6;
+  double framerate         = 7;
+  int32  gop_seconds       = 8;
+  string codec             = 9;
+  string preset            = 10;
+  string profile           = 11;
+  string level             = 12;
+  // Bframes and refs use sentinel -1 for "encoder default" because
+  // proto3 cannot distinguish absent int32 from zero.
+  int32  bframes_or_neg1   = 13;
+  int32  refs_or_neg1      = 14;
+  string sar               = 15;
+  string resize_mode       = 16;
+}
+
+message AudioConfig {
+  bool   copy        = 1;
+  string codec       = 2;
+  int32  bitrate_k   = 3;
+  int32  sample_rate = 4;
+  int32  channels    = 5;
+  bool   normalize   = 6;
+}
+
+message WatermarkConfig {
+  bool   enabled  = 1;
+  string type     = 2;   // "text" | "image"
+  string text     = 3;
+  string asset_path = 4;
+  string position = 5;
+  int32  offset_x = 6;
+  int32  offset_y = 7;
+  double opacity  = 8;
+  int32  font_size = 9;
+  string font_color = 10;
+  string font_file  = 11;
+  bool   resize     = 12;
+}
+
+// ─── Data ──────────────────────────────────────────────────────────────
+
+message InputPacket {
+  bytes  data           = 1; // raw MPEG-TS bytes from the buffer hub
+  bool   session_start  = 2; // mirrors buffer.Packet.SessionStart
+  int64  session_id     = 3;
+}
+
+message OutputPacket {
+  int32  target_index   = 1; // matches Target.index
+  bytes  data           = 2; // encoded MPEG-TS chunk for the rendition buffer
+}
+
+message SwitchInput {
+  string new_raw_ingest_buf_id = 1;
+}
+
+message Stop {
+  string reason = 1;
+}
+
+// ─── Telemetry ─────────────────────────────────────────────────────────
+
+message Health {
+  // Cumulative restart counter per profile so the supervisor can mirror
+  // it into transcoder.RuntimeStatus without state of its own.
+  message Profile {
+    int32 index         = 1;
+    int32 restart_count = 2;
+    bool  unhealthy     = 3;
+  }
+  repeated Profile profiles = 1;
+}
+
+message Error {
+  string message     = 1;
+  int32  target_index = 2; // -1 = stream-level
+  bool   terminal    = 3;  // true = subprocess will exit after sending
+}

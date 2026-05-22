@@ -78,7 +78,6 @@ func TestJSONStreamRepo_SaveAndFindByCode(t *testing.T) {
 	assert.Equal(t, want.Transcoder.Global.FPS, got.Transcoder.Global.FPS)
 	assert.Equal(t, want.Transcoder.Global.GOP, got.Transcoder.Global.GOP)
 	assert.Equal(t, want.Transcoder.Global.DeviceID, got.Transcoder.Global.DeviceID)
-	assert.Equal(t, want.Transcoder.ExtraArgs, got.Transcoder.ExtraArgs)
 
 	assert.Equal(t, want.Protocols, got.Protocols)
 

@@ -101,7 +101,7 @@ const docTemplate = `{
         },
         "/config/transcoder/probe": {
             "post": {
-                "description": "Inspects the binary at ffmpeg_path (empty = $PATH) and reports which required / optional encoders + muxers are available. Pure check — does not modify config.",
+                "description": "P0 stub — always returns ok=true. Real capability probe will be reintroduced once the native libav pipeline lands.",
                 "consumes": [
                     "application/json"
                 ],
@@ -111,33 +111,16 @@ const docTemplate = `{
                 "tags": [
                     "system"
                 ],
-                "summary": "Probe an FFmpeg binary for app compatibility.",
-                "parameters": [
-                    {
-                        "description": "Path to probe (empty = use $PATH)",
-                        "name": "body",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/handler.probeRequest"
-                        }
-                    }
-                ],
+                "summary": "Probe transcoder capabilities (stub during native migration).",
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/transcoder.ProbeResult"
+                            "$ref": "#/definitions/handler.probeStubResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/apidocs.ErrorBody"
-                        }
-                    },
-                    "502": {
-                        "description": "Bad Gateway",
                         "schema": {
                             "$ref": "#/definitions/apidocs.ErrorBody"
                         }
@@ -3410,23 +3393,8 @@ const docTemplate = `{
                 "decoder": {
                     "$ref": "#/definitions/domain.DecoderConfig"
                 },
-                "extra_args": {
-                    "description": "ExtraArgs are raw FFmpeg arguments appended after the generated command.\nUse with caution — may conflict with generated arguments.",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
                 "global": {
                     "$ref": "#/definitions/domain.TranscoderGlobalConfig"
-                },
-                "mode": {
-                    "description": "Mode selects the FFmpeg process topology. Empty = TranscoderModeMulti.",
-                    "allOf": [
-                        {
-                            "$ref": "#/definitions/domain.TranscoderMode"
-                        }
-                    ]
                 },
                 "video": {
                     "$ref": "#/definitions/domain.VideoTranscodeConfig"
@@ -3457,17 +3425,6 @@ const docTemplate = `{
                     ]
                 }
             }
-        },
-        "domain.TranscoderMode": {
-            "type": "string",
-            "enum": [
-                "multi",
-                "per_profile"
-            ],
-            "x-enum-varnames": [
-                "TranscoderModeMulti",
-                "TranscoderModePerProfile"
-            ]
         },
         "domain.VODMount": {
             "type": "object",
@@ -3853,14 +3810,6 @@ const docTemplate = `{
                                 }
                             }
                         },
-                        "mode": {
-                            "description": "Mode is the per-stream FFmpeg topology default applied when\nStream.Transcoder.Mode is left empty. UI uses this as the\nplaceholder for the mode selector — operators see the real\napplied default (\"multi\") instead of generic \"default\" text.",
-                            "allOf": [
-                                {
-                                    "$ref": "#/definitions/domain.TranscoderMode"
-                                }
-                            ]
-                        },
                         "video": {
                             "type": "object",
                             "properties": {
@@ -3917,11 +3866,14 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.probeRequest": {
+        "handler.probeStubResponse": {
             "type": "object",
             "properties": {
-                "ffmpeg_path": {
+                "notice": {
                     "type": "string"
+                },
+                "ok": {
+                    "type": "boolean"
                 }
             }
         },
@@ -4156,60 +4108,6 @@ const docTemplate = `{
                 }
             }
         },
-        "transcoder.ProbeResult": {
-            "type": "object",
-            "properties": {
-                "bsfs": {
-                    "description": "BSFs lists bitstream-filter support detected via ` + "`" + `ffmpeg -bsfs` + "`" + `.\nBitstream filters operate on already-encoded packets (no frame\npipeline impact), so the arg builders use them as zero-cost\nalternatives to certain ` + "`" + `-vf` + "`" + ` filters when available. Missing\nany of these falls back gracefully to the legacy filter path.",
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "boolean"
-                    }
-                },
-                "encoders": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "object",
-                        "additionalProperties": {
-                            "type": "boolean"
-                        }
-                    }
-                },
-                "errors": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                },
-                "filters": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "boolean"
-                    }
-                },
-                "muxers": {
-                    "type": "object",
-                    "additionalProperties": {
-                        "type": "boolean"
-                    }
-                },
-                "ok": {
-                    "type": "boolean"
-                },
-                "path": {
-                    "type": "string"
-                },
-                "version": {
-                    "type": "string"
-                },
-                "warnings": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    }
-                }
-            }
-        },
         "transcoder.ProfileSnapshot": {
             "type": "object",
             "properties": {
@@ -4220,19 +4118,13 @@ const docTemplate = `{
                     }
                 },
                 "index": {
-                    "description": "0-based ladder index; track label = track_\u003cindex+1\u003e",
                     "type": "integer"
                 },
                 "restart_count": {
                     "type": "integer"
                 },
                 "status": {
-                    "description": "CURRENT health, not history",
-                    "allOf": [
-                        {
-                            "$ref": "#/definitions/transcoder.ProfileStatus"
-                        }
-                    ]
+                    "$ref": "#/definitions/transcoder.ProfileStatus"
                 },
                 "track": {
                     "type": "string"

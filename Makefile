@@ -11,6 +11,15 @@ BIN_DIR     := bin
 BIN_NAME    := open-streamer
 INSTALL_SH  := build/install.sh
 
+# Per-stream transcoder subprocess (in-process libavcodec pipeline).
+# Built as a separate binary so the supervisor in internal/transcoder/
+# service.go can crash-recover one stream without taking down the whole
+# server. The native package needs cgo + libav-dev headers — install:
+#   apt install libavcodec-dev libavfilter-dev libavformat-dev \
+#               libswscale-dev libavutil-dev pkg-config
+TRANSCODER_PKG  := ./cmd/open-streamer-transcoder
+TRANSCODER_NAME := open-streamer-transcoder
+
 # --- go ---
 GO          ?= go
 GOFLAGS     ?=
@@ -45,6 +54,14 @@ LDFLAGS     ?= -s -w \
 build: ## Compile server binary to $(BIN_DIR)/$(BIN_NAME) with version stamping
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/$(BIN_NAME) $(MAIN_PKG)
+
+.PHONY: build-transcoder
+build-transcoder: ## Compile per-stream transcoder subprocess (cgo + libav-dev required)
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/$(TRANSCODER_NAME) $(TRANSCODER_PKG)
+
+.PHONY: build-all
+build-all: build build-transcoder ## Build both server + transcoder binaries
 
 .PHONY: run
 run: ## Run server without building a persistent binary

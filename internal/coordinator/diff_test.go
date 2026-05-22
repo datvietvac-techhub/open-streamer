@@ -39,35 +39,9 @@ func passthroughStream() *domain.Stream {
 	return s
 }
 
-// Mode toggle (multi ↔ legacy) flips FFmpeg process topology — the running
-// pipeline must be torn down and rebuilt. Empty Mode normalises to multi
-// so a config that just dropped the field doesn't trip a phantom restart.
-func TestComputeDiffTranscoderModeToggleTriggersTopology(t *testing.T) {
-	t.Run("multi → legacy", func(t *testing.T) {
-		old := baseStream()
-		new := baseStream()
-		new.Transcoder.Mode = domain.TranscoderModePerProfile
-		assert.True(t, ComputeDiff(old, new).TranscoderTopologyChanged)
-	})
-	t.Run("legacy → multi", func(t *testing.T) {
-		old := baseStream()
-		old.Transcoder.Mode = domain.TranscoderModePerProfile
-		new := baseStream()
-		new.Transcoder.Mode = domain.TranscoderModeMulti
-		assert.True(t, ComputeDiff(old, new).TranscoderTopologyChanged)
-	})
-	t.Run("empty stays empty (no phantom restart)", func(t *testing.T) {
-		old := baseStream()
-		new := baseStream()
-		assert.False(t, ComputeDiff(old, new).TranscoderTopologyChanged)
-	})
-	t.Run("empty → multi (treated as no-op)", func(t *testing.T) {
-		old := baseStream()
-		new := baseStream()
-		new.Transcoder.Mode = domain.TranscoderModeMulti
-		assert.False(t, ComputeDiff(old, new).TranscoderTopologyChanged)
-	})
-}
+// Transcoder topology toggle test removed alongside TranscoderConfig.Mode
+// in the native-transcoder migration. The native pipeline has a single
+// topology; nothing for the diff engine to switch between.
 
 func TestComputeDiff_WatermarkAddedTriggersTopology(t *testing.T) {
 	old := baseStream()

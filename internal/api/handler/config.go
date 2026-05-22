@@ -205,16 +205,12 @@ func (h *ConfigHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate FFmpeg path before Apply when transcoder.ffmpeg_path is
-	// changing — Apply persists immediately and would happily save a
-	// broken path that crashes every transcoder restart afterwards. Only
-	// re-probe when the path actually changed (probe is ~50ms × 3 sub-
-	// invocations; not worth running on unrelated config edits).
-	if h.transcoderPathChanged(current, &merged) {
-		if vErr := h.validateTranscoderPath(r.Context(), &merged); vErr != nil {
-			writeError(w, http.StatusBadRequest, vErr.code, vErr.message)
-			return
-		}
+	// FFmpeg path validation removed in P0 of the native transcoder
+	// migration — see internal/transcoder/native. Until in-process libav
+	// capability probe lands, save-time accepts any transcoder config.
+	if vErr := h.validateTranscoderPath(r.Context(), &merged); vErr != nil {
+		writeError(w, http.StatusBadRequest, vErr.code, vErr.message)
+		return
 	}
 
 	if err := h.rtm.Apply(r.Context(), &merged); err != nil {

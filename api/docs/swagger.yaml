@@ -1451,19 +1451,8 @@ definitions:
         $ref: '#/definitions/domain.AudioTranscodeConfig'
       decoder:
         $ref: '#/definitions/domain.DecoderConfig'
-      extra_args:
-        description: |-
-          ExtraArgs are raw FFmpeg arguments appended after the generated command.
-          Use with caution — may conflict with generated arguments.
-        items:
-          type: string
-        type: array
       global:
         $ref: '#/definitions/domain.TranscoderGlobalConfig'
-      mode:
-        allOf:
-        - $ref: '#/definitions/domain.TranscoderMode'
-        description: Mode selects the FFmpeg process topology. Empty = TranscoderModeMulti.
       video:
         $ref: '#/definitions/domain.VideoTranscodeConfig'
     type: object
@@ -1483,14 +1472,6 @@ definitions:
         - $ref: '#/definitions/domain.HWAccel'
         description: HW selects the acceleration backend.
     type: object
-  domain.TranscoderMode:
-    enum:
-    - multi
-    - per_profile
-    type: string
-    x-enum-varnames:
-    - TranscoderModeMulti
-    - TranscoderModePerProfile
   domain.VODMount:
     properties:
       comment:
@@ -1834,14 +1815,6 @@ definitions:
               hw:
                 $ref: '#/definitions/domain.HWAccel'
             type: object
-          mode:
-            allOf:
-            - $ref: '#/definitions/domain.TranscoderMode'
-            description: |-
-              Mode is the per-stream FFmpeg topology default applied when
-              Stream.Transcoder.Mode is left empty. UI uses this as the
-              placeholder for the mode selector — operators see the real
-              applied default ("multi") instead of generic "default" text.
           video:
             properties:
               bitrate_k:
@@ -1883,10 +1856,12 @@ definitions:
       live_window:
         type: integer
     type: object
-  handler.probeRequest:
+  handler.probeStubResponse:
     properties:
-      ffmpeg_path:
+      notice:
         type: string
+      ok:
+        type: boolean
     type: object
   handler.rtspListenerDefaults:
     properties:
@@ -2063,47 +2038,6 @@ definitions:
           $ref: '#/definitions/publisher.PushSnapshot'
         type: array
     type: object
-  transcoder.ProbeResult:
-    properties:
-      bsfs:
-        additionalProperties:
-          type: boolean
-        description: |-
-          BSFs lists bitstream-filter support detected via `ffmpeg -bsfs`.
-          Bitstream filters operate on already-encoded packets (no frame
-          pipeline impact), so the arg builders use them as zero-cost
-          alternatives to certain `-vf` filters when available. Missing
-          any of these falls back gracefully to the legacy filter path.
-        type: object
-      encoders:
-        additionalProperties:
-          additionalProperties:
-            type: boolean
-          type: object
-        type: object
-      errors:
-        items:
-          type: string
-        type: array
-      filters:
-        additionalProperties:
-          type: boolean
-        type: object
-      muxers:
-        additionalProperties:
-          type: boolean
-        type: object
-      ok:
-        type: boolean
-      path:
-        type: string
-      version:
-        type: string
-      warnings:
-        items:
-          type: string
-        type: array
-    type: object
   transcoder.ProfileSnapshot:
     properties:
       errors:
@@ -2111,14 +2045,11 @@ definitions:
           $ref: '#/definitions/domain.ErrorEntry'
         type: array
       index:
-        description: 0-based ladder index; track label = track_<index+1>
         type: integer
       restart_count:
         type: integer
       status:
-        allOf:
-        - $ref: '#/definitions/transcoder.ProfileStatus'
-        description: CURRENT health, not history
+        $ref: '#/definitions/transcoder.ProfileStatus'
       track:
         type: string
     type: object
@@ -2298,32 +2229,20 @@ paths:
     post:
       consumes:
       - application/json
-      description: Inspects the binary at ffmpeg_path (empty = $PATH) and reports
-        which required / optional encoders + muxers are available. Pure check — does
-        not modify config.
-      parameters:
-      - description: Path to probe (empty = use $PATH)
-        in: body
-        name: body
-        required: true
-        schema:
-          $ref: '#/definitions/handler.probeRequest'
+      description: P0 stub — always returns ok=true. Real capability probe will be
+        reintroduced once the native libav pipeline lands.
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/transcoder.ProbeResult'
+            $ref: '#/definitions/handler.probeStubResponse'
         "400":
           description: Bad Request
           schema:
             $ref: '#/definitions/apidocs.ErrorBody'
-        "502":
-          description: Bad Gateway
-          schema:
-            $ref: '#/definitions/apidocs.ErrorBody'
-      summary: Probe an FFmpeg binary for app compatibility.
+      summary: Probe transcoder capabilities (stub during native migration).
       tags:
       - system
   /config/yaml:
