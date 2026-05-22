@@ -1,0 +1,74 @@
+# Dockerfile.transcoder — cross-build the per-stream transcoder
+# subprocess for linux/amd64 from any Docker host using the pinned
+# open-streamer-builder image.
+#
+# Pre-requisite: builder image must exist locally (or be pullable):
+#   make builder-image
+#
+# Build the transcoder:
+#   make build-transcoder-linux
+#
+# Output: dist/transcoder-linux-amd64/
+#   ├── open-streamer-transcoder    (the binary)
+#   └── lib/libav*.so*              (libavcodec, libavfilter, ...
+#                                    every shared object the binary
+#                                    dlopens at runtime — bundled so
+#                                    target hosts on FFmpeg 6/7 can
+#                                    run it without apt changes)
+#
+# Caller deploys both: scp the directory tree to the target, then
+# launch with LD_LIBRARY_PATH=<install-dir>/lib so the loader finds
+# the bundled .so files instead of the system's older libav.
+
+ARG BUILDER_IMAGE=open-streamer-builder:v1
+FROM ${BUILDER_IMAGE} AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/go/pkg/mod \
+    go mod download
+COPY . .
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/go/pkg/mod \
+    CGO_ENABLED=1 go build \
+      -ldflags="-s -w \
+        -X github.com/ntt0601zcoder/open-streamer/pkg/version.Version=${VERSION} \
+        -X github.com/ntt0601zcoder/open-streamer/pkg/version.Commit=${COMMIT}" \
+      -o /out/open-streamer-transcoder ./cmd/open-streamer-transcoder
+
+# Bundle stage — walk ldd to collect every libav* / libsw* shared
+# object the binary needs. Two passes catch transitive deps (libavcodec
+# depends on libavutil + libswresample, etc.). Caller relies on
+# LD_LIBRARY_PATH at runtime to point the loader at this lib directory
+# before the target host's system libav.
+FROM build AS bundle
+RUN mkdir -p /out/lib && \
+    LIBS=$(ldd /out/open-streamer-transcoder | awk '/=>/ {print $3}' | grep -E '/usr/lib/.*lib(av|sw)' || true) && \
+    for so in $LIBS; do cp -L "$so" /out/lib/; done && \
+    # Second pass: deps of the deps.
+    for round in 1 2; do \
+      for f in /out/lib/*.so* ; do \
+        deps=$(ldd "$f" 2>/dev/null | awk '/=>/ {print $3}' | grep -E '/usr/lib/.*lib(av|sw)' || true); \
+        for dep in $deps; do \
+          [ -f "/out/lib/$(basename $dep)" ] || cp -L "$dep" /out/lib/; \
+        done; \
+      done; \
+    done && \
+    # Recreate the SONAME symlinks (libavcodec.so.62 -> libavcodec.so.62.0.100).
+    # ld.so resolves by SONAME, not by full filename, so missing the
+    # symlinks would leave the binary unable to find its own bundled
+    # libs at runtime.
+    cd /out/lib && \
+    for f in *.so.*.*.*; do \
+      soname=$(echo "$f" | sed -E 's/(\.so\.[0-9]+)\..*/\1/'); \
+      [ -L "$soname" ] || ln -sf "$f" "$soname"; \
+    done && \
+    ls -la /out/lib/ | head -30
+
+FROM scratch AS export
+COPY --from=bundle /out/open-streamer-transcoder /
+COPY --from=bundle /out/lib/ /lib/
