@@ -159,6 +159,8 @@ func TestEncoder_NextPTSMonotonic(t *testing.T) {
 // — kept "NV12" in the function name because the production frame
 // holder uses NV12 from NVDEC and we want grep-continuity. P3 will
 // switch the helper to NV12 once the scaler delivers them.
+//
+//nolint:unparam // pixFmt fixed to PixelFormatYuv420P today; will accept NV12 in P3.
 func allocTestNV12Frame(t *testing.T, width, height int, pixFmt astiav.PixelFormat, pts int64) *astiav.Frame {
 	t.Helper()
 	f := astiav.AllocFrame()
