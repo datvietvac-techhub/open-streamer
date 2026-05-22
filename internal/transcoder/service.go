@@ -22,7 +22,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -112,16 +116,13 @@ type RuntimeStatus struct {
 // transcoder subprocess. baseCtx / rawIngest / tc are populated by the
 // future Start path; lint-suppressed until P1 wires them.
 type streamWorker struct {
-	//nolint:unused // populated by native runner spawn in P1
-	baseCtx context.Context
-	// baseCancel is used today by Stop() to wind down the goroutine pool.
+	baseCtx    context.Context //nolint:containedctx // pipelinex spawn pattern; cancel exposed via baseCancel
 	baseCancel context.CancelFunc
-	//nolint:unused // populated by native runner spawn in P1
-	rawIngest domain.StreamCode
-	//nolint:unused // populated by native runner spawn in P1
-	tc       *domain.TranscoderConfig
-	mu       sync.Mutex
-	profiles map[int]*profileWorker
+	rawIngest  domain.StreamCode
+	tc         *domain.TranscoderConfig
+	supervisor *supervisor // the native subprocess + gRPC supervisor; nil only in tests
+	mu         sync.Mutex
+	profiles   map[int]*profileWorker
 }
 
 // Service is the public transcoder entry point. Public API is preserved
@@ -290,6 +291,8 @@ func (s *Service) fireUnhealthyIfTransitioned(streamID domain.StreamCode, profil
 }
 
 // fireHealthyIfTransitioned mirrors fireUnhealthyIfTransitioned for recovery.
+//
+//nolint:unparam // profileIndex=0 today (single-encoder supervisor); per-profile granularity returns in P5+ multi-rendition phase.
 func (s *Service) fireHealthyIfTransitioned(streamID domain.StreamCode, profileIndex int) {
 	if !s.markProfileHealthy(streamID, profileIndex) {
 		return
@@ -335,12 +338,19 @@ func (s *Service) Config() config.TranscoderConfig {
 	return s.cfg
 }
 
-// Start launches the transcoder pipeline for a stream.
+// Start launches the native transcoder subprocess for a stream and
+// wires it to the raw-ingest + per-rendition buffer-hub entries.
 //
-// MIGRATION STUB: returns ErrNotImplemented until the native runner lands.
-// Coordinator unwinds the stream's buffers / publisher / manager entry on
-// error, so the rest of the server stays healthy. Streams without a
-// transcoder configuration are unaffected (Start is never called for them).
+// Resolves the open-streamer-transcoder binary, spawns it on a unique
+// Unix-domain socket, opens the gRPC stream, forwards Configure +
+// raw-ingest bytes, and pipes encoded output back into the rendition
+// buffers. The supervisor goroutine survives subprocess crashes by
+// respawning with exponential backoff — same contract as the legacy
+// FFmpeg restart loop.
+//
+// Returns an error when the subprocess binary isn't reachable so the
+// coordinator unwinds buffers / publisher / manager entries cleanly
+// rather than starting a stream whose transcoder will never wake.
 func (s *Service) Start(
 	ctx context.Context,
 	logStreamCode domain.StreamCode,
@@ -348,24 +358,109 @@ func (s *Service) Start(
 	tc *domain.TranscoderConfig,
 	targets []RenditionTarget,
 ) error {
-	_ = ctx
-	_ = rawIngestID
-	_ = tc
-	slog.Warn("transcoder: Start refused — native pipeline not yet wired",
+	if len(targets) == 0 {
+		return fmt.Errorf("transcoder: no rendition targets for stream %s", logStreamCode)
+	}
+	// Probe the binary path up-front so the caller sees the failure on
+	// Start instead of as a respawn loop seconds later.
+	if _, err := s.resolveBinaryPath(); err != nil {
+		return fmt.Errorf("transcoder: %w", err)
+	}
+
+	s.mu.Lock()
+	if _, ok := s.workers[logStreamCode]; ok {
+		s.mu.Unlock()
+		return fmt.Errorf("transcoder: stream %s already running", logStreamCode)
+	}
+	baseCtx, baseCancel := context.WithCancel(ctx)
+	sw := &streamWorker{
+		baseCtx:    baseCtx,
+		baseCancel: baseCancel,
+		rawIngest:  rawIngestID,
+		tc:         tc,
+		profiles:   make(map[int]*profileWorker, len(targets)),
+	}
+	// Maintain one profileWorker per rendition so RuntimeStatus
+	// continues to surface per-profile restart counts + errors.
+	// The supervisor calls recordProfileError on profile index 0
+	// for now (single-encoder pipeline); shadow entries for the
+	// other indices keep the JSON shape the UI expects.
+	pw0 := &profileWorker{cancel: func() {}, done: make(chan struct{})}
+	sw.profiles[0] = pw0
+	for i := 1; i < len(targets); i++ {
+		sw.profiles[i] = &profileWorker{cancel: func() {}, done: pw0.done}
+	}
+	supervisor := newSupervisor(s, logStreamCode, rawIngestID, tc, targets)
+	sw.supervisor = supervisor
+	s.workers[logStreamCode] = sw
+	s.mu.Unlock()
+
+	slog.Info("transcoder: stream job started",
 		"stream_code", logStreamCode,
-		"profiles_requested", len(targets),
+		"profiles", len(targets),
+		"read_from", rawIngestID,
+		"backend", string(tc.Global.HW),
 	)
-	//nolint:contextcheck // event bus consumers (hooks) must outlive the caller's ctx — Start error path is the canonical place to publish a failure event.
+	s.m.TranscoderWorkersActive.WithLabelValues(string(logStreamCode)).Set(float64(len(targets)))
+	s.m.TranscoderQualitiesActive.WithLabelValues(string(logStreamCode)).Set(float64(len(targets)))
+	//nolint:contextcheck // event bus consumers must outlive baseCtx
 	s.bus.Publish(context.Background(), domain.Event{
-		Type:       domain.EventTranscoderError,
+		Type:       domain.EventTranscoderStarted,
 		StreamCode: logStreamCode,
 		Payload: map[string]any{
-			"error":   ErrNotImplemented.Error(),
-			"phase":   "native-migration-P0",
-			"targets": len(targets),
+			"profiles":      len(targets),
+			"raw_ingest_id": string(rawIngestID),
+			"backend":       string(tc.Global.HW),
 		},
 	})
-	return ErrNotImplemented
+
+	go func() {
+		defer close(pw0.done)
+		supervisor.Run(baseCtx)
+	}()
+	return nil
+}
+
+// NotifyInputSwitch tells the active supervisor (if any) that the
+// upstream ingestor has switched to a new raw ingest buffer ID. Called
+// by the Manager from its switch handler; the supervisor forwards the
+// hint as a Switch message over gRPC so the subprocess swaps its
+// decoder before the new source's first packet arrives.
+//
+// No-op when the stream has no transcoder running.
+func (s *Service) NotifyInputSwitch(streamID, newRawIngestID domain.StreamCode) {
+	s.mu.Lock()
+	sw, ok := s.workers[streamID]
+	s.mu.Unlock()
+	if !ok || sw.supervisor == nil {
+		return
+	}
+	sw.supervisor.NotifySwitchInput(newRawIngestID)
+}
+
+// resolveBinaryPath locates the open-streamer-transcoder binary. Looks:
+//  1. Next to the running open-streamer binary (production install
+//     ships them together via install.sh).
+//  2. In $PATH as a fallback for local dev where the dev runs
+//     `go run` from the repo root.
+//
+// Returns an error with both attempted paths in the message when
+// neither yields an executable.
+func (s *Service) resolveBinaryPath() (string, error) {
+	var attempts []string
+	if exe, err := os.Executable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), transcoderBinaryName)
+		attempts = append(attempts, candidate)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	if found, err := exec.LookPath(transcoderBinaryName); err == nil {
+		return found, nil
+	}
+	attempts = append(attempts, "$PATH lookup")
+	return "", fmt.Errorf("%s binary not found (tried: %s); run `make build-all` and ensure both binaries are installed together",
+		transcoderBinaryName, strings.Join(attempts, ", "))
 }
 
 // Stop cancels the transcoder pipeline for a stream.
