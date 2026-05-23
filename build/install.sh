@@ -36,6 +36,18 @@ DATA_DIR="/var/lib/open-streamer"
 SERVICE_USER="open-streamer"
 SERVICE_NAME="open-streamer"
 
+# Native transcoder subprocess + bundled libav 8 .so files. The
+# `transcoder/` sub-tree only exists in release archives that
+# scripts/build-dev.sh produced AFTER `make build-transcoder-linux` —
+# absent when an operator builds the main binary alone. Skip silently
+# in that case; transcoded streams will refuse to start with
+# ErrNotImplemented but passthrough streams keep working.
+TRANSCODER_SRC_DIR="${REPO_ROOT}/transcoder"
+TRANSCODER_DST_DIR="/opt/open-streamer-native"
+TRANSCODER_BIN_LINK="/usr/local/bin/open-streamer-transcoder"
+TRANSCODER_DROPIN_DIR="/etc/systemd/system/open-streamer.service.d"
+TRANSCODER_DROPIN_FILE="${TRANSCODER_DROPIN_DIR}/native-transcoder.conf"
+
 # Output sub-directories under DATA_DIR. Default GlobalConfig points to
 # /out/{hls,dash,dvr}, but those are not writable by the service user. We
 # create these so users can repoint the config to /var/lib/open-streamer/...
@@ -135,6 +147,40 @@ install_unit() {
   systemctl daemon-reload
 }
 
+install_transcoder_bundle() {
+  if [[ ! -d "$TRANSCODER_SRC_DIR" ]]; then
+    log "no native transcoder bundle in archive — skipping (transcoded streams will return ErrNotImplemented)"
+    rm -f "$TRANSCODER_BIN_LINK" "$TRANSCODER_DROPIN_FILE" 2>/dev/null || true
+    return
+  fi
+  log "installing native transcoder → $TRANSCODER_DST_DIR"
+  install -d -m 0755 "$TRANSCODER_DST_DIR/bin" "$TRANSCODER_DST_DIR/lib"
+  install -m 0755 "$TRANSCODER_SRC_DIR/bin/open-streamer-transcoder" \
+                  "$TRANSCODER_DST_DIR/bin/open-streamer-transcoder"
+  # Wipe + reinstall lib/ so removed deps in newer bundles don't linger.
+  rm -rf "$TRANSCODER_DST_DIR/lib/"*
+  cp -a "$TRANSCODER_SRC_DIR/lib/." "$TRANSCODER_DST_DIR/lib/"
+
+  # Service.resolveBinaryPath() looks next to the main binary first,
+  # then $PATH. Symlink so the transcoder is reachable via /usr/local/
+  # bin without polluting it with libav-linked binaries (the actual
+  # .so files live under /opt/open-streamer-native/lib/).
+  ln -sf "$TRANSCODER_DST_DIR/bin/open-streamer-transcoder" "$TRANSCODER_BIN_LINK"
+
+  # Systemd drop-in: scope LD_LIBRARY_PATH to the open-streamer
+  # process so the spawned subprocess finds the bundled libav 8 .so
+  # files instead of the host's libav 6.1 (Ubuntu 24.04). The main
+  # binary is pure Go — no libav linkage — so this only matters when
+  # the supervisor execs the subprocess.
+  install -d -m 0755 "$TRANSCODER_DROPIN_DIR"
+  cat >"$TRANSCODER_DROPIN_FILE" <<EOF
+[Service]
+Environment="LD_LIBRARY_PATH=${TRANSCODER_DST_DIR}/lib"
+EOF
+  chmod 0644 "$TRANSCODER_DROPIN_FILE"
+  systemctl daemon-reload
+}
+
 start_and_verify() {
   log "enabling and starting service"
   systemctl enable "$SERVICE_NAME" >/dev/null
@@ -182,6 +228,7 @@ cmd_install() {
   stop_if_running
   install_binary
   install_unit
+  install_transcoder_bundle
   start_and_verify
   print_summary
 }
@@ -201,6 +248,17 @@ cmd_uninstall() {
   if [[ -f "$BIN_DST" ]]; then
     log "removing binary: $BIN_DST"
     rm -f "$BIN_DST"
+  fi
+
+  # Native transcoder cleanup. Drop-in must go before daemon-reload.
+  if [[ -f "$TRANSCODER_DROPIN_FILE" ]]; then
+    rm -f "$TRANSCODER_DROPIN_FILE"
+    systemctl daemon-reload
+  fi
+  rm -f "$TRANSCODER_BIN_LINK"
+  if [[ -d "$TRANSCODER_DST_DIR" ]]; then
+    log "removing native transcoder bundle: $TRANSCODER_DST_DIR"
+    rm -rf "$TRANSCODER_DST_DIR"
   fi
 
   if id -u "$SERVICE_USER" >/dev/null 2>&1; then

@@ -40,34 +40,48 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
         -X github.com/ntt0601zcoder/open-streamer/pkg/version.Commit=${COMMIT}" \
       -o /out/open-streamer-transcoder ./cmd/open-streamer-transcoder
 
-# Bundle stage — walk ldd to collect every libav* / libsw* shared
-# object the binary needs. Two passes catch transitive deps (libavcodec
-# depends on libavutil + libswresample, etc.). Caller relies on
-# LD_LIBRARY_PATH at runtime to point the loader at this lib directory
-# before the target host's system libav.
+# Bundle stage — walk ldd transitively and collect EVERY shared object
+# the binary plus all its libav deps need, EXCEPT glibc / ld-linux /
+# libpthread / libm / libdl / librt (system-provided ABI-stable bits
+# that we must NOT bundle because they'd clash with the host's
+# kernel-tied loader). go-astiav v0.41 unconditionally links
+# libavdevice, which drags in 20+ device-IO libs (libraw1394, libjack,
+# libxcb, libdrm, libopenal, libcdio_paranoia, ...) — without all of
+# them present at runtime, the loader refuses to start the binary
+# even before main() runs.
+#
+# AppImage-style filter: skip /lib/ld* /usr/lib/.*/libc.so*
+# /usr/lib/.*/libm.so* etc, copy everything else.
 FROM build AS bundle
-RUN mkdir -p /out/lib && \
-    LIBS=$(ldd /out/open-streamer-transcoder | awk '/=>/ {print $3}' | grep -E '/usr/lib/.*lib(av|sw)' || true) && \
-    for so in $LIBS; do cp -L "$so" /out/lib/; done && \
-    # Second pass: deps of the deps.
-    for round in 1 2; do \
-      for f in /out/lib/*.so* ; do \
-        deps=$(ldd "$f" 2>/dev/null | awk '/=>/ {print $3}' | grep -E '/usr/lib/.*lib(av|sw)' || true); \
-        for dep in $deps; do \
-          [ -f "/out/lib/$(basename $dep)" ] || cp -L "$dep" /out/lib/; \
-        done; \
-      done; \
+RUN set -eux && \
+    mkdir -p /out/lib && \
+    # Filter regex: paths to SKIP (system core libs the host owns).
+    # Keep this conservative — too narrow risks runtime ABI breakage,
+    # too wide risks missing a transitive dep.
+    SKIP_RE='/(ld-linux[^ ]*|libc\.so\.[0-9]+|libm\.so\.[0-9]+|libdl\.so\.[0-9]+|libpthread\.so\.[0-9]+|librt\.so\.[0-9]+|libresolv\.so\.[0-9]+|libnsl\.so\.[0-9]+|libutil\.so\.[0-9]+)$' && \
+    walk_one() { \
+      ldd "$1" 2>/dev/null | awk '/=>/ {print $3}' | grep -v '^$' | grep -Ev "$SKIP_RE" || true; \
+    } && \
+    queue=$(walk_one /out/open-streamer-transcoder) && \
+    iterations=0 && \
+    while [ -n "$queue" ] && [ $iterations -lt 10 ]; do \
+      iterations=$((iterations + 1)); \
+      next_queue="" && \
+      for so in $queue; do \
+        bn=$(basename "$so") && \
+        if [ ! -f "/out/lib/$bn" ]; then \
+          cp -L "$so" /out/lib/; \
+          deps=$(walk_one "$so") && \
+          for d in $deps; do \
+            db=$(basename "$d"); \
+            [ -f "/out/lib/$db" ] || next_queue="$next_queue $d"; \
+          done; \
+        fi; \
+      done && \
+      queue=$(echo "$next_queue" | tr ' ' '\n' | sort -u | tr '\n' ' '); \
     done && \
-    # Recreate the SONAME symlinks (libavcodec.so.62 -> libavcodec.so.62.0.100).
-    # ld.so resolves by SONAME, not by full filename, so missing the
-    # symlinks would leave the binary unable to find its own bundled
-    # libs at runtime.
-    cd /out/lib && \
-    for f in *.so.*.*.*; do \
-      soname=$(echo "$f" | sed -E 's/(\.so\.[0-9]+)\..*/\1/'); \
-      [ -L "$soname" ] || ln -sf "$f" "$soname"; \
-    done && \
-    ls -la /out/lib/ | head -30
+    echo "→ bundled $(ls /out/lib/ | wc -l) shared libs in $iterations passes" && \
+    ls /out/lib/ | head -40
 
 FROM scratch AS export
 COPY --from=bundle /out/open-streamer-transcoder /

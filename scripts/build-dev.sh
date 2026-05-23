@@ -100,6 +100,26 @@ if [[ "${GOOS_TARGET}" == "linux" ]]; then
     cp build/install.sh           "${STAGE_DIR}/build/"
     cp build/open-streamer.service "${STAGE_DIR}/build/"
     chmod +x "${STAGE_DIR}/build/install.sh" "${BIN_PATH}"
+
+    # Bundle the per-stream native transcoder subprocess + its libav
+    # 8 .so files. Build-time only for linux/amd64; install.sh on the
+    # target unpacks them under /opt/open-streamer-native/ and writes
+    # a systemd drop-in that exports LD_LIBRARY_PATH so the
+    # subprocess finds the bundled libs instead of the host's libav
+    # 6.1 (Ubuntu 24.04 LTS). Skip silently if the bundle hasn't been
+    # built — `make build-dev` works for users who don't need the
+    # transcoder; they just won't be able to start transcoded streams.
+    TRANSCODER_BUNDLE="dist/transcoder-${GOOS_TARGET}-${GOARCH_TARGET}"
+    if [[ "${GOARCH_TARGET}" == "amd64" && -f "${TRANSCODER_BUNDLE}/open-streamer-transcoder" ]]; then
+        echo "→ bundling native transcoder ($(du -sh "${TRANSCODER_BUNDLE}" | awk '{print $1}'))"
+        mkdir -p "${STAGE_DIR}/transcoder/bin" "${STAGE_DIR}/transcoder/lib"
+        cp "${TRANSCODER_BUNDLE}/open-streamer-transcoder" "${STAGE_DIR}/transcoder/bin/"
+        cp -a "${TRANSCODER_BUNDLE}/lib/." "${STAGE_DIR}/transcoder/lib/"
+        chmod +x "${STAGE_DIR}/transcoder/bin/open-streamer-transcoder"
+    elif [[ "${GOARCH_TARGET}" == "amd64" ]]; then
+        echo "→ no native transcoder bundle at ${TRANSCODER_BUNDLE}; skipping"
+        echo "  build it first with: make build-transcoder-linux"
+    fi
 fi
 
 # Drop a VERSION file so ops can identify what's installed without
