@@ -60,6 +60,19 @@ type Encoder struct {
 	closed   bool
 }
 
+// EncodedPacket is one output AVPacket the encoder produced, copied
+// out so the caller's lifetime is independent of the encoder's scratch
+// packet. PTS and DTS are in the encoder's time base (1/Framerate by
+// default). Keyframe is true for IDR packets, used by the downstream
+// AV-path supervisor to set domain.AVPacket.KeyFrame correctly so
+// muxers and player playlist generators see proper keyframe metadata.
+type EncodedPacket struct {
+	Data     []byte
+	PTS      int64
+	DTS      int64
+	Keyframe bool
+}
+
 // NewEncoder allocates and opens an H.264 encoder for the given config.
 // Returns an error if the encoder name isn't compiled into the linked
 // libavcodec (e.g. asking for h264_nvenc on a macOS build) or if any
@@ -86,10 +99,17 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 	cc.SetHeight(cfg.Height)
 	cc.SetPixelFormat(astiav.PixelFormatYuv420P)
 	cc.SetFramerate(astiav.NewRational(cfg.Framerate, 1))
-	// Time-base is the unit each PTS / DTS is expressed in. 1/Framerate
-	// gives integer-per-frame timestamps that NVENC and libx264 both
-	// accept without warnings about "timestamps are inconsistent".
-	cc.SetTimeBase(astiav.NewRational(1, cfg.Framerate))
+	// Time-base = 1/1000 (millisecond). The pipeline feeds frames
+	// stamped with their source-stream PTS (in ms) so the encoder's
+	// output PTS / DTS land in the same timeline as the AAC audio
+	// passthrough — without that shared origin, the player gets
+	// video at t≈0 and audio at t≈ several minutes (source wallclock),
+	// and they drift out of sync immediately.
+	//
+	// NVENC and libx264 both accept ms time-base; framerate is still
+	// communicated separately via SetFramerate so rate control and
+	// GOP timing stay correct.
+	cc.SetTimeBase(astiav.NewRational(1, 1000))
 	if cfg.BitrateKbps > 0 {
 		cc.SetBitRate(int64(cfg.BitrateKbps) * 1000)
 	}
@@ -156,7 +176,7 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 //
 // Returns (nil, nil) when the encoder accepted the frame but has not yet
 // produced output (typical during pipeline warmup with B-frames).
-func (e *Encoder) Encode(frame *astiav.Frame) ([][]byte, error) {
+func (e *Encoder) Encode(frame *astiav.Frame) ([]EncodedPacket, error) {
 	if e.closed {
 		return nil, errors.New("native: encode on closed encoder")
 	}
@@ -170,7 +190,7 @@ func (e *Encoder) Encode(frame *astiav.Frame) ([][]byte, error) {
 // packets in its internal queue (B-frames waiting for a future P-frame
 // reference, for example). Must be called before Close to capture the
 // last frames; after Flush, the encoder is unusable.
-func (e *Encoder) Flush() ([][]byte, error) {
+func (e *Encoder) Flush() ([]EncodedPacket, error) {
 	if e.closed {
 		return nil, errors.New("native: flush on closed encoder")
 	}
@@ -179,9 +199,10 @@ func (e *Encoder) Flush() ([][]byte, error) {
 
 // drainPackets loops ReceivePacket until the encoder reports EAGAIN
 // (needs more input) or EOF (after flush). Returns all packets it
-// pulled out in order.
-func (e *Encoder) drainPackets() ([][]byte, error) {
-	var out [][]byte
+// pulled out in order, with PTS / DTS / keyframe metadata copied off
+// the scratch AVPacket before Unref.
+func (e *Encoder) drainPackets() ([]EncodedPacket, error) {
+	var out []EncodedPacket
 	for {
 		err := e.codecCtx.ReceivePacket(e.pkt)
 		if err != nil {
@@ -193,12 +214,12 @@ func (e *Encoder) drainPackets() ([][]byte, error) {
 			}
 			return out, fmt.Errorf("native: ReceivePacket: %w", err)
 		}
-		// Copy the packet data so the caller can outlive the next
-		// ReceivePacket / Unref cycle. Future optimisation: return a
-		// reusable *Packet with explicit Release, but the copy is
-		// negligible compared to encode cost and simplifies the API.
-		data := append([]byte(nil), e.pkt.Data()...)
-		out = append(out, data)
+		out = append(out, EncodedPacket{
+			Data:     append([]byte(nil), e.pkt.Data()...),
+			PTS:      e.pkt.Pts(),
+			DTS:      e.pkt.Dts(),
+			Keyframe: e.pkt.Flags().Has(astiav.PacketFlagKey),
+		})
 		e.pkt.Unref()
 	}
 }

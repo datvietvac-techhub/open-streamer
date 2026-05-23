@@ -18,7 +18,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v6.33.0
-// source: internal/transcoder/native/proto/transcoder.proto
+// source: transcoder.proto
 
 package transcoderpb
 
@@ -79,11 +79,11 @@ func (x HWBackend) String() string {
 }
 
 func (HWBackend) Descriptor() protoreflect.EnumDescriptor {
-	return file_internal_transcoder_native_proto_transcoder_proto_enumTypes[0].Descriptor()
+	return file_transcoder_proto_enumTypes[0].Descriptor()
 }
 
 func (HWBackend) Type() protoreflect.EnumType {
-	return &file_internal_transcoder_native_proto_transcoder_proto_enumTypes[0]
+	return &file_transcoder_proto_enumTypes[0]
 }
 
 func (x HWBackend) Number() protoreflect.EnumNumber {
@@ -92,7 +92,66 @@ func (x HWBackend) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use HWBackend.Descriptor instead.
 func (HWBackend) EnumDescriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{0}
+	return file_transcoder_proto_rawDescGZIP(), []int{0}
+}
+
+// Codec identifies the elementary-stream type of an OutputPacket so the
+// supervisor can build domain.AVPacket without inspecting bytes.
+//
+// CODEC_UNSPECIFIED keeps the field zero-value safe: an older subprocess
+// (or any bug that leaves codec unset) surfaces as a clear "unknown
+// codec" error in the supervisor rather than silently misrouted into
+// the H.264 path.
+type Codec int32
+
+const (
+	Codec_CODEC_UNSPECIFIED Codec = 0
+	Codec_CODEC_H264        Codec = 1
+	Codec_CODEC_H265        Codec = 2
+	Codec_CODEC_AAC         Codec = 3
+)
+
+// Enum value maps for Codec.
+var (
+	Codec_name = map[int32]string{
+		0: "CODEC_UNSPECIFIED",
+		1: "CODEC_H264",
+		2: "CODEC_H265",
+		3: "CODEC_AAC",
+	}
+	Codec_value = map[string]int32{
+		"CODEC_UNSPECIFIED": 0,
+		"CODEC_H264":        1,
+		"CODEC_H265":        2,
+		"CODEC_AAC":         3,
+	}
+)
+
+func (x Codec) Enum() *Codec {
+	p := new(Codec)
+	*p = x
+	return p
+}
+
+func (x Codec) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Codec) Descriptor() protoreflect.EnumDescriptor {
+	return file_transcoder_proto_enumTypes[1].Descriptor()
+}
+
+func (Codec) Type() protoreflect.EnumType {
+	return &file_transcoder_proto_enumTypes[1]
+}
+
+func (x Codec) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Codec.Descriptor instead.
+func (Codec) EnumDescriptor() ([]byte, []int) {
+	return file_transcoder_proto_rawDescGZIP(), []int{1}
 }
 
 type Request struct {
@@ -110,7 +169,7 @@ type Request struct {
 
 func (x *Request) Reset() {
 	*x = Request{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[0]
+	mi := &file_transcoder_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -122,7 +181,7 @@ func (x *Request) String() string {
 func (*Request) ProtoMessage() {}
 
 func (x *Request) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[0]
+	mi := &file_transcoder_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -135,7 +194,7 @@ func (x *Request) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Request.ProtoReflect.Descriptor instead.
 func (*Request) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{0}
+	return file_transcoder_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Request) GetBody() isRequest_Body {
@@ -223,7 +282,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[1]
+	mi := &file_transcoder_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -235,7 +294,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[1]
+	mi := &file_transcoder_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -248,7 +307,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{1}
+	return file_transcoder_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Event) GetBody() isEvent_Body {
@@ -321,7 +380,7 @@ type ConfigureRequest struct {
 
 func (x *ConfigureRequest) Reset() {
 	*x = ConfigureRequest{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[2]
+	mi := &file_transcoder_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -333,7 +392,7 @@ func (x *ConfigureRequest) String() string {
 func (*ConfigureRequest) ProtoMessage() {}
 
 func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[2]
+	mi := &file_transcoder_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -346,7 +405,7 @@ func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureRequest.ProtoReflect.Descriptor instead.
 func (*ConfigureRequest) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{2}
+	return file_transcoder_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ConfigureRequest) GetStreamCode() string {
@@ -417,7 +476,7 @@ type Target struct {
 
 func (x *Target) Reset() {
 	*x = Target{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[3]
+	mi := &file_transcoder_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -429,7 +488,7 @@ func (x *Target) String() string {
 func (*Target) ProtoMessage() {}
 
 func (x *Target) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[3]
+	mi := &file_transcoder_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -442,7 +501,7 @@ func (x *Target) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Target.ProtoReflect.Descriptor instead.
 func (*Target) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{3}
+	return file_transcoder_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Target) GetOutputBufId() string {
@@ -571,7 +630,7 @@ type AudioConfig struct {
 
 func (x *AudioConfig) Reset() {
 	*x = AudioConfig{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[4]
+	mi := &file_transcoder_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -583,7 +642,7 @@ func (x *AudioConfig) String() string {
 func (*AudioConfig) ProtoMessage() {}
 
 func (x *AudioConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[4]
+	mi := &file_transcoder_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -596,7 +655,7 @@ func (x *AudioConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AudioConfig.ProtoReflect.Descriptor instead.
 func (*AudioConfig) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{4}
+	return file_transcoder_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *AudioConfig) GetCopy() bool {
@@ -661,7 +720,7 @@ type WatermarkConfig struct {
 
 func (x *WatermarkConfig) Reset() {
 	*x = WatermarkConfig{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[5]
+	mi := &file_transcoder_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -673,7 +732,7 @@ func (x *WatermarkConfig) String() string {
 func (*WatermarkConfig) ProtoMessage() {}
 
 func (x *WatermarkConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[5]
+	mi := &file_transcoder_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -686,7 +745,7 @@ func (x *WatermarkConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatermarkConfig.ProtoReflect.Descriptor instead.
 func (*WatermarkConfig) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{5}
+	return file_transcoder_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *WatermarkConfig) GetEnabled() bool {
@@ -784,7 +843,7 @@ type InputPacket struct {
 
 func (x *InputPacket) Reset() {
 	*x = InputPacket{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[6]
+	mi := &file_transcoder_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -796,7 +855,7 @@ func (x *InputPacket) String() string {
 func (*InputPacket) ProtoMessage() {}
 
 func (x *InputPacket) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[6]
+	mi := &file_transcoder_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -809,7 +868,7 @@ func (x *InputPacket) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InputPacket.ProtoReflect.Descriptor instead.
 func (*InputPacket) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{6}
+	return file_transcoder_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *InputPacket) GetData() []byte {
@@ -836,14 +895,18 @@ func (x *InputPacket) GetSessionId() int64 {
 type OutputPacket struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TargetIndex   int32                  `protobuf:"varint,1,opt,name=target_index,json=targetIndex,proto3" json:"target_index,omitempty"` // matches Target.index
-	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`                                   // encoded MPEG-TS chunk for the rendition buffer
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`                                   // codec ES bytes (Annex-B for H.264/H.265, raw ADTS for AAC)
+	Codec         Codec                  `protobuf:"varint,3,opt,name=codec,proto3,enum=transcoder.v1.Codec" json:"codec,omitempty"`       // identifies the codec for the supervisor's AV-path write
+	PtsMs         int64                  `protobuf:"varint,4,opt,name=pts_ms,json=ptsMs,proto3" json:"pts_ms,omitempty"`                   // milliseconds; from encoder for video, demuxer for audio
+	DtsMs         int64                  `protobuf:"varint,5,opt,name=dts_ms,json=dtsMs,proto3" json:"dts_ms,omitempty"`                   // milliseconds; equals pts_ms when source has no separate DTS
+	Keyframe      bool                   `protobuf:"varint,6,opt,name=keyframe,proto3" json:"keyframe,omitempty"`                          // IDR for H.264/H.265; always false for AAC
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OutputPacket) Reset() {
 	*x = OutputPacket{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[7]
+	mi := &file_transcoder_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -855,7 +918,7 @@ func (x *OutputPacket) String() string {
 func (*OutputPacket) ProtoMessage() {}
 
 func (x *OutputPacket) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[7]
+	mi := &file_transcoder_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -868,7 +931,7 @@ func (x *OutputPacket) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OutputPacket.ProtoReflect.Descriptor instead.
 func (*OutputPacket) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{7}
+	return file_transcoder_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *OutputPacket) GetTargetIndex() int32 {
@@ -885,6 +948,34 @@ func (x *OutputPacket) GetData() []byte {
 	return nil
 }
 
+func (x *OutputPacket) GetCodec() Codec {
+	if x != nil {
+		return x.Codec
+	}
+	return Codec_CODEC_UNSPECIFIED
+}
+
+func (x *OutputPacket) GetPtsMs() int64 {
+	if x != nil {
+		return x.PtsMs
+	}
+	return 0
+}
+
+func (x *OutputPacket) GetDtsMs() int64 {
+	if x != nil {
+		return x.DtsMs
+	}
+	return 0
+}
+
+func (x *OutputPacket) GetKeyframe() bool {
+	if x != nil {
+		return x.Keyframe
+	}
+	return false
+}
+
 type SwitchInput struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	NewRawIngestBufId string                 `protobuf:"bytes,1,opt,name=new_raw_ingest_buf_id,json=newRawIngestBufId,proto3" json:"new_raw_ingest_buf_id,omitempty"`
@@ -894,7 +985,7 @@ type SwitchInput struct {
 
 func (x *SwitchInput) Reset() {
 	*x = SwitchInput{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[8]
+	mi := &file_transcoder_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -906,7 +997,7 @@ func (x *SwitchInput) String() string {
 func (*SwitchInput) ProtoMessage() {}
 
 func (x *SwitchInput) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[8]
+	mi := &file_transcoder_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -919,7 +1010,7 @@ func (x *SwitchInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SwitchInput.ProtoReflect.Descriptor instead.
 func (*SwitchInput) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{8}
+	return file_transcoder_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SwitchInput) GetNewRawIngestBufId() string {
@@ -938,7 +1029,7 @@ type Stop struct {
 
 func (x *Stop) Reset() {
 	*x = Stop{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[9]
+	mi := &file_transcoder_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -950,7 +1041,7 @@ func (x *Stop) String() string {
 func (*Stop) ProtoMessage() {}
 
 func (x *Stop) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[9]
+	mi := &file_transcoder_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -963,7 +1054,7 @@ func (x *Stop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Stop.ProtoReflect.Descriptor instead.
 func (*Stop) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{9}
+	return file_transcoder_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Stop) GetReason() string {
@@ -982,7 +1073,7 @@ type Health struct {
 
 func (x *Health) Reset() {
 	*x = Health{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[10]
+	mi := &file_transcoder_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -994,7 +1085,7 @@ func (x *Health) String() string {
 func (*Health) ProtoMessage() {}
 
 func (x *Health) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[10]
+	mi := &file_transcoder_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1007,7 +1098,7 @@ func (x *Health) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Health.ProtoReflect.Descriptor instead.
 func (*Health) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{10}
+	return file_transcoder_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Health) GetProfiles() []*Health_Profile {
@@ -1028,7 +1119,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[11]
+	mi := &file_transcoder_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1040,7 +1131,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[11]
+	mi := &file_transcoder_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1053,7 +1144,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{11}
+	return file_transcoder_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Error) GetMessage() string {
@@ -1090,7 +1181,7 @@ type Health_Profile struct {
 
 func (x *Health_Profile) Reset() {
 	*x = Health_Profile{}
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[12]
+	mi := &file_transcoder_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1102,7 +1193,7 @@ func (x *Health_Profile) String() string {
 func (*Health_Profile) ProtoMessage() {}
 
 func (x *Health_Profile) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_transcoder_native_proto_transcoder_proto_msgTypes[12]
+	mi := &file_transcoder_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1115,7 +1206,7 @@ func (x *Health_Profile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Health_Profile.ProtoReflect.Descriptor instead.
 func (*Health_Profile) Descriptor() ([]byte, []int) {
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP(), []int{10, 0}
+	return file_transcoder_proto_rawDescGZIP(), []int{10, 0}
 }
 
 func (x *Health_Profile) GetIndex() int32 {
@@ -1139,11 +1230,11 @@ func (x *Health_Profile) GetUnhealthy() bool {
 	return false
 }
 
-var File_internal_transcoder_native_proto_transcoder_proto protoreflect.FileDescriptor
+var File_transcoder_proto protoreflect.FileDescriptor
 
-const file_internal_transcoder_native_proto_transcoder_proto_rawDesc = "" +
+const file_transcoder_proto_rawDesc = "" +
 	"\n" +
-	"1internal/transcoder/native/proto/transcoder.proto\x12\rtranscoder.v1\"\xe9\x01\n" +
+	"\x10transcoder.proto\x12\rtranscoder.v1\"\xe9\x01\n" +
 	"\aRequest\x12?\n" +
 	"\tconfigure\x18\x01 \x01(\v2\x1f.transcoder.v1.ConfigureRequestH\x00R\tconfigure\x124\n" +
 	"\x06packet\x18\x02 \x01(\v2\x1a.transcoder.v1.InputPacketH\x00R\x06packet\x124\n" +
@@ -1213,10 +1304,14 @@ const file_internal_transcoder_native_proto_transcoder_proto_rawDesc = "" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12#\n" +
 	"\rsession_start\x18\x02 \x01(\bR\fsessionStart\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\x03R\tsessionId\"E\n" +
+	"session_id\x18\x03 \x01(\x03R\tsessionId\"\xbb\x01\n" +
 	"\fOutputPacket\x12!\n" +
 	"\ftarget_index\x18\x01 \x01(\x05R\vtargetIndex\x12\x12\n" +
-	"\x04data\x18\x02 \x01(\fR\x04data\"?\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\x12*\n" +
+	"\x05codec\x18\x03 \x01(\x0e2\x14.transcoder.v1.CodecR\x05codec\x12\x15\n" +
+	"\x06pts_ms\x18\x04 \x01(\x03R\x05ptsMs\x12\x15\n" +
+	"\x06dts_ms\x18\x05 \x01(\x03R\x05dtsMs\x12\x1a\n" +
+	"\bkeyframe\x18\x06 \x01(\bR\bkeyframe\"?\n" +
 	"\vSwitchInput\x120\n" +
 	"\x15new_raw_ingest_buf_id\x18\x01 \x01(\tR\x11newRawIngestBufId\"\x1e\n" +
 	"\x04Stop\x12\x16\n" +
@@ -1237,75 +1332,84 @@ const file_internal_transcoder_native_proto_transcoder_proto_rawDesc = "" +
 	"\x10HW_BACKEND_NVENC\x10\x02\x12\x14\n" +
 	"\x10HW_BACKEND_VAAPI\x10\x03\x12\x1b\n" +
 	"\x17HW_BACKEND_VIDEOTOOLBOX\x10\x04\x12\x12\n" +
-	"\x0eHW_BACKEND_QSV\x10\x052E\n" +
+	"\x0eHW_BACKEND_QSV\x10\x05*M\n" +
+	"\x05Codec\x12\x15\n" +
+	"\x11CODEC_UNSPECIFIED\x10\x00\x12\x0e\n" +
+	"\n" +
+	"CODEC_H264\x10\x01\x12\x0e\n" +
+	"\n" +
+	"CODEC_H265\x10\x02\x12\r\n" +
+	"\tCODEC_AAC\x10\x032E\n" +
 	"\n" +
 	"Transcoder\x127\n" +
 	"\x03Run\x12\x16.transcoder.v1.Request\x1a\x14.transcoder.v1.Event(\x010\x01BVZTgithub.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto;transcoderpbb\x06proto3"
 
 var (
-	file_internal_transcoder_native_proto_transcoder_proto_rawDescOnce sync.Once
-	file_internal_transcoder_native_proto_transcoder_proto_rawDescData []byte
+	file_transcoder_proto_rawDescOnce sync.Once
+	file_transcoder_proto_rawDescData []byte
 )
 
-func file_internal_transcoder_native_proto_transcoder_proto_rawDescGZIP() []byte {
-	file_internal_transcoder_native_proto_transcoder_proto_rawDescOnce.Do(func() {
-		file_internal_transcoder_native_proto_transcoder_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_internal_transcoder_native_proto_transcoder_proto_rawDesc), len(file_internal_transcoder_native_proto_transcoder_proto_rawDesc)))
+func file_transcoder_proto_rawDescGZIP() []byte {
+	file_transcoder_proto_rawDescOnce.Do(func() {
+		file_transcoder_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_transcoder_proto_rawDesc), len(file_transcoder_proto_rawDesc)))
 	})
-	return file_internal_transcoder_native_proto_transcoder_proto_rawDescData
+	return file_transcoder_proto_rawDescData
 }
 
-var file_internal_transcoder_native_proto_transcoder_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_internal_transcoder_native_proto_transcoder_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
-var file_internal_transcoder_native_proto_transcoder_proto_goTypes = []any{
+var file_transcoder_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_transcoder_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_transcoder_proto_goTypes = []any{
 	(HWBackend)(0),           // 0: transcoder.v1.HWBackend
-	(*Request)(nil),          // 1: transcoder.v1.Request
-	(*Event)(nil),            // 2: transcoder.v1.Event
-	(*ConfigureRequest)(nil), // 3: transcoder.v1.ConfigureRequest
-	(*Target)(nil),           // 4: transcoder.v1.Target
-	(*AudioConfig)(nil),      // 5: transcoder.v1.AudioConfig
-	(*WatermarkConfig)(nil),  // 6: transcoder.v1.WatermarkConfig
-	(*InputPacket)(nil),      // 7: transcoder.v1.InputPacket
-	(*OutputPacket)(nil),     // 8: transcoder.v1.OutputPacket
-	(*SwitchInput)(nil),      // 9: transcoder.v1.SwitchInput
-	(*Stop)(nil),             // 10: transcoder.v1.Stop
-	(*Health)(nil),           // 11: transcoder.v1.Health
-	(*Error)(nil),            // 12: transcoder.v1.Error
-	(*Health_Profile)(nil),   // 13: transcoder.v1.Health.Profile
+	(Codec)(0),               // 1: transcoder.v1.Codec
+	(*Request)(nil),          // 2: transcoder.v1.Request
+	(*Event)(nil),            // 3: transcoder.v1.Event
+	(*ConfigureRequest)(nil), // 4: transcoder.v1.ConfigureRequest
+	(*Target)(nil),           // 5: transcoder.v1.Target
+	(*AudioConfig)(nil),      // 6: transcoder.v1.AudioConfig
+	(*WatermarkConfig)(nil),  // 7: transcoder.v1.WatermarkConfig
+	(*InputPacket)(nil),      // 8: transcoder.v1.InputPacket
+	(*OutputPacket)(nil),     // 9: transcoder.v1.OutputPacket
+	(*SwitchInput)(nil),      // 10: transcoder.v1.SwitchInput
+	(*Stop)(nil),             // 11: transcoder.v1.Stop
+	(*Health)(nil),           // 12: transcoder.v1.Health
+	(*Error)(nil),            // 13: transcoder.v1.Error
+	(*Health_Profile)(nil),   // 14: transcoder.v1.Health.Profile
 }
-var file_internal_transcoder_native_proto_transcoder_proto_depIdxs = []int32{
-	3,  // 0: transcoder.v1.Request.configure:type_name -> transcoder.v1.ConfigureRequest
-	7,  // 1: transcoder.v1.Request.packet:type_name -> transcoder.v1.InputPacket
-	9,  // 2: transcoder.v1.Request.switch:type_name -> transcoder.v1.SwitchInput
-	10, // 3: transcoder.v1.Request.stop:type_name -> transcoder.v1.Stop
-	8,  // 4: transcoder.v1.Event.packet:type_name -> transcoder.v1.OutputPacket
-	11, // 5: transcoder.v1.Event.health:type_name -> transcoder.v1.Health
-	12, // 6: transcoder.v1.Event.error:type_name -> transcoder.v1.Error
+var file_transcoder_proto_depIdxs = []int32{
+	4,  // 0: transcoder.v1.Request.configure:type_name -> transcoder.v1.ConfigureRequest
+	8,  // 1: transcoder.v1.Request.packet:type_name -> transcoder.v1.InputPacket
+	10, // 2: transcoder.v1.Request.switch:type_name -> transcoder.v1.SwitchInput
+	11, // 3: transcoder.v1.Request.stop:type_name -> transcoder.v1.Stop
+	9,  // 4: transcoder.v1.Event.packet:type_name -> transcoder.v1.OutputPacket
+	12, // 5: transcoder.v1.Event.health:type_name -> transcoder.v1.Health
+	13, // 6: transcoder.v1.Event.error:type_name -> transcoder.v1.Error
 	0,  // 7: transcoder.v1.ConfigureRequest.hw_backend:type_name -> transcoder.v1.HWBackend
-	4,  // 8: transcoder.v1.ConfigureRequest.targets:type_name -> transcoder.v1.Target
-	5,  // 9: transcoder.v1.ConfigureRequest.audio:type_name -> transcoder.v1.AudioConfig
-	6,  // 10: transcoder.v1.ConfigureRequest.watermark:type_name -> transcoder.v1.WatermarkConfig
-	13, // 11: transcoder.v1.Health.profiles:type_name -> transcoder.v1.Health.Profile
-	1,  // 12: transcoder.v1.Transcoder.Run:input_type -> transcoder.v1.Request
-	2,  // 13: transcoder.v1.Transcoder.Run:output_type -> transcoder.v1.Event
-	13, // [13:14] is the sub-list for method output_type
-	12, // [12:13] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	5,  // 8: transcoder.v1.ConfigureRequest.targets:type_name -> transcoder.v1.Target
+	6,  // 9: transcoder.v1.ConfigureRequest.audio:type_name -> transcoder.v1.AudioConfig
+	7,  // 10: transcoder.v1.ConfigureRequest.watermark:type_name -> transcoder.v1.WatermarkConfig
+	1,  // 11: transcoder.v1.OutputPacket.codec:type_name -> transcoder.v1.Codec
+	14, // 12: transcoder.v1.Health.profiles:type_name -> transcoder.v1.Health.Profile
+	2,  // 13: transcoder.v1.Transcoder.Run:input_type -> transcoder.v1.Request
+	3,  // 14: transcoder.v1.Transcoder.Run:output_type -> transcoder.v1.Event
+	14, // [14:15] is the sub-list for method output_type
+	13, // [13:14] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
-func init() { file_internal_transcoder_native_proto_transcoder_proto_init() }
-func file_internal_transcoder_native_proto_transcoder_proto_init() {
-	if File_internal_transcoder_native_proto_transcoder_proto != nil {
+func init() { file_transcoder_proto_init() }
+func file_transcoder_proto_init() {
+	if File_transcoder_proto != nil {
 		return
 	}
-	file_internal_transcoder_native_proto_transcoder_proto_msgTypes[0].OneofWrappers = []any{
+	file_transcoder_proto_msgTypes[0].OneofWrappers = []any{
 		(*Request_Configure)(nil),
 		(*Request_Packet)(nil),
 		(*Request_Switch)(nil),
 		(*Request_Stop)(nil),
 	}
-	file_internal_transcoder_native_proto_transcoder_proto_msgTypes[1].OneofWrappers = []any{
+	file_transcoder_proto_msgTypes[1].OneofWrappers = []any{
 		(*Event_Packet)(nil),
 		(*Event_Health)(nil),
 		(*Event_Error)(nil),
@@ -1314,18 +1418,18 @@ func file_internal_transcoder_native_proto_transcoder_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_transcoder_native_proto_transcoder_proto_rawDesc), len(file_internal_transcoder_native_proto_transcoder_proto_rawDesc)),
-			NumEnums:      1,
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transcoder_proto_rawDesc), len(file_transcoder_proto_rawDesc)),
+			NumEnums:      2,
 			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_internal_transcoder_native_proto_transcoder_proto_goTypes,
-		DependencyIndexes: file_internal_transcoder_native_proto_transcoder_proto_depIdxs,
-		EnumInfos:         file_internal_transcoder_native_proto_transcoder_proto_enumTypes,
-		MessageInfos:      file_internal_transcoder_native_proto_transcoder_proto_msgTypes,
+		GoTypes:           file_transcoder_proto_goTypes,
+		DependencyIndexes: file_transcoder_proto_depIdxs,
+		EnumInfos:         file_transcoder_proto_enumTypes,
+		MessageInfos:      file_transcoder_proto_msgTypes,
 	}.Build()
-	File_internal_transcoder_native_proto_transcoder_proto = out.File
-	file_internal_transcoder_native_proto_transcoder_proto_goTypes = nil
-	file_internal_transcoder_native_proto_transcoder_proto_depIdxs = nil
+	File_transcoder_proto = out.File
+	file_transcoder_proto_goTypes = nil
+	file_transcoder_proto_depIdxs = nil
 }

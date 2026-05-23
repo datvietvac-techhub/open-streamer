@@ -72,10 +72,10 @@ func feed(t *testing.T, p *StreamPipeline, enc *Encoder, w, h, nFrames int) int 
 		frame.Free()
 		require.NoError(t, err)
 		for _, pkt := range pkts {
-			out, err := p.ProcessPacket(pkt, int64(i), int64(i))
+			out, err := p.ProcessPacket(pkt.Data, int64(i), int64(i))
 			require.NoError(t, err)
 			for _, op := range out {
-				outBytes += len(op)
+				outBytes += len(op.Data)
 			}
 		}
 	}
@@ -121,8 +121,8 @@ func TestStreamPipeline_SingleInputProducesOutput(t *testing.T) {
 
 	tail, err := p.Flush()
 	require.NoError(t, err)
-	for _, t := range tail {
-		outBytes += len(t)
+	for _, f := range tail {
+		outBytes += len(f.Data)
 	}
 	require.Positive(t, outBytes, "pipeline produced no rendition bytes")
 }

@@ -381,10 +381,42 @@ func (sv *supervisor) writeOutputPacket(pkt *pb.OutputPacket) error {
 		return nil
 	}
 	target := sv.targets[idx]
-	if err := sv.svc.buf.Write(target.BufferID, buffer.TSPacket(pkt.GetData())); err != nil {
+
+	avCodec, ok := avCodecFromProto(pkt.GetCodec())
+	if !ok {
+		slog.Warn("transcoder: output packet with unspecified codec — dropping",
+			"stream_code", sv.streamID, "target_index", idx, "bytes", len(pkt.GetData()))
+		return nil
+	}
+
+	av := &domain.AVPacket{
+		Codec:    avCodec,
+		Data:     pkt.GetData(),
+		PTSms:    uint64(pkt.GetPtsMs()), //nolint:gosec // negative pre-warmup PTS round-trips via two's-complement
+		DTSms:    uint64(pkt.GetDtsMs()), //nolint:gosec
+		KeyFrame: pkt.GetKeyframe(),
+	}
+	if err := sv.svc.buf.Write(target.BufferID, buffer.Packet{AV: av}); err != nil {
 		return fmt.Errorf("buffer write target %d: %w", idx, err)
 	}
 	return nil
+}
+
+// avCodecFromProto narrows the wire-level Codec enum to the
+// domain.AVCodec the buffer hub + publisher's tsmux.FromAV expect.
+// Returns ok=false on UNSPECIFIED / unknown so the supervisor drops
+// the packet with a warning instead of misrouting it.
+func avCodecFromProto(c pb.Codec) (domain.AVCodec, bool) {
+	switch c {
+	case pb.Codec_CODEC_H264:
+		return domain.AVCodecH264, true
+	case pb.Codec_CODEC_H265:
+		return domain.AVCodecH265, true
+	case pb.Codec_CODEC_AAC:
+		return domain.AVCodecAAC, true
+	default:
+		return domain.AVCodecUnknown, false
+	}
 }
 
 func (sv *supervisor) handleSubprocessError(e *pb.Error) error {

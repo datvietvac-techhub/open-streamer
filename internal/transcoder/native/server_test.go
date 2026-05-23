@@ -155,7 +155,7 @@ func TestServer_RoundtripConfigureProcessStop(t *testing.T) {
 		require.NoError(t, err)
 		for _, pkt := range pkts {
 			require.NoError(t, stream.Send(&pb.Request{
-				Body: &pb.Request_Packet{Packet: &pb.InputPacket{Data: pkt}},
+				Body: &pb.Request_Packet{Packet: &pb.InputPacket{Data: pkt.Data}},
 			}))
 		}
 	}
@@ -250,7 +250,7 @@ func TestServer_SwitchInputKeepsStreamAlive(t *testing.T) {
 			require.NoError(t, err)
 			for _, pkt := range pkts {
 				require.NoError(t, stream.Send(&pb.Request{
-					Body: &pb.Request_Packet{Packet: &pb.InputPacket{Data: pkt}},
+					Body: &pb.Request_Packet{Packet: &pb.InputPacket{Data: pkt.Data}},
 				}))
 			}
 		}

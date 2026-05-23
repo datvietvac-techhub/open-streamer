@@ -76,7 +76,7 @@ func TestEncoder_EncodesSyntheticFrames(t *testing.T) {
 		require.NoError(t, err)
 		totalPackets += len(pkts)
 		if firstPacketBytes == nil && len(pkts) > 0 {
-			firstPacketBytes = pkts[0]
+			firstPacketBytes = pkts[0].Data
 		}
 	}
 
@@ -84,7 +84,7 @@ func TestEncoder_EncodesSyntheticFrames(t *testing.T) {
 	require.NoError(t, err)
 	totalPackets += len(flushPkts)
 	if firstPacketBytes == nil && len(flushPkts) > 0 {
-		firstPacketBytes = flushPkts[0]
+		firstPacketBytes = flushPkts[0].Data
 	}
 
 	require.Positive(t, totalPackets, "encoder produced no packets across %d frames + flush", nFrames)

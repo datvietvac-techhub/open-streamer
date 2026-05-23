@@ -120,7 +120,25 @@ message InputPacket {
 
 message OutputPacket {
   int32  target_index   = 1; // matches Target.index
-  bytes  data           = 2; // encoded MPEG-TS chunk for the rendition buffer
+  bytes  data           = 2; // codec ES bytes (Annex-B for H.264/H.265, raw ADTS for AAC)
+  Codec  codec          = 3; // identifies the codec for the supervisor's AV-path write
+  int64  pts_ms         = 4; // milliseconds; from encoder for video, demuxer for audio
+  int64  dts_ms         = 5; // milliseconds; equals pts_ms when source has no separate DTS
+  bool   keyframe       = 6; // IDR for H.264/H.265; always false for AAC
+}
+
+// Codec identifies the elementary-stream type of an OutputPacket so the
+// supervisor can build domain.AVPacket without inspecting bytes.
+//
+// CODEC_UNSPECIFIED keeps the field zero-value safe: an older subprocess
+// (or any bug that leaves codec unset) surfaces as a clear "unknown
+// codec" error in the supervisor rather than silently misrouted into
+// the H.264 path.
+enum Codec {
+  CODEC_UNSPECIFIED = 0;
+  CODEC_H264        = 1;
+  CODEC_H265        = 2;
+  CODEC_AAC         = 3;
 }
 
 message SwitchInput {

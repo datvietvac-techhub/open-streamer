@@ -18,7 +18,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v6.33.0
-// source: internal/transcoder/native/proto/transcoder.proto
+// source: transcoder.proto
 
 package transcoderpb
 
@@ -135,5 +135,5 @@ var Transcoder_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "internal/transcoder/native/proto/transcoder.proto",
+	Metadata: "transcoder.proto",
 }

@@ -61,7 +61,7 @@ func TestDecoder_RoundtripsLibx264Output(t *testing.T) {
 		frame.Free()
 		require.NoError(t, err)
 		for _, pkt := range encPkts {
-			frames, err := dec.Decode(pkt, int64(i), int64(i))
+			frames, err := dec.Decode(pkt.Data, int64(i), int64(i))
 			require.NoError(t, err)
 			for _, f := range frames {
 				assert.Equal(t, width, f.Width())
@@ -77,7 +77,7 @@ func TestDecoder_RoundtripsLibx264Output(t *testing.T) {
 	flushPkts, err := enc.Flush()
 	require.NoError(t, err)
 	for _, pkt := range flushPkts {
-		frames, err := dec.Decode(pkt, 0, 0)
+		frames, err := dec.Decode(pkt.Data, 0, 0)
 		require.NoError(t, err)
 		for _, f := range frames {
 			f.Free()

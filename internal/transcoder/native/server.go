@@ -140,17 +140,26 @@ func (s *Server) flushAndSend(stream pb.Transcoder_RunServer, p *StreamPipeline)
 	return s.sendOutputs(stream, tail, 0)
 }
 
-// sendOutputs wraps each encoded packet in an Event_Packet and sends
-// it on the gRPC stream. targetIndex is forwarded so the supervisor
-// knows which rendition buffer to write into; today the pipeline only
-// emits one target (P3) so we hardcode 0.
-func (s *Server) sendOutputs(stream pb.Transcoder_RunServer, outs [][]byte, targetIndex int32) error {
-	for _, b := range outs {
+// sendOutputs wraps each pipeline OutputFrame in an Event_Packet and
+// sends it on the gRPC stream. targetIndex is forwarded so the
+// supervisor knows which rendition buffer to write into; today the
+// pipeline only emits one target (P3) so we hardcode 0.
+//
+// Codec / PTS / DTS / keyframe are populated so the supervisor can
+// build a properly-shaped domain.AVPacket without inspecting bytes —
+// the AV-path write to the buffer hub then drives publisher's
+// tsmux.FromAV with correct codec routing and keyframe alignment.
+func (s *Server) sendOutputs(stream pb.Transcoder_RunServer, outs []OutputFrame, targetIndex int32) error {
+	for _, o := range outs {
 		if err := stream.Send(&pb.Event{
 			Body: &pb.Event_Packet{
 				Packet: &pb.OutputPacket{
 					TargetIndex: targetIndex,
-					Data:        b,
+					Data:        o.Data,
+					Codec:       protoCodec(o.Codec),
+					PtsMs:       o.PTS,
+					DtsMs:       o.DTS,
+					Keyframe:    o.Keyframe,
 				},
 			},
 		}); err != nil {
@@ -158,6 +167,22 @@ func (s *Server) sendOutputs(stream pb.Transcoder_RunServer, outs [][]byte, targ
 		}
 	}
 	return nil
+}
+
+// protoCodec maps the pipeline's local codec enum to the wire enum.
+// esCodecUnknown becomes CODEC_UNSPECIFIED so the supervisor surfaces
+// a clear error instead of misrouting bytes.
+func protoCodec(c esFrameCodec) pb.Codec {
+	switch c {
+	case esCodecH264:
+		return pb.Codec_CODEC_H264
+	case esCodecH265:
+		return pb.Codec_CODEC_H265
+	case esCodecAAC:
+		return pb.Codec_CODEC_AAC
+	default:
+		return pb.Codec_CODEC_UNSPECIFIED
+	}
 }
 
 // terminalError builds an Event_Error with terminal=true so the

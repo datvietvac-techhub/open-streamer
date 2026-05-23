@@ -189,7 +189,7 @@ func TestPipeline_RoundtripEncodeDecodeScaleEncode(t *testing.T) {
 
 		// 2) Feed each encoded packet into the decoder.
 		for _, pkt := range srcPkts {
-			frames, err := dec.Decode(pkt, int64(i), int64(i))
+			frames, err := dec.Decode(pkt.Data, int64(i), int64(i))
 			require.NoError(t, err)
 
 			// 3) Scale each decoded frame and 4) re-encode at the
@@ -203,7 +203,7 @@ func TestPipeline_RoundtripEncodeDecodeScaleEncode(t *testing.T) {
 				scaled.Free()
 				require.NoError(t, err)
 				for _, rp := range rendPkts {
-					rendBytes += len(rp)
+					rendBytes += len(rp.Data)
 				}
 			}
 		}
