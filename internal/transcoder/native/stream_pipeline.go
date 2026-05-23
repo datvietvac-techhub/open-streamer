@@ -20,13 +20,19 @@ type PipelineConfig struct {
 	Renditions []RenditionConfig
 }
 
-// RenditionConfig groups the scaler + encoder for one output rendition
-// (e.g., 1080p@3500k, 720p@1600k, 480p@800k). The pipeline runs N of
-// these from one decoded frame so the buffer hub gets one output per
-// rendition target.
+// RenditionConfig groups the scaler + encoder + optional watermark for
+// one output rendition (e.g., 1080p@3500k, 720p@1600k, 480p@800k).
+// The pipeline runs N of these from one decoded frame so the buffer
+// hub gets one output per rendition target.
+//
+// Watermark is applied AFTER scale so the overlay position is in the
+// rendition's pixel space — a top_right offset of 16 px stays
+// readable on 480p without disappearing off-canvas, which it would
+// if we baked the overlay before scaling.
 type RenditionConfig struct {
-	Encoder EncoderConfig
-	Scaler  ScalerConfig
+	Encoder   EncoderConfig
+	Scaler    ScalerConfig
+	Watermark WatermarkConfig
 }
 
 // BroadcastTargetIndex marks an OutputFrame as "write to every
@@ -80,9 +86,13 @@ type StreamPipeline struct {
 	cfg PipelineConfig
 
 	// Long-lived across switch. One entry per rendition; encoders[i]
-	// pairs with scalers[i] and emits OutputFrames with TargetIndex=i.
-	encoders []*Encoder
-	scalers  []*Scaler
+	// pairs with scalers[i] (+ optional watermarkers[i]) and emits
+	// OutputFrames with TargetIndex=i. watermarkers[i] is nil when
+	// the rendition has no watermark configured, so the encode loop
+	// can skip a no-op filter pass instead of paying the graph cost.
+	encoders     []*Encoder
+	scalers      []*Scaler
+	watermarkers []*Watermarker
 
 	// Decoder lifecycle is per-input. Recreated by SwitchInput.
 	mu      sync.Mutex
@@ -127,6 +137,7 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 
 	encoders := make([]*Encoder, 0, len(cfg.Renditions))
 	scalers := make([]*Scaler, 0, len(cfg.Renditions))
+	watermarkers := make([]*Watermarker, 0, len(cfg.Renditions))
 	closeAll := func() {
 		for _, e := range encoders {
 			e.Close()
@@ -134,21 +145,22 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 		for _, s := range scalers {
 			s.Close()
 		}
+		for _, w := range watermarkers {
+			if w != nil {
+				w.Close()
+			}
+		}
 	}
 
 	for i, r := range cfg.Renditions {
-		enc, err := NewEncoder(r.Encoder)
+		enc, sc, wm, err := buildRendition(r)
 		if err != nil {
 			closeAll()
-			return nil, fmt.Errorf("pipeline: rendition %d encoder: %w", i, err)
+			return nil, fmt.Errorf("pipeline: rendition %d: %w", i, err)
 		}
 		encoders = append(encoders, enc)
-		sc, err := NewScaler(r.Scaler)
-		if err != nil {
-			closeAll()
-			return nil, fmt.Errorf("pipeline: rendition %d scaler: %w", i, err)
-		}
 		scalers = append(scalers, sc)
+		watermarkers = append(watermarkers, wm)
 	}
 
 	dec, err := NewDecoder(cfg.Decoder)
@@ -157,11 +169,36 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 		return nil, fmt.Errorf("pipeline: decoder: %w", err)
 	}
 	return &StreamPipeline{
-		cfg:      cfg,
-		encoders: encoders,
-		scalers:  scalers,
-		decoder:  dec,
+		cfg:          cfg,
+		encoders:     encoders,
+		scalers:      scalers,
+		watermarkers: watermarkers,
+		decoder:      dec,
 	}, nil
+}
+
+// buildRendition allocates one rendition's encoder + scaler +
+// optional watermarker, freeing the earlier allocations if any later
+// step fails. Pulling this out of NewStreamPipeline keeps the
+// constructor's branching shallow enough to stay under the cognitive-
+// complexity bar.
+func buildRendition(r RenditionConfig) (*Encoder, *Scaler, *Watermarker, error) {
+	enc, err := NewEncoder(r.Encoder)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("encoder: %w", err)
+	}
+	sc, err := NewScaler(r.Scaler)
+	if err != nil {
+		enc.Close()
+		return nil, nil, nil, fmt.Errorf("scaler: %w", err)
+	}
+	wm, err := NewWatermarker(r.Watermark, r.Encoder.Width, r.Encoder.Height, r.Encoder.Framerate)
+	if err != nil {
+		sc.Close()
+		enc.Close()
+		return nil, nil, nil, fmt.Errorf("watermark: %w", err)
+	}
+	return enc, sc, wm, nil
 }
 
 // ProcessPacket feeds one compressed packet from the active input into
@@ -429,7 +466,7 @@ func (p *StreamPipeline) Flush() ([]OutputFrame, error) {
 }
 
 // Close releases the decoder, demuxer, and every rendition's scaler +
-// encoder. Idempotent.
+// watermark + encoder. Idempotent.
 func (p *StreamPipeline) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -448,6 +485,11 @@ func (p *StreamPipeline) Close() {
 	}
 	if dec != nil {
 		dec.Close()
+	}
+	for _, wm := range p.watermarkers {
+		if wm != nil {
+			wm.Close()
+		}
 	}
 	for _, sc := range p.scalers {
 		sc.Close()
@@ -529,15 +571,31 @@ func (p *StreamPipeline) encodeOne(f *astiav.Frame) ([]OutputFrame, error) {
 }
 
 // encodeOneRendition runs one frame through rendition i's scaler +
-// encoder and returns the encoded packets tagged with TargetIndex=i.
+// optional watermark + encoder and returns the encoded packets
+// tagged with TargetIndex=i. PTS is set on the frame the encoder
+// actually consumes — for the watermark path that's the filtered
+// frame, since the filter graph passes PTS through and the encoder
+// reads it back from there.
 func (p *StreamPipeline) encodeOneRendition(i int, f *astiav.Frame, pts int64) ([]OutputFrame, error) {
 	scaled, err := p.scalers[i].Scale(f)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: rendition %d scale: %w", i, err)
 	}
 	scaled.SetPts(pts)
-	pkts, err := p.encoders[i].Encode(scaled)
-	scaled.Free()
+
+	toEncode := scaled
+	if wm := p.watermarkers[i]; wm != nil {
+		filtered, err := wm.Filter(scaled)
+		scaled.Free()
+		if err != nil {
+			return nil, fmt.Errorf("pipeline: rendition %d watermark: %w", i, err)
+		}
+		filtered.SetPts(pts)
+		toEncode = filtered
+	}
+
+	pkts, err := p.encoders[i].Encode(toEncode)
+	toEncode.Free()
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: rendition %d encode: %w", i, err)
 	}

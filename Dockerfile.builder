@@ -30,6 +30,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential nasm yasm \
     libx264-dev libx265-dev \
     libfdk-aac-dev libmp3lame-dev libopus-dev libvorbis-dev \
+    libfreetype-dev libfontconfig1-dev libharfbuzz-dev \
+    fonts-dejavu-core \
     zlib1g-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -75,6 +77,7 @@ RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" | t
         --enable-gpl --enable-nonfree \
         --enable-libx264 --enable-libx265 \
         --enable-libfdk-aac --enable-libmp3lame --enable-libopus --enable-libvorbis \
+        --enable-libfreetype --enable-libfontconfig --enable-libharfbuzz \
         --enable-nvenc --enable-cuvid \
         --enable-ffnvcodec \
         --disable-doc --disable-debug \

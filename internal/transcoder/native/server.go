@@ -218,6 +218,7 @@ func pipelineConfigFromProto(c *pb.ConfigureRequest) PipelineConfig {
 	cfg := PipelineConfig{
 		Decoder: DecoderConfig{Codec: "h264"},
 	}
+	wm := watermarkConfigFromProto(c.GetWatermark())
 	for _, t := range c.GetTargets() {
 		fr := framerateOrDefault(t.GetFramerate())
 		// Prefer the supervisor-resolved gop_frames; only fall back to
@@ -253,9 +254,34 @@ func pipelineConfigFromProto(c *pb.ConfigureRequest) PipelineConfig {
 				DstHeight:   int(t.GetHeight()),
 				DstPixelFmt: 0, // PixelFormatYuv420P; filled by NewScaler default.
 			},
+			Watermark: wm,
 		})
 	}
 	return cfg
+}
+
+// watermarkConfigFromProto narrows the wire-level WatermarkConfig
+// into the pipeline's local shape. A nil / disabled proto value
+// returns the zero WatermarkConfig (Enabled=false), which the
+// pipeline reads as "no overlay" and skips the filter graph
+// allocation for that rendition.
+func watermarkConfigFromProto(w *pb.WatermarkConfig) WatermarkConfig {
+	if w == nil || !w.GetEnabled() {
+		return WatermarkConfig{}
+	}
+	return WatermarkConfig{
+		Enabled:   true,
+		Type:      w.GetType(),
+		Text:      w.GetText(),
+		AssetPath: w.GetAssetPath(),
+		Position:  w.GetPosition(),
+		OffsetX:   int(w.GetOffsetX()),
+		OffsetY:   int(w.GetOffsetY()),
+		Opacity:   w.GetOpacity(),
+		FontSize:  int(w.GetFontSize()),
+		FontColor: w.GetFontColor(),
+		FontFile:  w.GetFontFile(),
+	}
 }
 
 // AudioConfigFromProto narrows the proto AudioConfig to the
