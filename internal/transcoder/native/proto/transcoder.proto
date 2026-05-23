@@ -73,6 +73,11 @@ message Target {
   int32  bitrate_kbps      = 5;
   int32  max_bitrate_kbps  = 6;
   double framerate         = 7;
+  // gop_seconds is the legacy per-profile keyframe interval (seconds).
+  // Honoured only when gop_frames == 0 — frame-count is preferred
+  // because seconds-to-frames conversion at the subprocess loses
+  // precision when the configured GOP isn't an integer multiple of
+  // the framerate.
   int32  gop_seconds       = 8;
   string codec             = 9;
   string preset            = 10;
@@ -84,6 +89,12 @@ message Target {
   int32  refs_or_neg1      = 14;
   string sar               = 15;
   string resize_mode       = 16;
+  // gop_frames is the preferred keyframe interval expressed in
+  // frames (encoder's native unit). The supervisor resolves
+  // profile.KeyframeInterval (seconds) and TranscoderGlobalConfig.GOP
+  // (frames) into this single field so the subprocess does no math.
+  // Zero = encoder default.
+  int32  gop_frames        = 17;
 }
 
 message AudioConfig {

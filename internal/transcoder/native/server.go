@@ -220,6 +220,12 @@ func pipelineConfigFromProto(c *pb.ConfigureRequest) PipelineConfig {
 	}
 	for _, t := range c.GetTargets() {
 		fr := framerateOrDefault(t.GetFramerate())
+		// Prefer the supervisor-resolved gop_frames; only fall back to
+		// the legacy gop_seconds for sources still on the old wire.
+		gop := int(t.GetGopFrames())
+		if gop == 0 {
+			gop = int(t.GetGopSeconds()) * fr
+		}
 		enc := EncoderConfig{
 			Codec:       encoderCodecForBackend(c.GetHwBackend(), t.GetCodec()),
 			Width:       int(t.GetWidth()),
@@ -227,7 +233,7 @@ func pipelineConfigFromProto(c *pb.ConfigureRequest) PipelineConfig {
 			Framerate:   fr,
 			BitrateKbps: int(t.GetBitrateKbps()),
 			MaxBitrate:  int(t.GetMaxBitrateKbps()),
-			GOPSize:     int(t.GetGopSeconds()) * fr,
+			GOPSize:     gop,
 			MaxBFrames:  bframesOrDefault(t.GetBframesOrNeg1()),
 			Options:     map[string]string{},
 		}

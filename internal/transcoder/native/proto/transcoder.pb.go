@@ -459,17 +459,28 @@ type Target struct {
 	BitrateKbps    int32                  `protobuf:"varint,5,opt,name=bitrate_kbps,json=bitrateKbps,proto3" json:"bitrate_kbps,omitempty"`
 	MaxBitrateKbps int32                  `protobuf:"varint,6,opt,name=max_bitrate_kbps,json=maxBitrateKbps,proto3" json:"max_bitrate_kbps,omitempty"`
 	Framerate      float64                `protobuf:"fixed64,7,opt,name=framerate,proto3" json:"framerate,omitempty"`
-	GopSeconds     int32                  `protobuf:"varint,8,opt,name=gop_seconds,json=gopSeconds,proto3" json:"gop_seconds,omitempty"`
-	Codec          string                 `protobuf:"bytes,9,opt,name=codec,proto3" json:"codec,omitempty"`
-	Preset         string                 `protobuf:"bytes,10,opt,name=preset,proto3" json:"preset,omitempty"`
-	Profile        string                 `protobuf:"bytes,11,opt,name=profile,proto3" json:"profile,omitempty"`
-	Level          string                 `protobuf:"bytes,12,opt,name=level,proto3" json:"level,omitempty"`
+	// gop_seconds is the legacy per-profile keyframe interval (seconds).
+	// Honoured only when gop_frames == 0 — frame-count is preferred
+	// because seconds-to-frames conversion at the subprocess loses
+	// precision when the configured GOP isn't an integer multiple of
+	// the framerate.
+	GopSeconds int32  `protobuf:"varint,8,opt,name=gop_seconds,json=gopSeconds,proto3" json:"gop_seconds,omitempty"`
+	Codec      string `protobuf:"bytes,9,opt,name=codec,proto3" json:"codec,omitempty"`
+	Preset     string `protobuf:"bytes,10,opt,name=preset,proto3" json:"preset,omitempty"`
+	Profile    string `protobuf:"bytes,11,opt,name=profile,proto3" json:"profile,omitempty"`
+	Level      string `protobuf:"bytes,12,opt,name=level,proto3" json:"level,omitempty"`
 	// Bframes and refs use sentinel -1 for "encoder default" because
 	// proto3 cannot distinguish absent int32 from zero.
 	BframesOrNeg1 int32  `protobuf:"varint,13,opt,name=bframes_or_neg1,json=bframesOrNeg1,proto3" json:"bframes_or_neg1,omitempty"`
 	RefsOrNeg1    int32  `protobuf:"varint,14,opt,name=refs_or_neg1,json=refsOrNeg1,proto3" json:"refs_or_neg1,omitempty"`
 	Sar           string `protobuf:"bytes,15,opt,name=sar,proto3" json:"sar,omitempty"`
 	ResizeMode    string `protobuf:"bytes,16,opt,name=resize_mode,json=resizeMode,proto3" json:"resize_mode,omitempty"`
+	// gop_frames is the preferred keyframe interval expressed in
+	// frames (encoder's native unit). The supervisor resolves
+	// profile.KeyframeInterval (seconds) and TranscoderGlobalConfig.GOP
+	// (frames) into this single field so the subprocess does no math.
+	// Zero = encoder default.
+	GopFrames     int32 `protobuf:"varint,17,opt,name=gop_frames,json=gopFrames,proto3" json:"gop_frames,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -614,6 +625,13 @@ func (x *Target) GetResizeMode() string {
 		return x.ResizeMode
 	}
 	return ""
+}
+
+func (x *Target) GetGopFrames() int32 {
+	if x != nil {
+		return x.GopFrames
+	}
+	return 0
 }
 
 type AudioConfig struct {
@@ -1254,7 +1272,7 @@ const file_transcoder_proto_rawDesc = "" +
 	"hw_backend\x18\x03 \x01(\x0e2\x18.transcoder.v1.HWBackendR\thwBackend\x12/\n" +
 	"\atargets\x18\x04 \x03(\v2\x15.transcoder.v1.TargetR\atargets\x120\n" +
 	"\x05audio\x18\x05 \x01(\v2\x1a.transcoder.v1.AudioConfigR\x05audio\x12<\n" +
-	"\twatermark\x18\x06 \x01(\v2\x1e.transcoder.v1.WatermarkConfigR\twatermark\"\xd7\x03\n" +
+	"\twatermark\x18\x06 \x01(\v2\x1e.transcoder.v1.WatermarkConfigR\twatermark\"\xf6\x03\n" +
 	"\x06Target\x12\"\n" +
 	"\routput_buf_id\x18\x01 \x01(\tR\voutputBufId\x12\x14\n" +
 	"\x05index\x18\x02 \x01(\x05R\x05index\x12\x14\n" +
@@ -1275,7 +1293,9 @@ const file_transcoder_proto_rawDesc = "" +
 	"refsOrNeg1\x12\x10\n" +
 	"\x03sar\x18\x0f \x01(\tR\x03sar\x12\x1f\n" +
 	"\vresize_mode\x18\x10 \x01(\tR\n" +
-	"resizeMode\"\xaf\x01\n" +
+	"resizeMode\x12\x1d\n" +
+	"\n" +
+	"gop_frames\x18\x11 \x01(\x05R\tgopFrames\"\xaf\x01\n" +
 	"\vAudioConfig\x12\x12\n" +
 	"\x04copy\x18\x01 \x01(\bR\x04copy\x12\x14\n" +
 	"\x05codec\x18\x02 \x01(\tR\x05codec\x12\x1b\n" +

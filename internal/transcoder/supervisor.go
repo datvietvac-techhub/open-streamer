@@ -485,6 +485,7 @@ func (sv *supervisor) buildConfigure() *pb.Request {
 			MaxBitrateKbps: int32(t.Profile.MaxBitrate), //nolint:gosec
 			Framerate:      t.Profile.Framerate,
 			GopSeconds:     int32(t.Profile.KeyframeInterval), //nolint:gosec
+			GopFrames:      resolveGopFrames(t.Profile, sv.tc),
 			Codec:          t.Profile.Codec,
 			Preset:         t.Profile.Preset,
 			Profile:        t.Profile.CodecProfile,
@@ -496,6 +497,31 @@ func (sv *supervisor) buildConfigure() *pb.Request {
 		})
 	}
 	return &pb.Request{Body: &pb.Request_Configure{Configure: cfg}}
+}
+
+// resolveGopFrames picks the keyframe interval (in encoder frames) for
+// one rendition target. Precedence is per-profile override → global
+// frame-count → 0 (encoder default), matching how operators expect to
+// set the value: a profile that needs a specific cadence (e.g.
+// matching its HLS segment duration) declares it explicitly; the rest
+// inherit a server-wide GOP set in the global transcoder section.
+//
+// Without this resolver every rendition used the encoder's built-in
+// default (h264_nvenc: 250 frames ≈ 10s @ 25fps), so HLS segments
+// rounded up to that — operators who set global.gop=100 to get 4 s
+// segments saw 10s instead.
+func resolveGopFrames(p Profile, tc *domain.TranscoderConfig) int32 {
+	fr := p.Framerate
+	if fr <= 0 && tc != nil && tc.Global.FPS > 0 {
+		fr = float64(tc.Global.FPS)
+	}
+	if p.KeyframeInterval > 0 && fr > 0 {
+		return int32(float64(p.KeyframeInterval) * fr) //nolint:gosec // bounded by realistic GOP * fps
+	}
+	if tc != nil && tc.Global.GOP > 0 {
+		return int32(tc.Global.GOP) //nolint:gosec
+	}
+	return 0
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────
