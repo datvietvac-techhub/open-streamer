@@ -163,6 +163,20 @@ type hlsSegmenter struct {
 	segStart time.Time
 	discNext bool // schedule EXT-X-DISCONTINUITY for the next flushed segment
 
+	// Media-PTS bookkeeping for AV-path segmenting. Tracks the first
+	// and most recent AV packet PTS (ms) seen in the current segment
+	// so cut decisions and EXTINF durations come from the source
+	// timeline instead of wallclock — wallclock-based cuts skip
+	// IDRs that land slightly before the segDur boundary, producing
+	// segments that span every OTHER GOP (8s instead of 4s for a
+	// 100-frame GOP at 25fps).
+	//
+	// hasMediaStart guards against using a zero segStartMediaPTS for
+	// segments that haven't seen any AV packet yet (raw-TS path).
+	segStartMediaPTS uint64
+	lastMediaPTS     uint64
+	hasMediaStart    bool
+
 	// segBufStartOffset is the absolute byte offset (within the lifetime of
 	// the raw-TS scanner) corresponding to segBuf[0]. Used to translate the
 	// scanner's stream-absolute IDR offsets into segBuf-relative positions
@@ -281,6 +295,7 @@ func (p *hlsSegmenter) handleIncoming(
 		if p.shouldDropAVPacket(pkt.AV) {
 			return
 		}
+		p.recordMediaTime(pkt.AV)
 		p.maybeFlushAtKeyframe(pkt.AV, segDur)
 	}
 	rawTS := len(pkt.TS) > 0 && pkt.AV == nil
@@ -360,20 +375,55 @@ func (p *hlsSegmenter) onSessionBoundary(avMux **tsmux.FromAV, tsCarry *[]byte) 
 	*tsCarry = nil
 }
 
+// recordMediaTime captures the AV packet's PTS so segment age + EXTINF
+// can be derived from the source timeline instead of wallclock. Called
+// for every AV packet (audio and video) before maybeFlushAtKeyframe so
+// segStartMediaPTS reflects the FIRST packet of the segment, regardless
+// of whether it was an audio or video frame.
+//
+// Wallclock-based cuts skip IDRs that arrive slightly before
+// time.Since(segStart) crosses segDur — for a 100-frame GOP at 25 fps
+// the encoder emits an IDR exactly at the 4 s boundary, the wallclock
+// check fails by a few ms, the IDR is dropped, and the segmenter
+// waits for the next one ~4 s later, producing 8 s segments that
+// span two GOPs each.
+func (p *hlsSegmenter) recordMediaTime(av *domain.AVPacket) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.hasMediaStart {
+		p.segStartMediaPTS = av.PTSms
+		p.hasMediaStart = true
+	}
+	p.lastMediaPTS = av.PTSms
+}
+
 // maybeFlushAtKeyframe lands a fresh segment boundary on every IDR once
 // the in-progress segment has reached segDur. AV-path streams use this to
 // produce GOP-aligned segments; raw-TS streams rely on the keyframe
 // scanner in tickFlush instead. Must not be called with p.mu held.
+//
+// Age is measured in the source's media PTS timeline. After cutting,
+// re-anchor segStartMediaPTS to THIS keyframe's PTS so the next
+// segment starts from the right point (the keyframe's TS bytes will
+// be appended into segBuf moments later by tsmux.FromAV).
 func (p *hlsSegmenter) maybeFlushAtKeyframe(av *domain.AVPacket, segDur time.Duration) {
 	if !av.KeyFrame {
 		return
 	}
 	p.mu.Lock()
-	if len(p.segBuf) > 0 && !p.segStart.IsZero() &&
-		time.Since(p.segStart) >= segDur {
-		p.flushLocked()
+	defer p.mu.Unlock()
+
+	if len(p.segBuf) == 0 || !p.hasMediaStart {
+		return
 	}
-	p.mu.Unlock()
+	segDurMs := uint64(segDur.Milliseconds()) //nolint:gosec // segDur > 0 always
+	if av.PTSms-p.segStartMediaPTS < segDurMs {
+		return
+	}
+	p.flushLocked()
+	p.segStartMediaPTS = av.PTSms
+	p.lastMediaPTS = av.PTSms
+	p.hasMediaStart = true
 }
 
 // tickFlush is called every 50 ms by the ticker; it handles:
@@ -475,7 +525,15 @@ func (p *hlsSegmenter) flushLocked() {
 		return
 	}
 
+	// Prefer media-PTS duration when an AV packet anchored the
+	// segment — wallclock drifts on bursty buffer-hub reads and
+	// produces EXTINF values that disagree with the player's own
+	// playback clock. Fall back to wallclock for raw-TS-only
+	// segments that never recorded a media start.
 	dur := time.Since(p.segStart).Seconds()
+	if p.hasMediaStart && p.lastMediaPTS > p.segStartMediaPTS {
+		dur = float64(p.lastMediaPTS-p.segStartMediaPTS) / 1000.0
+	}
 	if dur <= 0 {
 		dur = float64(p.segSec)
 	}
@@ -488,6 +546,9 @@ func (p *hlsSegmenter) flushLocked() {
 	data := append(make([]byte, 0, len(p.segBuf)), p.segBuf...)
 	p.segBuf = p.segBuf[:0]
 	p.segStart = time.Time{}
+	p.hasMediaStart = false
+	p.segStartMediaPTS = 0
+	p.lastMediaPTS = 0
 	// Re-anchor the segBuf-to-scanner offset mapping. The scanner has been
 	// fed every byte we just flushed, so the next byte appended to the
 	// (now-empty) segBuf will correspond to scanner.feedOffset. Without
