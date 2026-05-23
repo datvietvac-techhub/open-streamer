@@ -9,40 +9,66 @@ import (
 	"github.com/asticode/go-astiav"
 )
 
-// PipelineConfig bundles the three constituent configs for a single
-// transcoded rendition's worth of pipeline. P5 will replace this with
-// a per-stream PipelineConfig carrying N rendition encoders sharing
-// one decoder; P3's job is just to prove the encoder survives a
-// decoder swap.
+// PipelineConfig describes one stream's full transcode topology: a
+// single decoder feeding N rendition pipelines (scaler + encoder)
+// that share its decoded frames. One decoder is the right choice
+// because decoding is the expensive half — running it once for N
+// renditions saves ~N× the GPU memory and CPU cost vs spinning a
+// decoder per rendition.
 type PipelineConfig struct {
-	Encoder EncoderConfig
-	Scaler  ScalerConfig
-	Decoder DecoderConfig
+	Decoder    DecoderConfig
+	Renditions []RenditionConfig
 }
 
+// RenditionConfig groups the scaler + encoder for one output rendition
+// (e.g., 1080p@3500k, 720p@1600k, 480p@800k). The pipeline runs N of
+// these from one decoded frame so the buffer hub gets one output per
+// rendition target.
+type RenditionConfig struct {
+	Encoder EncoderConfig
+	Scaler  ScalerConfig
+}
+
+// BroadcastTargetIndex marks an OutputFrame as "write to every
+// rendition buffer", not just one. The supervisor's writeOutputPacket
+// path fans audio passthrough across every target so each variant
+// segment contains both the rendition's video AND the shared audio.
+const BroadcastTargetIndex int32 = -1
+
 // OutputFrame is one elementary-stream access unit ready to leave the
-// subprocess: transcoded video from the encoder, or AAC passed
-// straight through from the demuxer. Codec / PTS / DTS / Keyframe let
-// the supervisor build the right domain.AVPacket on the receive side
-// without re-inspecting bytes.
+// subprocess: transcoded video from one rendition encoder, or AAC
+// passed straight through from the demuxer. Codec / PTS / DTS /
+// Keyframe let the supervisor build the right domain.AVPacket on the
+// receive side without re-inspecting bytes.
+//
+// TargetIndex routes the frame to a specific rendition buffer; the
+// sentinel BroadcastTargetIndex (-1) means write to every rendition
+// (used for the shared audio passthrough).
 //
 // PTS / DTS are in milliseconds — converted to the publisher's
 // expected time base at the pipeline edge so downstream consumers
 // (tsmux.FromAV, segmenters, players) all see a uniform clock.
 type OutputFrame struct {
-	Data     []byte
-	Codec    esFrameCodec
-	PTS      int64
-	DTS      int64
-	Keyframe bool
+	Data        []byte
+	Codec       esFrameCodec
+	PTS         int64
+	DTS         int64
+	Keyframe    bool
+	TargetIndex int32
 }
 
-// StreamPipeline composes decoder → scaler → encoder into the single
-// data-flow the StreamRunner subprocess will execute per stream. Its
-// central design invariant is: SwitchInput tears down and recreates the
-// Decoder while the Scaler + Encoder stay alive. That is the property
-// the FFmpeg subprocess implementation could not provide and is the
-// whole reason for the migration.
+// StreamPipeline composes decoder → N renditions (scaler + encoder)
+// into the single data-flow the StreamRunner subprocess will execute
+// per stream. Its central design invariant is: SwitchInput tears down
+// and recreates the Decoder while every Scaler + Encoder stays alive.
+// That is the property the FFmpeg subprocess implementation could not
+// provide and is the whole reason for the migration.
+//
+// N renditions sharing one decoder is the multi-rendition design
+// choice: decoding once and fanning out to N scaler/encoder pairs
+// costs roughly 1×decode + N×(scale+encode) instead of N×(decode+
+// scale+encode). For a typical ABR ladder (1080p/720p/480p) this
+// saves ~2× the GPU memory and decoder cycles.
 //
 // Not safe for concurrent use across data and control plane — the
 // caller (StreamRunner in P4) drives ProcessPacket on one goroutine
@@ -53,9 +79,10 @@ type OutputFrame struct {
 type StreamPipeline struct {
 	cfg PipelineConfig
 
-	// Long-lived across switch.
-	encoder *Encoder
-	scaler  *Scaler
+	// Long-lived across switch. One entry per rendition; encoders[i]
+	// pairs with scalers[i] and emits OutputFrames with TargetIndex=i.
+	encoders []*Encoder
+	scalers  []*Scaler
 
 	// Decoder lifecycle is per-input. Recreated by SwitchInput.
 	mu      sync.Mutex
@@ -88,30 +115,52 @@ type StreamPipeline struct {
 	sawKeyframe bool
 }
 
-// NewStreamPipeline constructs all three stages. On error any
-// partially-allocated stages are torn down before returning so the
-// caller does not need defensive Close calls.
+// NewStreamPipeline constructs the decoder + every rendition's
+// scaler/encoder pair. On error every partially-allocated stage is
+// torn down before returning so the caller does not need defensive
+// Close calls. Empty Renditions is rejected — a pipeline with no
+// output target has nothing to do and would silently drop frames.
 func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
-	enc, err := NewEncoder(cfg.Encoder)
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: encoder: %w", err)
+	if len(cfg.Renditions) == 0 {
+		return nil, errors.New("pipeline: at least one rendition required")
 	}
-	sc, err := NewScaler(cfg.Scaler)
-	if err != nil {
-		enc.Close()
-		return nil, fmt.Errorf("pipeline: scaler: %w", err)
+
+	encoders := make([]*Encoder, 0, len(cfg.Renditions))
+	scalers := make([]*Scaler, 0, len(cfg.Renditions))
+	closeAll := func() {
+		for _, e := range encoders {
+			e.Close()
+		}
+		for _, s := range scalers {
+			s.Close()
+		}
 	}
+
+	for i, r := range cfg.Renditions {
+		enc, err := NewEncoder(r.Encoder)
+		if err != nil {
+			closeAll()
+			return nil, fmt.Errorf("pipeline: rendition %d encoder: %w", i, err)
+		}
+		encoders = append(encoders, enc)
+		sc, err := NewScaler(r.Scaler)
+		if err != nil {
+			closeAll()
+			return nil, fmt.Errorf("pipeline: rendition %d scaler: %w", i, err)
+		}
+		scalers = append(scalers, sc)
+	}
+
 	dec, err := NewDecoder(cfg.Decoder)
 	if err != nil {
-		sc.Close()
-		enc.Close()
+		closeAll()
 		return nil, fmt.Errorf("pipeline: decoder: %w", err)
 	}
 	return &StreamPipeline{
-		cfg:     cfg,
-		encoder: enc,
-		scaler:  sc,
-		decoder: dec,
+		cfg:      cfg,
+		encoders: encoders,
+		scalers:  scalers,
+		decoder:  dec,
 	}, nil
 }
 
@@ -201,11 +250,13 @@ func (p *StreamPipeline) decodeAndEncodeESFrames(frames []esFrame) ([]OutputFram
 	return out, nil
 }
 
-// passthroughAudio wraps demuxed AAC frames as OutputFrames with PTS
-// taken straight from the demuxer (millisecond-domain). No decode, no
-// re-encode — the original AAC bytes ship as-is. The supervisor's AV
-// write path picks them up and feeds publisher's tsmux.FromAV, which
-// muxes them into the output TS alongside the transcoded video.
+// passthroughAudio wraps demuxed AAC frames as OutputFrames tagged
+// with the BroadcastTargetIndex sentinel so the supervisor fans each
+// frame across every rendition's buffer. PTS comes straight from the
+// demuxer (millisecond-domain); no decode / re-encode — the original
+// AAC bytes ship as-is. Each rendition publisher then muxes the same
+// audio with its own transcoded video via tsmux.FromAV, so all
+// variants stay A/V-aligned on the same source timeline.
 func (p *StreamPipeline) passthroughAudio(frames []esFrame) []OutputFrame {
 	if len(frames) == 0 {
 		return nil
@@ -213,10 +264,11 @@ func (p *StreamPipeline) passthroughAudio(frames []esFrame) []OutputFrame {
 	out := make([]OutputFrame, 0, len(frames))
 	for _, f := range frames {
 		out = append(out, OutputFrame{
-			Data:  f.data,
-			Codec: f.codec,
-			PTS:   f.pts,
-			DTS:   f.dts,
+			Data:        f.data,
+			Codec:       f.codec,
+			PTS:         f.pts,
+			DTS:         f.dts,
+			TargetIndex: BroadcastTargetIndex,
 		})
 	}
 	return out
@@ -353,25 +405,31 @@ func (p *StreamPipeline) Flush() ([]OutputFrame, error) {
 	if err != nil {
 		return append(head, out...), err
 	}
-	tailPkts, err := p.encoder.Flush()
-	if err != nil {
-		return append(head, out...), fmt.Errorf("pipeline: flush encoder: %w", err)
-	}
-	codec := encoderCodecToES(p.cfg.Encoder.Codec)
-	tail := make([]OutputFrame, 0, len(tailPkts))
-	for _, pkt := range tailPkts {
-		tail = append(tail, OutputFrame{
-			Data:     pkt.Data,
-			Codec:    codec,
-			PTS:      pkt.PTS,
-			DTS:      pkt.DTS,
-			Keyframe: pkt.Keyframe,
-		})
+
+	// Drain every rendition's encoder tail (B-frames still held).
+	var tail []OutputFrame
+	for i, enc := range p.encoders {
+		pkts, err := enc.Flush()
+		if err != nil {
+			return append(head, out...), fmt.Errorf("pipeline: rendition %d flush encoder: %w", i, err)
+		}
+		codec := encoderCodecToES(p.cfg.Renditions[i].Encoder.Codec)
+		for _, pkt := range pkts {
+			tail = append(tail, OutputFrame{
+				Data:        pkt.Data,
+				Codec:       codec,
+				PTS:         pkt.PTS,
+				DTS:         pkt.DTS,
+				Keyframe:    pkt.Keyframe,
+				TargetIndex: int32(i), //nolint:gosec // i bounded by len(encoders)
+			})
+		}
 	}
 	return append(append(head, out...), tail...), nil
 }
 
-// Close releases all three stages. Idempotent.
+// Close releases the decoder, demuxer, and every rendition's scaler +
+// encoder. Idempotent.
 func (p *StreamPipeline) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -391,26 +449,25 @@ func (p *StreamPipeline) Close() {
 	if dec != nil {
 		dec.Close()
 	}
-	if p.scaler != nil {
-		p.scaler.Close()
+	for _, sc := range p.scalers {
+		sc.Close()
 	}
-	if p.encoder != nil {
-		p.encoder.Close()
+	for _, enc := range p.encoders {
+		enc.Close()
 	}
 }
 
-// EncoderPTS returns the next PTS counter value WITHOUT consuming it.
-// Test-only inspection used to assert PTS continuity across SwitchInput
-// and to verify the encoder was not reallocated.
-//
-// Production code derives PTS implicitly via Encoder.NextPTS inside
-// runFramesThroughEncoder; callers don't need this hook for normal
-// operation.
+// EncoderPTS returns the FIRST rendition encoder's PTS counter
+// WITHOUT consuming it. Test-only inspection used to assert PTS
+// continuity across SwitchInput and to verify the encoder was not
+// reallocated. Renditions are PTS-aligned (encodeOne uses the same
+// pts for every rendition), so any single encoder reflects the
+// pipeline's PTS state.
 func (p *StreamPipeline) EncoderPTS() int64 {
 	if p.isClosed() {
 		return -1
 	}
-	return p.encoder.frameIdx
+	return p.encoders[0].frameIdx
 }
 
 // runFramesThroughEncoder scales + encodes every frame in the slice
@@ -437,47 +494,66 @@ func (p *StreamPipeline) runFramesThroughEncoder(frames []*astiav.Frame) ([]Outp
 	return out, nil
 }
 
-// encodeOne scales then encodes a single frame, wrapping each emitted
-// EncodedPacket as a video OutputFrame in millisecond time base.
+// encodeOne fans one decoded frame across every rendition: each
+// rendition's scaler resizes the frame to its target dims, then its
+// encoder produces packets tagged with TargetIndex=i so the
+// supervisor knows which rendition buffer to write each packet into.
 //
 // PTS source: the decoded frame inherits PTS from the input packet
-// (set by dec.Decode(data, pts, dts)). Forwarding it to the encoder
-// keeps the output video on the SAME timeline as the AAC passthrough
-// — both expressed in source-stream milliseconds. Without this the
-// encoder would emit PTS starting at zero while audio still rides
-// the source wallclock, and the player gets A/V drift the moment a
-// segment lands.
+// (set by dec.Decode(data, pts, dts)). Forwarding it to every
+// encoder keeps the output video on the SAME timeline as the AAC
+// passthrough — both expressed in source-stream milliseconds.
+// Without this the encoder would emit PTS starting at zero while
+// audio still rides the source wallclock, and the player gets A/V
+// drift the moment a segment lands.
 //
 // NextPTS fallback covers the Annex-B AV-path (RTMP / RTSP) which
 // today passes pts=0 through ProcessPacket; in that mode there's no
-// audio so monotonic frame indices are still self-consistent.
+// audio so monotonic frame indices are still self-consistent. The
+// fallback is taken from the FIRST encoder so renditions stay PTS-
+// aligned across the ladder.
 func (p *StreamPipeline) encodeOne(f *astiav.Frame) ([]OutputFrame, error) {
-	scaled, err := p.scaler.Scale(f)
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: scale: %w", err)
-	}
 	pts := f.Pts()
 	if pts <= 0 {
-		pts = p.encoder.NextPTS()
+		pts = p.encoders[0].NextPTS()
+	}
+	var out []OutputFrame
+	for i := range p.encoders {
+		pkts, err := p.encodeOneRendition(i, f, pts)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, pkts...)
+	}
+	return out, nil
+}
+
+// encodeOneRendition runs one frame through rendition i's scaler +
+// encoder and returns the encoded packets tagged with TargetIndex=i.
+func (p *StreamPipeline) encodeOneRendition(i int, f *astiav.Frame, pts int64) ([]OutputFrame, error) {
+	scaled, err := p.scalers[i].Scale(f)
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: rendition %d scale: %w", i, err)
 	}
 	scaled.SetPts(pts)
-	pkts, err := p.encoder.Encode(scaled)
+	pkts, err := p.encoders[i].Encode(scaled)
 	scaled.Free()
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: encode: %w", err)
+		return nil, fmt.Errorf("pipeline: rendition %d encode: %w", i, err)
 	}
 	if len(pkts) == 0 {
 		return nil, nil
 	}
-	codec := encoderCodecToES(p.cfg.Encoder.Codec)
+	codec := encoderCodecToES(p.cfg.Renditions[i].Encoder.Codec)
 	out := make([]OutputFrame, 0, len(pkts))
 	for _, pkt := range pkts {
 		out = append(out, OutputFrame{
-			Data:     pkt.Data,
-			Codec:    codec,
-			PTS:      pkt.PTS,
-			DTS:      pkt.DTS,
-			Keyframe: pkt.Keyframe,
+			Data:        pkt.Data,
+			Codec:       codec,
+			PTS:         pkt.PTS,
+			DTS:         pkt.DTS,
+			Keyframe:    pkt.Keyframe,
+			TargetIndex: int32(i), //nolint:gosec // i bounded by len(encoders)
 		})
 	}
 	return out, nil

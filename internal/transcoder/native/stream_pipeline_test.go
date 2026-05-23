@@ -32,28 +32,68 @@ func buildSourceEncoder(t *testing.T, w, h, fps int) *Encoder {
 	return enc
 }
 
-// renditionPipeline returns a pipeline that decodes h264, scales any
-// input down to 1280x720, and re-encodes at 1.6 Mbps — the production
-// 720p rendition for an HD source.
+// renditionPipeline returns a single-rendition pipeline (decode h264,
+// scale to 1280x720, re-encode at 1.6 Mbps). Single rendition is the
+// minimum the pipeline accepts and is what most legacy tests assume;
+// multi-rendition coverage lives in dedicated tests below.
 //
 //nolint:unparam // see buildSourceEncoder; fps reserved for P5.
 func renditionPipeline(t *testing.T, fps int) *StreamPipeline {
 	t.Helper()
 	p, err := NewStreamPipeline(PipelineConfig{
 		Decoder: DecoderConfig{Codec: "h264"},
-		Scaler: ScalerConfig{
-			DstWidth:    1280,
-			DstHeight:   720,
-			DstPixelFmt: astiav.PixelFormatYuv420P,
+		Renditions: []RenditionConfig{
+			{
+				Scaler: ScalerConfig{
+					DstWidth:    1280,
+					DstHeight:   720,
+					DstPixelFmt: astiav.PixelFormatYuv420P,
+				},
+				Encoder: EncoderConfig{
+					Width:       1280,
+					Height:      720,
+					Framerate:   fps,
+					BitrateKbps: 1600,
+					GOPSize:     fps,
+					MaxBFrames:  0,
+					Options:     map[string]string{"preset": "ultrafast", "tune": "zerolatency"},
+				},
+			},
 		},
-		Encoder: EncoderConfig{
-			Width:       1280,
-			Height:      720,
-			Framerate:   fps,
-			BitrateKbps: 1600,
-			GOPSize:     fps,
-			MaxBFrames:  0,
-			Options:     map[string]string{"preset": "ultrafast", "tune": "zerolatency"},
+	})
+	require.NoError(t, err)
+	return p
+}
+
+// multiRenditionPipeline returns a 3-rendition (1080p/720p/480p) ABR
+// pipeline used by P7 tests to exercise the per-rendition encode
+// loop and the OutputFrame.TargetIndex routing.
+func multiRenditionPipeline(t *testing.T, fps int) *StreamPipeline {
+	t.Helper()
+	mk := func(w, h, kbps int) RenditionConfig {
+		return RenditionConfig{
+			Scaler: ScalerConfig{
+				DstWidth:    w,
+				DstHeight:   h,
+				DstPixelFmt: astiav.PixelFormatYuv420P,
+			},
+			Encoder: EncoderConfig{
+				Width:       w,
+				Height:      h,
+				Framerate:   fps,
+				BitrateKbps: kbps,
+				GOPSize:     fps,
+				MaxBFrames:  0,
+				Options:     map[string]string{"preset": "ultrafast", "tune": "zerolatency"},
+			},
+		}
+	}
+	p, err := NewStreamPipeline(PipelineConfig{
+		Decoder: DecoderConfig{Codec: "h264"},
+		Renditions: []RenditionConfig{
+			mk(1920, 1080, 3500),
+			mk(1280, 720, 1600),
+			mk(854, 480, 800),
 		},
 	})
 	require.NoError(t, err)
@@ -92,18 +132,33 @@ func TestNewStreamPipeline_PartialFailureCleansUp(t *testing.T) {
 	t.Parallel()
 	_, err := NewStreamPipeline(PipelineConfig{
 		Decoder: DecoderConfig{Codec: "h264"},
-		Scaler: ScalerConfig{
-			DstWidth:    640,
-			DstHeight:   360,
-			DstPixelFmt: astiav.PixelFormatYuv420P,
-		},
-		Encoder: EncoderConfig{
-			Codec: "not_a_real_encoder", // forces error
-			Width: 640, Height: 360, Framerate: 25,
+		Renditions: []RenditionConfig{
+			{
+				Scaler: ScalerConfig{
+					DstWidth:    640,
+					DstHeight:   360,
+					DstPixelFmt: astiav.PixelFormatYuv420P,
+				},
+				Encoder: EncoderConfig{
+					Codec: "not_a_real_encoder", // forces error
+					Width: 640, Height: 360, Framerate: 25,
+				},
+			},
 		},
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "encoder")
+}
+
+// Empty Renditions is rejected — a pipeline with no output target
+// would silently drop every frame.
+func TestNewStreamPipeline_NoRenditionsRejected(t *testing.T) {
+	t.Parallel()
+	_, err := NewStreamPipeline(PipelineConfig{
+		Decoder: DecoderConfig{Codec: "h264"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rendition")
 }
 
 // Happy-path single-input run: pipeline accepts encoded packets from a
@@ -142,9 +197,12 @@ func TestStreamPipeline_SwitchInputPreservesEncoder(t *testing.T) {
 	p := renditionPipeline(t, 25)
 	defer p.Close()
 
-	// Snapshot encoder + scaler pointers before any I/O.
-	encBefore := p.encoder
-	scBefore := p.scaler
+	// Snapshot encoder + scaler pointers before any I/O. Single-rendition
+	// pipeline, so index 0 is the only one to assert against.
+	require.Len(t, p.encoders, 1)
+	require.Len(t, p.scalers, 1)
+	encBefore := p.encoders[0]
+	scBefore := p.scalers[0]
 	decBefore := p.decoder
 	require.NotNil(t, encBefore)
 	require.NotNil(t, scBefore)
@@ -165,10 +223,12 @@ func TestStreamPipeline_SwitchInputPreservesEncoder(t *testing.T) {
 	require.NoError(t, err)
 	_ = flushed // we only care that the call succeeded for this test
 
-	// THE INVARIANT: encoder + scaler are the SAME pointers.
-	assert.Same(t, encBefore, p.encoder,
+	// THE INVARIANT: every rendition's encoder + scaler keep their
+	// identity. Multi-rendition pipelines must preserve ALL of them,
+	// not just the first one.
+	assert.Same(t, encBefore, p.encoders[0],
 		"SwitchInput must NOT reallocate the encoder — entire migration depends on this")
-	assert.Same(t, scBefore, p.scaler,
+	assert.Same(t, scBefore, p.scalers[0],
 		"SwitchInput must NOT reallocate the scaler")
 	// Decoder must be a new instance.
 	assert.NotSame(t, decBefore, p.decoder, "SwitchInput must replace the decoder")
@@ -283,4 +343,77 @@ func TestStreamPipeline_SwitchAfterCloseReturnsError(t *testing.T) {
 	_, err := p.SwitchInput(DecoderConfig{Codec: "h264"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "closed")
+}
+
+// Multi-rendition pipeline emits exactly N output frames per decoded
+// input frame, each tagged with a distinct TargetIndex (0..N-1) so
+// the supervisor routes each one to the matching rendition buffer.
+// Without that fan-out, only track_1 would ever see data — exactly
+// the bug the previous single-target hardcode produced.
+func TestStreamPipeline_MultiRenditionFansOutPerTarget(t *testing.T) {
+	t.Parallel()
+	p := multiRenditionPipeline(t, 25)
+	defer p.Close()
+
+	src := buildSourceEncoder(t, 1920, 1080, 25)
+	defer src.Close()
+
+	perTarget := map[int32]int{}
+	for i := 0; i < 30; i++ {
+		frame := allocTestNV12Frame(t, 1920, 1080, astiav.PixelFormatYuv420P, int64(i))
+		pkts, err := src.Encode(frame)
+		frame.Free()
+		require.NoError(t, err)
+		for _, pkt := range pkts {
+			out, err := p.ProcessPacket(pkt.Data, int64(i), int64(i))
+			require.NoError(t, err)
+			for _, op := range out {
+				perTarget[op.TargetIndex]++
+			}
+		}
+	}
+	tail, err := p.Flush()
+	require.NoError(t, err)
+	for _, op := range tail {
+		perTarget[op.TargetIndex]++
+	}
+
+	// Every rendition must have produced at least one packet.
+	for idx := int32(0); idx < 3; idx++ {
+		assert.Positivef(t, perTarget[idx],
+			"rendition %d produced zero output packets — fan-out broken", idx)
+	}
+	// No frame should have leaked into a non-existent target.
+	for idx := range perTarget {
+		assert.GreaterOrEqualf(t, idx, int32(0), "unexpected negative TargetIndex %d", idx)
+		assert.Lessf(t, idx, int32(3), "TargetIndex %d outside rendition count", idx)
+	}
+}
+
+// SwitchInput on a multi-rendition pipeline must preserve identity of
+// EVERY scaler + encoder, not just the first. A regression here would
+// drop frames for renditions 1..N on every input switch.
+func TestStreamPipeline_SwitchInputPreservesAllRenditions(t *testing.T) {
+	t.Parallel()
+	p := multiRenditionPipeline(t, 25)
+	defer p.Close()
+
+	encsBefore := append([]*Encoder(nil), p.encoders...)
+	scsBefore := append([]*Scaler(nil), p.scalers...)
+
+	src := buildSourceEncoder(t, 1920, 1080, 25)
+	feed(t, p, src, 1920, 1080, 25)
+	src.Close()
+
+	_, err := p.SwitchInput(DecoderConfig{Codec: "h264"})
+	require.NoError(t, err)
+
+	require.Len(t, p.encoders, len(encsBefore))
+	require.Len(t, p.scalers, len(scsBefore))
+	for i := range encsBefore {
+		assert.Samef(t, encsBefore[i], p.encoders[i],
+			"SwitchInput reallocated rendition %d encoder", i)
+		assert.Samef(t, scsBefore[i], p.scalers[i],
+			"SwitchInput reallocated rendition %d scaler", i)
+	}
 }

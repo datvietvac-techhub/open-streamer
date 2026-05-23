@@ -374,18 +374,12 @@ func (sv *supervisor) dispatchEvent(ev *pb.Event) error {
 }
 
 func (sv *supervisor) writeOutputPacket(pkt *pb.OutputPacket) error {
-	idx := int(pkt.GetTargetIndex())
-	if idx < 0 || idx >= len(sv.targets) {
-		slog.Warn("transcoder: output packet with unknown target index",
-			"stream_code", sv.streamID, "target_index", idx)
-		return nil
-	}
-	target := sv.targets[idx]
-
 	avCodec, ok := avCodecFromProto(pkt.GetCodec())
 	if !ok {
 		slog.Warn("transcoder: output packet with unspecified codec — dropping",
-			"stream_code", sv.streamID, "target_index", idx, "bytes", len(pkt.GetData()))
+			"stream_code", sv.streamID,
+			"target_index", pkt.GetTargetIndex(),
+			"bytes", len(pkt.GetData()))
 		return nil
 	}
 
@@ -396,6 +390,28 @@ func (sv *supervisor) writeOutputPacket(pkt *pb.OutputPacket) error {
 		DTSms:    uint64(pkt.GetDtsMs()), //nolint:gosec
 		KeyFrame: pkt.GetKeyframe(),
 	}
+
+	idx := pkt.GetTargetIndex()
+
+	// Broadcast (-1) = write to every rendition buffer. Used for the
+	// shared audio passthrough so each variant's HLS segment contains
+	// both the rendition's transcoded video and the same source AAC,
+	// keeping every variant in A/V sync on the same wallclock.
+	if idx < 0 {
+		for i, target := range sv.targets {
+			if err := sv.svc.buf.Write(target.BufferID, buffer.Packet{AV: av}); err != nil {
+				return fmt.Errorf("broadcast buffer write target %d: %w", i, err)
+			}
+		}
+		return nil
+	}
+
+	if int(idx) >= len(sv.targets) {
+		slog.Warn("transcoder: output packet with unknown target index",
+			"stream_code", sv.streamID, "target_index", idx, "n_targets", len(sv.targets))
+		return nil
+	}
+	target := sv.targets[idx]
 	if err := sv.svc.buf.Write(target.BufferID, buffer.Packet{AV: av}); err != nil {
 		return fmt.Errorf("buffer write target %d: %w", idx, err)
 	}

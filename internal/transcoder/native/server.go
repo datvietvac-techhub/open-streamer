@@ -109,7 +109,7 @@ func (s *Server) dispatch(stream pb.Transcoder_RunServer, p *StreamPipeline, req
 		if err != nil {
 			return fmt.Errorf("process packet: %w", err)
 		}
-		return s.sendOutputs(stream, out, 0)
+		return s.sendOutputs(stream, out)
 	case req.GetSwitch() != nil:
 		flushed, err := p.SwitchInput(DecoderConfig{
 			Codec: codecFromProto(req.GetSwitch().GetNewRawIngestBufId()),
@@ -117,7 +117,7 @@ func (s *Server) dispatch(stream pb.Transcoder_RunServer, p *StreamPipeline, req
 		if err != nil {
 			return fmt.Errorf("switch input: %w", err)
 		}
-		return s.sendOutputs(stream, flushed, 0)
+		return s.sendOutputs(stream, flushed)
 	case req.GetStop() != nil:
 		return s.flushAndSend(stream, p)
 	case req.GetConfigure() != nil:
@@ -137,24 +137,25 @@ func (s *Server) flushAndSend(stream pb.Transcoder_RunServer, p *StreamPipeline)
 	if err != nil {
 		return fmt.Errorf("flush: %w", err)
 	}
-	return s.sendOutputs(stream, tail, 0)
+	return s.sendOutputs(stream, tail)
 }
 
 // sendOutputs wraps each pipeline OutputFrame in an Event_Packet and
-// sends it on the gRPC stream. targetIndex is forwarded so the
-// supervisor knows which rendition buffer to write into; today the
-// pipeline only emits one target (P3) so we hardcode 0.
+// sends it on the gRPC stream. TargetIndex on the frame routes the
+// packet to one rendition buffer (0..N-1) or to ALL of them
+// (BroadcastTargetIndex == -1, used by the shared audio passthrough);
+// the supervisor enforces the broadcast semantic on the receive side.
 //
 // Codec / PTS / DTS / keyframe are populated so the supervisor can
 // build a properly-shaped domain.AVPacket without inspecting bytes —
 // the AV-path write to the buffer hub then drives publisher's
 // tsmux.FromAV with correct codec routing and keyframe alignment.
-func (s *Server) sendOutputs(stream pb.Transcoder_RunServer, outs []OutputFrame, targetIndex int32) error {
+func (s *Server) sendOutputs(stream pb.Transcoder_RunServer, outs []OutputFrame) error {
 	for _, o := range outs {
 		if err := stream.Send(&pb.Event{
 			Body: &pb.Event_Packet{
 				Packet: &pb.OutputPacket{
-					TargetIndex: targetIndex,
+					TargetIndex: o.TargetIndex,
 					Data:        o.Data,
 					Codec:       protoCodec(o.Codec),
 					PtsMs:       o.PTS,
@@ -202,44 +203,51 @@ func terminalError(msg string) *pb.Event {
 // pipelineConfigFromProto adapts the wire-level ConfigureRequest into
 // the in-process PipelineConfig the StreamPipeline understands.
 //
-// P4 scope: only the first target is materialised into Encoder /
-// Scaler configs — multi-rendition fan-out lands in a future phase
-// where Pipeline grows to accept N encoders sharing one decoder.
+// Every Target becomes one RenditionConfig (its own encoder + scaler
+// pair). All renditions share the single decoder declared by Decoder.
+// Targets are expected to be ordered by Target.index — the pipeline
+// emits OutputFrame.TargetIndex matching the slice position, and the
+// supervisor uses that to write into the corresponding rendition
+// buffer.
 func pipelineConfigFromProto(c *pb.ConfigureRequest) PipelineConfig {
 	// Audio config is parsed via AudioConfigFromProto for forward-compat
 	// (caller surfaces it in logs) but not yet plumbed into
-	// StreamPipeline — the P3 pipeline is video-only.
+	// StreamPipeline — audio takes the passthrough path inside
+	// tsInput / StreamPipeline.passthroughAudio.
 	_ = AudioConfigFromProto(c.GetAudio())
 	cfg := PipelineConfig{
 		Decoder: DecoderConfig{Codec: "h264"},
 	}
-	if len(c.GetTargets()) > 0 {
-		t := c.GetTargets()[0]
-		cfg.Encoder = EncoderConfig{
+	for _, t := range c.GetTargets() {
+		fr := framerateOrDefault(t.GetFramerate())
+		enc := EncoderConfig{
 			Codec:       encoderCodecForBackend(c.GetHwBackend(), t.GetCodec()),
 			Width:       int(t.GetWidth()),
 			Height:      int(t.GetHeight()),
-			Framerate:   framerateOrDefault(t.GetFramerate()),
+			Framerate:   fr,
 			BitrateKbps: int(t.GetBitrateKbps()),
 			MaxBitrate:  int(t.GetMaxBitrateKbps()),
-			GOPSize:     int(t.GetGopSeconds()) * framerateOrDefault(t.GetFramerate()),
+			GOPSize:     int(t.GetGopSeconds()) * fr,
 			MaxBFrames:  bframesOrDefault(t.GetBframesOrNeg1()),
 			Options:     map[string]string{},
 		}
 		if t.GetPreset() != "" {
-			cfg.Encoder.Options["preset"] = t.GetPreset()
+			enc.Options["preset"] = t.GetPreset()
 		}
 		if t.GetProfile() != "" {
-			cfg.Encoder.Options["profile"] = t.GetProfile()
+			enc.Options["profile"] = t.GetProfile()
 		}
 		if t.GetLevel() != "" {
-			cfg.Encoder.Options["level"] = t.GetLevel()
+			enc.Options["level"] = t.GetLevel()
 		}
-		cfg.Scaler = ScalerConfig{
-			DstWidth:    int(t.GetWidth()),
-			DstHeight:   int(t.GetHeight()),
-			DstPixelFmt: 0, // PixelFormatYuv420P; filled by NewScaler default. P5 will probe per-backend.
-		}
+		cfg.Renditions = append(cfg.Renditions, RenditionConfig{
+			Encoder: enc,
+			Scaler: ScalerConfig{
+				DstWidth:    int(t.GetWidth()),
+				DstHeight:   int(t.GetHeight()),
+				DstPixelFmt: 0, // PixelFormatYuv420P; filled by NewScaler default.
+			},
+		})
 	}
 	return cfg
 }
