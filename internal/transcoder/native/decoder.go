@@ -35,13 +35,6 @@ type DecoderConfig struct {
 	// variant; nil keeps the decoder on the CPU / system-memory path.
 	// Unexported so the proto adapter can't accidentally populate it.
 	cuda *cudaContext
-
-	// hwFrames is a pipeline-owned CUDA frames pool the cuvid decoder
-	// decodes INTO (instead of auto-allocating its own). Reusing one pool
-	// across decoder rebuilds keeps the scale_cuda graph + NVENC encoder
-	// bound to an unchanging frames ctx, so an input switch stays seamless.
-	// nil = auto-allocate (first input, before the pool's size is known).
-	hwFrames *astiav.HardwareFramesContext
 }
 
 // Decoder wraps a libavcodec decoder context. Construct once per active
@@ -83,12 +76,14 @@ func NewDecoder(cfg DecoderConfig) (*Decoder, error) {
 	if cfg.cuda != nil && cfg.cuda.dev != nil && isCUVIDDecoder(name) {
 		cc.SetHardwareDeviceContext(cfg.cuda.dev)
 		cc.SetPixelFormatCallback(pickCUDAPixelFormat)
-		// Decode into the pipeline-owned frames pool when provided so the
-		// pool (and the scale_cuda graph + encoder bound to it) survives
-		// decoder rebuilds on switch — the key to a seamless GPU switch.
-		if cfg.hwFrames != nil {
-			cc.SetHardwareFramesContext(cfg.hwFrames)
-		}
+		// The decoder auto-allocates its own CUDA frames pool sized to the
+		// SOURCE resolution. It's ephemeral — rebuilt on every input switch
+		// so a source of any resolution decodes cleanly (pinning the pool to
+		// the first source's dims breaks a switch to a differently-sized
+		// input). Seamlessness across the switch comes from the LONG-LIVED
+		// encoder, not a shared pool: scale_cuda always outputs the fixed
+		// rendition dims, and NVENC re-registers each CUDA frame by device
+		// pointer, so the encoder survives the decoder + scale-graph rebuild.
 	}
 
 	// ExtraData (codec_par.extradata equivalent) is mandatory for some
