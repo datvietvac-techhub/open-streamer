@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/asticode/go-astiav"
@@ -106,6 +107,17 @@ type StreamPipeline struct {
 	scalers      []*Scaler
 	watermarkers []*Watermarker
 
+	// GPU-resident path. When useGPU is true the renditions run
+	// decode(cuvid)→scale_cuda→nvenc entirely in VRAM: gpuScalers[i]
+	// replaces scalers[i] (which is nil), watermarkers[i] is nil, and
+	// cuda is the shared device. Chosen only for NVENC + cuvid streams
+	// with NO watermark (GPU drawtext lands in a later phase); every
+	// other stream stays on the CPU path. The two index-aligned slices
+	// keep encodeOneRendition's per-rendition lookup uniform.
+	useGPU     bool
+	cuda       *cudaContext
+	gpuScalers []*gpuScaler
+
 	// Decoder lifecycle is per-input. Recreated by SwitchInput.
 	mu      sync.Mutex
 	decoder *Decoder
@@ -191,24 +203,71 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 		return nil, errors.New("pipeline: at least one rendition required")
 	}
 
+	// Decide the GPU-resident path: NVENC + cuvid decode. Watermarks run
+	// on the GPU graph too (scale_cuda + a hwdownload/drawtext/hwupload
+	// round-trip). A CUDA init failure falls back to CPU.
+	useGPU := isCUVIDDecoder(cfg.Decoder.Codec)
+	var cuda *cudaContext
+	if useGPU {
+		c, err := newCUDAContext()
+		if err != nil {
+			slog.Warn("native: CUDA unavailable, falling back to CPU pipeline", "err", err)
+			useGPU = false
+		} else {
+			cuda = c
+		}
+	}
+	// A cuvid decoder only makes sense feeding the GPU path — its CUDA
+	// frames can't enter the CPU sws scaler. When we're not taking the
+	// GPU path (watermark present, or CUDA init failed), downgrade decode
+	// to the CPU equivalent so the pipeline stays coherent.
+	if !useGPU && isCUVIDDecoder(cfg.Decoder.Codec) {
+		cfg.Decoder.Codec = cpuDecoderFallback(cfg.Decoder.Codec)
+	}
+	if useGPU {
+		cfg.Decoder.cuda = cuda
+	}
+
 	encoders := make([]*Encoder, 0, len(cfg.Renditions))
 	scalers := make([]*Scaler, 0, len(cfg.Renditions))
+	gpuScalers := make([]*gpuScaler, 0, len(cfg.Renditions))
 	watermarkers := make([]*Watermarker, 0, len(cfg.Renditions))
 	closeAll := func() {
 		for _, e := range encoders {
 			e.Close()
 		}
 		for _, s := range scalers {
-			s.Close()
+			if s != nil {
+				s.Close()
+			}
+		}
+		for _, g := range gpuScalers {
+			if g != nil {
+				g.Close()
+			}
 		}
 		for _, w := range watermarkers {
 			if w != nil {
 				w.Close()
 			}
 		}
+		cuda.Free() // nil-safe
 	}
 
 	for i, r := range cfg.Renditions {
+		if useGPU {
+			r.Encoder.cuda = cuda
+			enc, gs, err := buildGPURendition(r, cuda)
+			if err != nil {
+				closeAll()
+				return nil, fmt.Errorf("pipeline: gpu rendition %d: %w", i, err)
+			}
+			encoders = append(encoders, enc)
+			gpuScalers = append(gpuScalers, gs)
+			scalers = append(scalers, nil)
+			watermarkers = append(watermarkers, nil)
+			continue
+		}
 		enc, sc, wm, err := buildRendition(r)
 		if err != nil {
 			closeAll()
@@ -216,10 +275,11 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 		}
 		encoders = append(encoders, enc)
 		scalers = append(scalers, sc)
+		gpuScalers = append(gpuScalers, nil)
 		watermarkers = append(watermarkers, wm)
 	}
 
-	dec, err := NewDecoder(cfg.Decoder)
+	dec, err := newDecoderWithFallback(cfg.Decoder)
 	if err != nil {
 		closeAll()
 		return nil, fmt.Errorf("pipeline: decoder: %w", err)
@@ -235,11 +295,30 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 		cfg:           cfg,
 		encoders:      encoders,
 		scalers:       scalers,
+		gpuScalers:    gpuScalers,
 		watermarkers:  watermarkers,
+		useGPU:        useGPU,
+		cuda:          cuda,
 		decoder:       dec,
 		pendingRebase: true, // first-ever frame anchors the output clock
 		audioReenc:    audioReenc,
 	}, nil
+}
+
+// buildGPURendition builds the VRAM-resident encoder + scale_cuda scaler
+// for one rendition. The encoder defers its NVENC Open until the first
+// CUDA frame supplies the hw_frames_ctx (see Encoder.openForCUDAFrame).
+func buildGPURendition(r RenditionConfig, cuda *cudaContext) (*Encoder, *gpuScaler, error) {
+	enc, err := NewEncoder(r.Encoder)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encoder: %w", err)
+	}
+	gs, err := newGPUScaler(cuda, r.Scaler.DstWidth, r.Scaler.DstHeight, r.Watermark)
+	if err != nil {
+		enc.Close()
+		return nil, nil, fmt.Errorf("gpu scaler: %w", err)
+	}
+	return enc, gs, nil
 }
 
 // buildAudioReencoder returns a re-encoder when Audio.Copy is false,
@@ -514,6 +593,16 @@ func isH264KeyframeAnnexB(data []byte) bool {
 	return false
 }
 
+// DecoderCodec returns the libavcodec decoder name the pipeline was
+// configured with (e.g. "h264_cuvid" on NVENC hosts). SwitchInput reuses
+// it so the hardware decode path is preserved across input switches
+// instead of silently dropping back to CPU.
+func (p *StreamPipeline) DecoderCodec() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.Decoder.Codec
+}
+
 // SwitchInput swaps the decoder for one matching newCfg. Before the
 // swap, the OLD decoder is flushed so any in-flight reordered frames
 // still reach the encoder; those flushed frames are encoded under the
@@ -577,7 +666,22 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 		p.pendingSessionStart = true
 	}
 
-	newDec, err := NewDecoder(newCfg)
+	newCfg.cuda = p.cuda // GPU path: the new decoder must also output CUDA
+
+	if p.useGPU {
+		// CUDA frames carry a hw_frames_ctx the encoder binds to. The new
+		// decoder + rebuilt scale_cuda graph yield a fresh output frames
+		// ctx, so the lazily-bound NVENC encoders must rebuild too (they
+		// re-open on the first frame of the new graph). This costs encoder
+		// identity across a GPU switch — a brief reinit like FFmpeg's GPU
+		// transcode; a stable-pool refinement (later) restores full
+		// seamlessness.
+		if err := p.rebuildGPURenditions(); err != nil {
+			return out, fmt.Errorf("pipeline: rebuild gpu renditions on switch: %w", err)
+		}
+	}
+
+	newDec, err := newDecoderWithFallback(newCfg)
 	if err != nil {
 		return out, fmt.Errorf("pipeline: alloc new decoder: %w", err)
 	}
@@ -587,6 +691,29 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 	p.cfg.Decoder = newCfg
 	p.mu.Unlock()
 	return out, nil
+}
+
+// rebuildGPURenditions tears down and recreates every GPU rendition's
+// scale_cuda graph + NVENC encoder so they bind to the new decoder's
+// output frames ctx after an input switch. Runs on the ProcessPacket /
+// SwitchInput goroutine (they're serialised), so mutating the slices in
+// place needs no extra lock.
+func (p *StreamPipeline) rebuildGPURenditions() error {
+	for i := range p.encoders {
+		if p.gpuScalers[i] != nil {
+			p.gpuScalers[i].Close()
+		}
+		p.encoders[i].Close()
+		r := p.cfg.Renditions[i]
+		r.Encoder.cuda = p.cuda
+		enc, gs, err := buildGPURendition(r, p.cuda)
+		if err != nil {
+			return fmt.Errorf("rendition %d: %w", i, err)
+		}
+		p.encoders[i] = enc
+		p.gpuScalers[i] = gs
+	}
+	return nil
 }
 
 // Flush drains the full chain (decoder → encoder) on stream stop.
@@ -708,11 +835,19 @@ func (p *StreamPipeline) Close() {
 		}
 	}
 	for _, sc := range p.scalers {
-		sc.Close()
+		if sc != nil {
+			sc.Close()
+		}
+	}
+	for _, g := range p.gpuScalers {
+		if g != nil {
+			g.Close()
+		}
 	}
 	for _, enc := range p.encoders {
 		enc.Close()
 	}
+	p.cuda.Free() // nil-safe
 }
 
 // EncoderPTS returns the FIRST rendition encoder's PTS counter
@@ -829,7 +964,15 @@ func (p *StreamPipeline) encodeOne(f *astiav.Frame) ([]OutputFrame, error) {
 // applying it to the pre-scaler frame loses the flag when sws_scale
 // allocates a fresh output frame.
 func (p *StreamPipeline) encodeOneRendition(i int, f *astiav.Frame, pts int64, forceIDR bool) ([]OutputFrame, error) {
-	scaled, err := p.scalers[i].Scale(f)
+	var (
+		scaled *astiav.Frame
+		err    error
+	)
+	if p.useGPU {
+		scaled, err = p.gpuScalers[i].Scale(f) // VRAM-resident scale_cuda
+	} else {
+		scaled, err = p.scalers[i].Scale(f)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: rendition %d scale: %w", i, err)
 	}

@@ -111,8 +111,11 @@ func (s *Server) dispatch(stream pb.Transcoder_RunServer, p *StreamPipeline, req
 		}
 		return s.sendOutputs(stream, out)
 	case req.GetSwitch() != nil:
+		// Reuse the stream's configured decoder backend (NVDEC stays
+		// NVDEC) — only the input source changes across a switch, never
+		// the hardware decode path.
 		flushed, err := p.SwitchInput(DecoderConfig{
-			Codec: codecFromProto(req.GetSwitch().GetNewRawIngestBufId()),
+			Codec: p.DecoderCodec(),
 		})
 		if err != nil {
 			return fmt.Errorf("switch input: %w", err)
@@ -212,7 +215,7 @@ func terminalError(msg string) *pb.Event {
 // buffer.
 func pipelineConfigFromProto(c *pb.ConfigureRequest) PipelineConfig {
 	cfg := PipelineConfig{
-		Decoder: DecoderConfig{Codec: "h264"},
+		Decoder: DecoderConfig{Codec: decoderCodecForBackend(c.GetHwBackend())},
 		// Audio.Copy=true (or a nil proto) keeps the cheap passthrough;
 		// Copy=false routes AAC through decode → resample → re-encode.
 		Audio: AudioConfigFromProto(c.GetAudio()),
@@ -345,6 +348,22 @@ func encoderCodecForBackend(hw pb.HWBackend, explicit string) string {
 	}
 }
 
+// decoderCodecForBackend picks the video DECODER name for the backend.
+// NVENC hosts get NVDEC (cuvid) so decode runs on the GPU's dedicated
+// decoder engine instead of the CPU — otherwise the CPU software-decodes
+// every stream while the GPU's NVDEC sits idle. Other backends keep the
+// universal CPU decoder (cuvid is NVIDIA-only).
+//
+// Input is assumed H.264 (every current source speaks it and the pipeline
+// is H.264-centric); wire H.265 detection alongside hevc_cuvid when HEVC
+// sources land.
+func decoderCodecForBackend(hw pb.HWBackend) string {
+	if hw == pb.HWBackend_HW_BACKEND_NVENC {
+		return "h264_cuvid"
+	}
+	return "h264"
+}
+
 func framerateOrDefault(f float64) int {
 	if f <= 0 {
 		return 25
@@ -357,13 +376,4 @@ func bframesOrDefault(v int32) int {
 		return -1 // encoder default per EncoderConfig contract
 	}
 	return int(v)
-}
-
-// codecFromProto today returns "h264" — the SwitchInput proto carries
-// only the new raw ingest buffer ID; the codec is implied by the
-// upstream's media info which the supervisor will probe separately
-// and pass via a future proto extension. Until then we always pick
-// h264 because that is what all production sources speak.
-func codecFromProto(_ string) string {
-	return "h264"
 }

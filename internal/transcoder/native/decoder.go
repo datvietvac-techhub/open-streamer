@@ -3,6 +3,7 @@ package native
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/asticode/go-astiav"
 )
@@ -28,6 +29,12 @@ type DecoderConfig struct {
 	// in-band SPS/PPS (libx264 / NVENC default), which is the common
 	// case from our P1 encoder.
 	ExtraData []byte
+
+	// cuda is the shared CUDA device for GPU-resident decode. Set by the
+	// pipeline at runtime (not from the wire) when Codec is a *_cuvid
+	// variant; nil keeps the decoder on the CPU / system-memory path.
+	// Unexported so the proto adapter can't accidentally populate it.
+	cuda *cudaContext
 }
 
 // Decoder wraps a libavcodec decoder context. Construct once per active
@@ -60,6 +67,17 @@ func NewDecoder(cfg DecoderConfig) (*Decoder, error) {
 		return nil, fmt.Errorf("native: AllocCodecContext returned nil for %q", name)
 	}
 
+	// GPU-resident decode: attach the shared CUDA device so an NVDEC
+	// (cuvid) decoder emits AV_PIX_FMT_CUDA frames in VRAM instead of
+	// copying NV12 back to host RAM (the readback that kept the CPU
+	// pinned even after NVDEC). The pixel-format callback locks the
+	// output to CUDA so libavcodec doesn't negotiate a system-memory
+	// format. CPU decoders leave cfg.cuda nil and decode to RAM.
+	if cfg.cuda != nil && cfg.cuda.dev != nil && isCUVIDDecoder(name) {
+		cc.SetHardwareDeviceContext(cfg.cuda.dev)
+		cc.SetPixelFormatCallback(pickCUDAPixelFormat)
+	}
+
 	// ExtraData (codec_par.extradata equivalent) is mandatory for some
 	// streams where SPS/PPS live out-of-band — set BEFORE Open so the
 	// decoder picks it up at init. Annex-B sources (our encoder, most
@@ -83,6 +101,39 @@ func NewDecoder(cfg DecoderConfig) (*Decoder, error) {
 		pkt:      astiav.AllocPacket(),
 		frame:    astiav.AllocFrame(),
 	}, nil
+}
+
+// newDecoderWithFallback builds a decoder, degrading a GPU (cuvid)
+// decoder to its CPU equivalent if the hardware path fails to open
+// (missing / mismatched driver, NVDEC unavailable). Keeps the stream
+// alive on CPU instead of escalating to a terminal subprocess error and
+// respawn-looping when GPU decode can't initialise.
+func newDecoderWithFallback(cfg DecoderConfig) (*Decoder, error) {
+	dec, err := NewDecoder(cfg)
+	if err == nil {
+		return dec, nil
+	}
+	cpu := cpuDecoderFallback(cfg.Codec)
+	if cpu == cfg.Codec {
+		return nil, err // already a CPU decoder; nothing to fall back to
+	}
+	slog.Warn("native: GPU decoder unavailable, falling back to CPU",
+		"requested", cfg.Codec, "fallback", cpu, "err", err)
+	cfg.Codec = cpu
+	return NewDecoder(cfg)
+}
+
+// cpuDecoderFallback maps a GPU decoder name to its CPU equivalent, or
+// returns the name unchanged when it is already a CPU decoder.
+func cpuDecoderFallback(name string) string {
+	switch name {
+	case "h264_cuvid":
+		return "h264"
+	case "hevc_cuvid":
+		return "hevc"
+	default:
+		return name
+	}
 }
 
 // Decode submits one encoded packet and drains any frames the decoder

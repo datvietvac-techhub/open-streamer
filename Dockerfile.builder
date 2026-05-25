@@ -4,18 +4,28 @@
 # Build the image ONCE:
 #   make builder-image                  # tags open-streamer-builder:v1
 #
-# Why Ubuntu 24.04 base instead of Debian sid: target servers run
-# Ubuntu 24.04 LTS (glibc 2.39). Sid ships glibc 2.42 which means
-# anything libavformat transitively links (librist, libssh, libmvec,
-# ...) gets pulled in with GLIBC_2.42 symbol requirements — the
-# bundled .so files then refuse to load on Ubuntu 24.04. Building on
-# Ubuntu 24.04 yields a bundle whose ABI ceiling matches the target,
-# so it runs on every host with glibc ≥ 2.39.
+# Why the nvidia/cuda 12.2 -devel-ubuntu22.04 base:
 #
-# FFmpeg 8 is not in Ubuntu 24.04 apt; we compile from source. The
-# build is ~5 min one-time, cached forever via the layer below.
+#   * CUDA 12.2 toolkit — FFmpeg's --enable-cuda-nvcc embeds the
+#     scale_cuda kernels as PTX that the host driver JITs at runtime.
+#     PTX is versioned by the TOOLKIT, and the target hosts run driver
+#     535 (CUDA 12.2 PTX ceiling). A newer toolkit (12.4+ / 12.6) emits
+#     PTX the 535 driver refuses to load (CUDA_ERROR_UNSUPPORTED_PTX_
+#     VERSION). sm_75 SASS doesn't help — FFmpeg ships PTX, not cubin —
+#     so the toolkit MUST be ≤ 12.2. Bump only after every host's driver
+#     is upgraded (alongside nv-codec-headers below).
+#   * ubuntu22.04 (glibc 2.35) — older than the target's 2.39, so the
+#     bundled .so files keep a 2.35 ABI ceiling that loads fine on 2.39
+#     (glibc is backward compatible; only a NEWER glibc than the target
+#     breaks, which is why Debian sid's 2.42 was rejected).
+#
+# The -devel tag ships nvcc + CUDA headers; the runtime needs only
+# libcuda from the host driver (dlopen'd via ffnvcodec), so no CUDA
+# runtime lib gets bundled.
+#
+# FFmpeg 8 is not in apt; we compile from source (~5 min one-time).
 
-FROM ubuntu:24.04
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
 
 # Mirror retry tuning — Ubuntu archives occasionally rate-limit when
 # pulling the full build-essential set.
@@ -80,6 +90,10 @@ RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" | t
         --enable-libfreetype --enable-libfontconfig --enable-libharfbuzz \
         --enable-nvenc --enable-cuvid \
         --enable-ffnvcodec \
+        --enable-cuda-nvcc \
+        --nvcc=/usr/local/cuda/bin/nvcc \
+        --nvccflags="-gencode arch=compute_75,code=sm_75 -O2" \
+        --extra-cflags=-I/usr/local/cuda/include \
         --disable-doc --disable-debug \
         --disable-ffplay --disable-ffprobe \
         --disable-indev=alsa --disable-indev=jack --disable-indev=oss \

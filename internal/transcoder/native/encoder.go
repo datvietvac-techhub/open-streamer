@@ -43,6 +43,12 @@ type EncoderConfig struct {
 	// 2-3 = typical VOD. NVENC enables HW B-ref pyramid automatically
 	// when >0.
 	MaxBFrames int
+
+	// cuda is the shared CUDA device for GPU-resident encode. Set by the
+	// pipeline at runtime (not from the wire) when this is an NVENC
+	// encoder fed by a cuvid decoder; nil keeps the encoder on the CPU
+	// (YUV420P system-memory) input path.
+	cuda *cudaContext
 }
 
 // Encoder wraps a libavcodec encoder context. Construct once via
@@ -58,6 +64,14 @@ type Encoder struct {
 	pkt      *astiav.Packet
 	frameIdx int64 // monotonically increasing PTS counter (in time-base units)
 	closed   bool
+
+	// GPU-resident input. cudaInput defers Open until the first CUDA
+	// frame supplies the hw_frames_ctx NVENC binds to; pendingDict holds
+	// the options dict across that deferral; opened guards the one-time
+	// lazy Open.
+	cudaInput   bool
+	opened      bool
+	pendingDict *astiav.Dictionary
 }
 
 // EncodedPacket is one output AVPacket the encoder produced, copied
@@ -97,7 +111,12 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 	// decoder emits.
 	cc.SetWidth(cfg.Width)
 	cc.SetHeight(cfg.Height)
-	cc.SetPixelFormat(astiav.PixelFormatYuv420P)
+	gpuInput := cfg.cuda != nil && cfg.cuda.dev != nil && isNVENCEncoder(codecName)
+	if gpuInput {
+		cc.SetPixelFormat(astiav.PixelFormatCuda)
+	} else {
+		cc.SetPixelFormat(astiav.PixelFormatYuv420P)
+	}
 	cc.SetFramerate(astiav.NewRational(cfg.Framerate, 1))
 	// Time-base = 1/1000 (millisecond). The pipeline feeds frames
 	// stamped with their source-stream PTS (in ms) so the encoder's
@@ -110,38 +129,30 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 	// communicated separately via SetFramerate so rate control and
 	// GOP timing stay correct.
 	cc.SetTimeBase(astiav.NewRational(1, 1000))
-	if cfg.BitrateKbps > 0 {
-		cc.SetBitRate(int64(cfg.BitrateKbps) * 1000)
-	}
-	if cfg.MaxBitrate > 0 {
-		cc.SetRateControlMaxRate(int64(cfg.MaxBitrate) * 1000)
-		// Buffer size = 2× peak is the common heuristic; without it the
-		// encoder may exceed the cap on bursty content while still
-		// reporting compliance.
-		cc.SetRateControlBufferSize(cfg.MaxBitrate * 1000 * 2)
-	}
-	if cfg.GOPSize > 0 {
-		cc.SetGopSize(cfg.GOPSize)
-	}
-	if cfg.MaxBFrames >= 0 {
-		cc.SetMaxBFrames(cfg.MaxBFrames)
-	}
+	applyEncoderRateControl(cc, cfg)
 
 	// Codec-specific options (preset / profile / level / tune / cq / …).
-	// Bundle through avcodec_open2's dictionary so encoder-specific knobs
-	// stay untyped at this layer — adding NVENC's "rc=vbr" doesn't force
-	// a code change here.
-	var dict *astiav.Dictionary
-	if len(cfg.Options) > 0 {
-		dict = astiav.NewDictionary()
-		for k, v := range cfg.Options {
-			if err := dict.Set(k, v, 0); err != nil {
-				dict.Free()
-				cc.Free()
-				return nil, fmt.Errorf("native: encoder option %s=%s: %w", k, v, err)
-			}
-		}
+	dict, err := buildEncoderOptionsDict(cfg.Options)
+	if err != nil {
+		cc.Free()
+		return nil, err
 	}
+
+	// GPU-resident encode: NVENC needs its input hw_frames_ctx bound
+	// before Open, but that context only exists once scale_cuda has
+	// produced its first frame. Defer Open to the first Encode call that
+	// supplies a CUDA frame (openForCUDAFrame); hold the dict until then.
+	if gpuInput {
+		return &Encoder{
+			cfg:         cfg,
+			codec:       codec,
+			codecCtx:    cc,
+			pkt:         astiav.AllocPacket(),
+			cudaInput:   true,
+			pendingDict: dict,
+		}, nil
+	}
+
 	if err := cc.Open(codec, dict); err != nil {
 		if dict != nil {
 			dict.Free()
@@ -158,7 +169,47 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 		codec:    codec,
 		codecCtx: cc,
 		pkt:      astiav.AllocPacket(),
+		opened:   true,
 	}, nil
+}
+
+// buildEncoderOptionsDict packs the codec-specific option map into an
+// AVDictionary for avcodec_open2. Returns (nil, nil) for an empty map.
+// Keeps encoder-specific knobs (preset / rc / cq / …) untyped at this
+// layer so adding one doesn't force a code change here.
+func buildEncoderOptionsDict(opts map[string]string) (*astiav.Dictionary, error) {
+	if len(opts) == 0 {
+		return nil, nil
+	}
+	dict := astiav.NewDictionary()
+	for k, v := range opts {
+		if err := dict.Set(k, v, 0); err != nil {
+			dict.Free()
+			return nil, fmt.Errorf("native: encoder option %s=%s: %w", k, v, err)
+		}
+	}
+	return dict, nil
+}
+
+// applyEncoderRateControl sets the optional bitrate / peak-rate / GOP /
+// B-frame knobs, each of which defaults to "leave encoder default" when
+// unset (zero, or -1 for B-frames).
+func applyEncoderRateControl(cc *astiav.CodecContext, cfg EncoderConfig) {
+	if cfg.BitrateKbps > 0 {
+		cc.SetBitRate(int64(cfg.BitrateKbps) * 1000)
+	}
+	if cfg.MaxBitrate > 0 {
+		cc.SetRateControlMaxRate(int64(cfg.MaxBitrate) * 1000)
+		// Buffer size = 2× peak is the common heuristic; without it the
+		// encoder may exceed the cap on bursty content.
+		cc.SetRateControlBufferSize(cfg.MaxBitrate * 1000 * 2)
+	}
+	if cfg.GOPSize > 0 {
+		cc.SetGopSize(cfg.GOPSize)
+	}
+	if cfg.MaxBFrames >= 0 {
+		cc.SetMaxBFrames(cfg.MaxBFrames)
+	}
 }
 
 // Encode submits one YUV frame to the encoder and drains any output
@@ -180,10 +231,39 @@ func (e *Encoder) Encode(frame *astiav.Frame) ([]EncodedPacket, error) {
 	if e.closed {
 		return nil, errors.New("native: encode on closed encoder")
 	}
+	if e.cudaInput && !e.opened {
+		if frame == nil {
+			// Flush before any frame ever arrived — nothing to encode.
+			return nil, nil
+		}
+		if err := e.openForCUDAFrame(frame); err != nil {
+			return nil, err
+		}
+	}
 	if err := e.codecCtx.SendFrame(frame); err != nil {
 		return nil, fmt.Errorf("native: SendFrame: %w", err)
 	}
 	return e.drainPackets()
+}
+
+// openForCUDAFrame performs the deferred NVENC Open, binding the encoder
+// to the CUDA frame's hw_frames_ctx so it encodes straight from VRAM.
+// Called once, on the first CUDA frame the scale_cuda graph produces.
+func (e *Encoder) openForCUDAFrame(frame *astiav.Frame) error {
+	hfc := frame.HardwareFramesContext()
+	if hfc == nil {
+		return errors.New("native: cuda encoder: first frame carries no hw_frames_ctx")
+	}
+	e.codecCtx.SetHardwareFramesContext(hfc)
+	if err := e.codecCtx.Open(e.codec, e.pendingDict); err != nil {
+		return fmt.Errorf("native: open cuda encoder %q: %w", e.cfg.Codec, err)
+	}
+	if e.pendingDict != nil {
+		e.pendingDict.Free()
+		e.pendingDict = nil
+	}
+	e.opened = true
+	return nil
 }
 
 // Flush signals end-of-stream to the encoder and drains any remaining
@@ -231,6 +311,10 @@ func (e *Encoder) Close() {
 		return
 	}
 	e.closed = true
+	if e.pendingDict != nil {
+		e.pendingDict.Free()
+		e.pendingDict = nil
+	}
 	if e.pkt != nil {
 		e.pkt.Free()
 		e.pkt = nil
