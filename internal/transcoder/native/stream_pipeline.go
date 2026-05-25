@@ -18,6 +18,11 @@ import (
 type PipelineConfig struct {
 	Decoder    DecoderConfig
 	Renditions []RenditionConfig
+	// Audio drives the audio path: when Audio.Copy is true (or the
+	// zero value) AAC frames pass straight through; otherwise they are
+	// decoded, resampled, and re-encoded to Audio's codec / bitrate /
+	// sample rate / channels.
+	Audio AudioConfig
 }
 
 // RenditionConfig groups the scaler + encoder + optional watermark for
@@ -169,6 +174,11 @@ type StreamPipeline struct {
 	lastVideoOut  int64
 	lastAudioOut  int64
 	pendingRebase bool
+
+	// audioReenc is non-nil when Audio.Copy is false — AAC frames are
+	// decoded → resampled → re-encoded instead of passed through. nil
+	// keeps the cheap passthrough path.
+	audioReenc *audioReencoder
 }
 
 // NewStreamPipeline constructs the decoder + every rendition's
@@ -214,6 +224,13 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 		closeAll()
 		return nil, fmt.Errorf("pipeline: decoder: %w", err)
 	}
+	audioReenc, err := buildAudioReencoder(cfg.Audio)
+	if err != nil {
+		dec.Close()
+		closeAll()
+		return nil, fmt.Errorf("pipeline: %w", err)
+	}
+
 	return &StreamPipeline{
 		cfg:           cfg,
 		encoders:      encoders,
@@ -221,7 +238,49 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 		watermarkers:  watermarkers,
 		decoder:       dec,
 		pendingRebase: true, // first-ever frame anchors the output clock
+		audioReenc:    audioReenc,
 	}, nil
+}
+
+// buildAudioReencoder returns a re-encoder when Audio.Copy is false,
+// or (nil, nil) for the passthrough path. Source audio is always AAC
+// by the time it reaches the pipeline — the TS demuxer only queues
+// StreamTypeAAC into the audio path.
+func buildAudioReencoder(cfg AudioConfig) (*audioReencoder, error) {
+	if cfg.Copy {
+		return nil, nil
+	}
+	ar, err := newAudioReencoder(cfg, "aac")
+	if err != nil {
+		return nil, fmt.Errorf("audio reencoder: %w", err)
+	}
+	return ar, nil
+}
+
+// handleAudio routes demuxed AAC frames either through the
+// re-encoder (Audio.Copy=false) or straight to passthrough. Both
+// paths emit broadcast OutputFrames whose PTS the caller rebases onto
+// the continuous output clock.
+func (p *StreamPipeline) handleAudio(frames []esFrame) ([]OutputFrame, error) {
+	if len(frames) == 0 {
+		return nil, nil
+	}
+	if p.audioReenc == nil {
+		return p.passthroughAudio(frames), nil
+	}
+	var out []OutputFrame
+	for _, f := range frames {
+		enc, err := p.audioReenc.Process(f.data, f.pts)
+		if err != nil {
+			return out, fmt.Errorf("pipeline: audio reencode: %w", err)
+		}
+		for i := range enc {
+			enc[i].PTS = p.rebaseAudioPTS(enc[i].PTS)
+			enc[i].DTS = enc[i].PTS
+		}
+		out = append(out, enc...)
+	}
+	return out, nil
 }
 
 // rebaseVideoPTS / rebaseAudioPTS map a source-stream PTS (ms) onto
@@ -324,7 +383,10 @@ func (p *StreamPipeline) ProcessPacket(data []byte, pts, dts int64) ([]OutputFra
 		if err != nil {
 			return video, err
 		}
-		audio := p.passthroughAudio(p.tsInput.DrainReadyAudio())
+		audio, err := p.handleAudio(p.tsInput.DrainReadyAudio())
+		if err != nil {
+			return append(video, audio...), err
+		}
 		return append(video, audio...), nil
 	}
 
@@ -489,6 +551,12 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 	p.pendingSessionStart = true
 	p.pendingForceKeyframe = true
 	p.pendingRebase = true
+	if p.audioReenc != nil {
+		// Drop the audio decoder + resampler so they rebuild against
+		// the new source's sample rate / channels; encoder survives so
+		// the output AAC stream stays continuous.
+		p.audioReenc.SwitchInput()
+	}
 
 	newDec, err := NewDecoder(newCfg)
 	if err != nil {
@@ -510,15 +578,11 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 // TS demuxer get emitted before shutdown — without that the publisher
 // would close out a partial last segment that the player can't seek
 // past.
-func (p *StreamPipeline) Flush() ([]OutputFrame, error) {
-	if p.isClosed() {
-		return nil, errors.New("native: flush on closed pipeline")
-	}
-
-	// Drain any ES frames the TS demuxer assembled but the pipeline
-	// hasn't decoded yet (the post-Feed DrainReady call only picks up
-	// what was ready at that instant; trailing PES fragments land
-	// after the chunk that completed them).
+// flushTSDemuxTail drains the TS demuxer's leftover video + audio
+// frames and the audio encoder's held tail before the pipeline shuts
+// down — without it the publisher would close a partial last segment
+// the player can't seek past.
+func (p *StreamPipeline) flushTSDemuxTail() ([]OutputFrame, error) {
 	var head []OutputFrame
 	if p.tsInput != nil {
 		readyV, err := p.decodeAndEncodeESFrames(p.tsInput.DrainReady())
@@ -526,7 +590,34 @@ func (p *StreamPipeline) Flush() ([]OutputFrame, error) {
 		if err != nil {
 			return head, err
 		}
-		head = append(head, p.passthroughAudio(p.tsInput.DrainReadyAudio())...)
+		audio, err := p.handleAudio(p.tsInput.DrainReadyAudio())
+		head = append(head, audio...)
+		if err != nil {
+			return head, err
+		}
+	}
+	if p.audioReenc != nil {
+		tailA, err := p.audioReenc.Flush()
+		for i := range tailA {
+			tailA[i].PTS = p.rebaseAudioPTS(tailA[i].PTS)
+			tailA[i].DTS = tailA[i].PTS
+		}
+		head = append(head, tailA...)
+		if err != nil {
+			return head, err
+		}
+	}
+	return head, nil
+}
+
+func (p *StreamPipeline) Flush() ([]OutputFrame, error) {
+	if p.isClosed() {
+		return nil, errors.New("native: flush on closed pipeline")
+	}
+
+	head, err := p.flushTSDemuxTail()
+	if err != nil {
+		return head, err
 	}
 
 	p.mu.Lock()
@@ -584,6 +675,10 @@ func (p *StreamPipeline) Close() {
 	}
 	if dec != nil {
 		dec.Close()
+	}
+	if p.audioReenc != nil {
+		p.audioReenc.Close()
+		p.audioReenc = nil
 	}
 	for _, wm := range p.watermarkers {
 		if wm != nil {

@@ -211,13 +211,11 @@ func terminalError(msg string) *pb.Event {
 // supervisor uses that to write into the corresponding rendition
 // buffer.
 func pipelineConfigFromProto(c *pb.ConfigureRequest) PipelineConfig {
-	// Audio config is parsed via AudioConfigFromProto for forward-compat
-	// (caller surfaces it in logs) but not yet plumbed into
-	// StreamPipeline — audio takes the passthrough path inside
-	// tsInput / StreamPipeline.passthroughAudio.
-	_ = AudioConfigFromProto(c.GetAudio())
 	cfg := PipelineConfig{
 		Decoder: DecoderConfig{Codec: "h264"},
+		// Audio.Copy=true (or a nil proto) keeps the cheap passthrough;
+		// Copy=false routes AAC through decode → resample → re-encode.
+		Audio: AudioConfigFromProto(c.GetAudio()),
 	}
 	wm := watermarkConfigFromProto(c.GetWatermark())
 	for _, t := range c.GetTargets() {
@@ -299,7 +297,9 @@ func watermarkConfigFromProto(w *pb.WatermarkConfig) WatermarkConfig {
 // audio pipeline wiring; not yet consumed by StreamPipeline.
 func AudioConfigFromProto(a *pb.AudioConfig) AudioConfig {
 	if a == nil {
-		return AudioConfig{}
+		// No audio config on the wire → default to passthrough, never
+		// the more expensive (and lossy) re-encode path.
+		return AudioConfig{Copy: true}
 	}
 	return AudioConfig{
 		Copy:       a.GetCopy(),
