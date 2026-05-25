@@ -118,6 +118,14 @@ type StreamPipeline struct {
 	cuda       *cudaContext
 	gpuScalers []*gpuScaler
 
+	// decodePool is a pipeline-owned CUDA frames pool the cuvid decoder
+	// decodes into. Bound once (bindDecodePool) on the first decoded frame
+	// — when the source dims are known — then reused across every decoder
+	// rebuild on input switch so the scale_cuda graph + NVENC encoder stay
+	// bound to one frames ctx → seamless switch. nil until bound (or if the
+	// bind failed, in which case switch falls back to a full rebuild).
+	decodePool *astiav.HardwareFramesContext
+
 	// Decoder lifecycle is per-input. Recreated by SwitchInput.
 	mu      sync.Mutex
 	decoder *Decoder
@@ -519,6 +527,22 @@ func (p *StreamPipeline) decodeAndEncodeESFrames(frames []esFrame) ([]OutputFram
 		if err != nil {
 			return out, fmt.Errorf("pipeline: decode: %w", err)
 		}
+		// GPU: on the first decoded frame, pin decode output to a
+		// pipeline-owned CUDA pool (dims now known) and rebuild the decoder
+		// into it, dropping this batch — the rebuilt decoder re-seeds from
+		// the next IDR. Every decoder afterwards (incl. on switch) decodes
+		// into this one pool, so the scale_cuda graph + NVENC encoder stay
+		// bound to a single frames ctx and the switch is seamless. A bind
+		// failure leaves decodePool nil (per-input auto-pool; switch reinits).
+		if p.useGPU && p.decodePool == nil && len(decoded) > 0 {
+			if p.bindDecodePool(decoded[0]) {
+				for _, fr := range decoded {
+					fr.Free()
+				}
+				p.sawKeyframe = false
+				return out, nil
+			}
+		}
 		encoded, err := p.runFramesThroughEncoder(decoded)
 		if err != nil {
 			return out, err
@@ -526,6 +550,49 @@ func (p *StreamPipeline) decodeAndEncodeESFrames(frames []esFrame) ([]OutputFram
 		out = append(out, encoded...)
 	}
 	return out, nil
+}
+
+// bindDecodePool allocates a pipeline-owned CUDA frames pool sized to the
+// first decoded frame and rebuilds the decoder to decode into it, so the
+// pool — and the scale_cuda graph + NVENC encoder bound to it — survives
+// the decoder rebuilds an input switch performs (seamless switch).
+// Returns true on success; false (decodePool left nil) on any failure,
+// leaving the stream on cuvid's per-decoder auto-pool — still correct, but
+// a switch then reinits the GPU renditions.
+func (p *StreamPipeline) bindDecodePool(f *astiav.Frame) bool {
+	pool := astiav.AllocHardwareFramesContext(p.cuda.dev)
+	if pool == nil {
+		slog.Warn("native: alloc CUDA frames pool returned nil; GPU switch will reinit")
+		return false
+	}
+	pool.SetHardwarePixelFormat(astiav.PixelFormatCuda)
+	pool.SetSoftwarePixelFormat(astiav.PixelFormatNv12) // cuvid CUDA frames are NV12
+	pool.SetWidth(f.Width())
+	pool.SetHeight(f.Height())
+	// Generous size: the decoder DPB, scale_cuda, and NVENC in-flight all
+	// draw frames from this pool; too small stalls the decoder.
+	pool.SetInitialPoolSize(40)
+	if err := pool.Initialize(); err != nil {
+		pool.Free()
+		slog.Warn("native: init CUDA frames pool failed; GPU switch will reinit", "err", err)
+		return false
+	}
+
+	cfg := p.cfg.Decoder
+	cfg.cuda = p.cuda
+	cfg.hwFrames = pool
+	newDec, err := newDecoderWithFallback(cfg)
+	if err != nil {
+		pool.Free()
+		slog.Warn("native: rebuild decoder onto owned CUDA pool failed; GPU switch will reinit", "err", err)
+		return false
+	}
+	p.mu.Lock()
+	p.decoder.Close()
+	p.decoder = newDec
+	p.decodePool = pool
+	p.mu.Unlock()
+	return true
 }
 
 // passthroughAudio wraps demuxed AAC frames as OutputFrames tagged
@@ -619,6 +686,14 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 		return nil, errors.New("native: switch on closed pipeline")
 	}
 
+	// GPU path rebuilds only the decoder (into a stable pipeline-owned CUDA
+	// pool), keeping the scale_cuda graph + NVENC encoder bound to one
+	// frames ctx so the output stays seamless (see switchInputGPU). The CPU
+	// rebuild below applies only to the software path.
+	if p.useGPU {
+		return p.switchInputGPU()
+	}
+
 	p.mu.Lock()
 	oldDec := p.decoder
 	p.mu.Unlock()
@@ -689,6 +764,76 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 	p.mu.Lock()
 	p.decoder = newDec
 	p.cfg.Decoder = newCfg
+	p.mu.Unlock()
+	return out, nil
+}
+
+// switchInputGPU performs a seamless GPU input switch: it rebuilds only
+// the decoder, into the SAME pipeline-owned CUDA frames pool, so the
+// scale_cuda graph + NVENC encoder stay bound to one frames ctx — same
+// SPS/PPS, continuous output, no player MSE re-init. The TS demuxer is
+// rebuilt (new source = new PSI) and the keyframe gate + PTS rebase reset
+// so the cutover lands on the new source's IDR.
+//
+// When the owned pool isn't bound yet (bindDecodePool failed, or no frame
+// decoded before the first switch) it falls back to a full rendition
+// rebuild — crash-free but a brief reinit, not seamless. A source whose
+// resolution differs from the pool's also can't reuse it; that surfaces as
+// a decode error and the supervisor respawns (hard cut). Same-resolution
+// failover — the common case — stays seamless.
+func (p *StreamPipeline) switchInputGPU() ([]OutputFrame, error) {
+	p.mu.Lock()
+	oldDec := p.decoder
+	p.mu.Unlock()
+
+	// Drain the old decoder's reorder queue through the surviving encoder
+	// so the cutover stays monotonic in encoder PTS space.
+	flushFrames, err := oldDec.Flush()
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: flush old decoder: %w", err)
+	}
+	out, err := p.runFramesThroughEncoder(flushFrames)
+	if err != nil {
+		return out, err
+	}
+	oldDec.Close()
+
+	if p.tsInput != nil {
+		p.inputCancel()
+		p.tsInput.Close()
+		p.tsInput = nil
+		p.inputCtx = nil
+		p.inputCancel = nil
+		p.formatProbed = false
+	}
+	p.sawKeyframe = false
+	p.pendingForceKeyframe = true
+	p.pendingRebase = true
+	if p.audioReenc != nil {
+		p.audioReenc.SwitchInput()
+	} else {
+		p.pendingSessionStart = true
+	}
+
+	cfg := p.cfg.Decoder
+	cfg.cuda = p.cuda
+	cfg.hwFrames = p.decodePool // nil → cuvid auto-pool (fallback below)
+
+	if p.decodePool == nil {
+		// No stable pool — rebuild the renditions so the new decoder's
+		// fresh auto-pool frames ctx rebinds cleanly (reinit, not seamless).
+		if err := p.rebuildGPURenditions(); err != nil {
+			return out, fmt.Errorf("pipeline: rebuild gpu renditions on switch: %w", err)
+		}
+	}
+
+	newDec, err := newDecoderWithFallback(cfg)
+	if err != nil {
+		return out, fmt.Errorf("pipeline: alloc new decoder on switch: %w", err)
+	}
+	p.mu.Lock()
+	p.decoder = newDec
+	p.cfg.Decoder = cfg
 	p.mu.Unlock()
 	return out, nil
 }
@@ -857,6 +1002,13 @@ func (p *StreamPipeline) Close() {
 		if g != nil {
 			g.Close()
 		}
+	}
+	// Owned decode pool after its consumers (decoder + scale_cuda
+	// buffersrc, both closed above) have released their refs, and before
+	// the CUDA device the pool is allocated from.
+	if p.decodePool != nil {
+		p.decodePool.Free()
+		p.decodePool = nil
 	}
 	p.cuda.Free() // nil-safe
 }
