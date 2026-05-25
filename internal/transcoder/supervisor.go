@@ -424,7 +424,7 @@ func (sv *supervisor) writeOutputPacket(pkt *pb.OutputPacket) error {
 // Returns ok=false on UNSPECIFIED / unknown so the supervisor drops
 // the packet with a warning instead of misrouting it.
 func avCodecFromProto(c pb.Codec) (domain.AVCodec, bool) {
-	switch c {
+	switch c { //nolint:exhaustive // default returns ok=false for CODEC_UNSPECIFIED and any unmapped codec
 	case pb.Codec_CODEC_H264:
 		return domain.AVCodecH264, true
 	case pb.Codec_CODEC_H265:

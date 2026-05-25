@@ -175,7 +175,7 @@ func (s *Server) sendOutputs(stream pb.Transcoder_RunServer, outs []OutputFrame)
 // esCodecUnknown becomes CODEC_UNSPECIFIED so the supervisor surfaces
 // a clear error instead of misrouting bytes.
 func protoCodec(c esFrameCodec) pb.Codec {
-	switch c {
+	switch c { //nolint:exhaustive // default maps esCodecUnknown (and any unmapped codec) to UNSPECIFIED
 	case esCodecH264:
 		return pb.Codec_CODEC_H264
 	case esCodecH265:

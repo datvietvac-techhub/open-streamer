@@ -52,10 +52,10 @@ type audioReencoder struct {
 	fifo      *astiav.AudioFifo
 	frameSize int
 
-	outRate  int
-	outChans int
+	outRate   int
+	outChans  int
 	outLayout astiav.ChannelLayout
-	outFmt   astiav.SampleFormat
+	outFmt    astiav.SampleFormat
 
 	// PTS bookkeeping: output PTS is derived from a running sample
 	// count anchored to the first input frame's PTS so the audio
@@ -85,7 +85,7 @@ type audioReencoder struct {
 // The decoder is created lazily on the first frame (its params come
 // from the source, not the config). srcCodecName is the libavcodec
 // decoder name for the source ("aac", "mp2", "mp3").
-func newAudioReencoder(cfg AudioConfig, srcCodecName string) (*audioReencoder, error) {
+func newAudioReencoder(cfg AudioConfig, srcCodecName string) (*audioReencoder, error) { //nolint:unparam // srcCodecName will carry mp2/mp3 when non-AAC broadcast audio is wired; AAC is the only source today
 	outRate := cfg.SampleRate
 	if outRate <= 0 {
 		outRate = 48000
@@ -391,7 +391,7 @@ func (a *audioReencoder) Flush() ([]OutputFrame, error) {
 			}
 		}
 	}
-	return out, nil
+	return out, nil //nolint:nilerr // ReceivePacket's error terminates the drain loop (EAGAIN/EOF), not a failure to propagate
 }
 
 // SwitchInput drops the decoder + resampler so the next frame rebuilds

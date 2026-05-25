@@ -169,6 +169,9 @@ func TestVODHandler_Delete_RepoError(t *testing.T) {
 
 func TestVODHandler_Create_StorageNotWritable(t *testing.T) {
 	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses mode-bit checks; cannot meaningfully test non-writable storage")
+	}
 	h, _ := newVODHandlerForTest(t)
 	// Path that doesn't exist AND can't be created (parent dir is read-only).
 	roParent := t.TempDir()

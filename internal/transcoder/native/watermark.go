@@ -100,7 +100,8 @@ func NewWatermarker(cfg WatermarkConfig, width, height, framerate int) (*Waterma
 	params.SetWidth(width)
 	params.SetHeight(height)
 	params.SetPixelFormat(astiav.PixelFormatYuv420P)
-	params.SetTimeBase(astiav.NewRational(1, 1000)) // ms — matches encoder time base
+	params.SetTimeBase(astiav.NewRational(1, 1000))       // ms — matches encoder time base
+	params.SetFramerate(astiav.NewRational(framerate, 1)) // drives lavfi FRAME_RATE (image-overlay setpts=N/(FRAME_RATE*TB))
 	params.SetSampleAspectRatio(astiav.NewRational(1, 1))
 	if err := src.SetParameters(params); err != nil {
 		graph.Free()
@@ -208,7 +209,7 @@ func BuildWatermarkFilter(cfg WatermarkConfig, canvasW, canvasH int) (string, er
 	}
 }
 
-func buildTextFilter(cfg WatermarkConfig, canvasW, canvasH int) string {
+func buildTextFilter(cfg WatermarkConfig, canvasW, canvasH int) string { //nolint:unparam // canvas dims reserved; drawtext resolves position via lavfi w/h at runtime
 	fontFile := cfg.FontFile
 	if fontFile == "" {
 		fontFile = defaultFontFile
@@ -242,7 +243,7 @@ func buildTextFilter(cfg WatermarkConfig, canvasW, canvasH int) string {
 	return "drawtext=" + strings.Join(parts, ":")
 }
 
-func buildImageFilter(cfg WatermarkConfig, canvasW, canvasH int) (string, error) {
+func buildImageFilter(cfg WatermarkConfig, canvasW, canvasH int) (string, error) { //nolint:unparam // canvas dims reserved; overlay resolves position via lavfi w/h at runtime
 	if cfg.AssetPath == "" {
 		return "", errors.New("image watermark requires asset_path")
 	}

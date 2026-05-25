@@ -629,6 +629,9 @@ func (p *StreamPipeline) flushTSDemuxTail() ([]OutputFrame, error) {
 	return head, nil
 }
 
+// Flush drains the TS-demux tail, decoder, encoder, and (when active) the
+// audio re-encoder at end-of-stream, returning every remaining OutputFrame
+// so the final GOP and audio tail aren't dropped on shutdown.
 func (p *StreamPipeline) Flush() ([]OutputFrame, error) {
 	if p.isClosed() {
 		return nil, errors.New("native: flush on closed pipeline")
