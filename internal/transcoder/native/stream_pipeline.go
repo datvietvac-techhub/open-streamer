@@ -261,8 +261,16 @@ func buildAudioReencoder(cfg AudioConfig) (*audioReencoder, error) {
 // re-encoder (Audio.Copy=false) or straight to passthrough. Both
 // paths emit broadcast OutputFrames whose PTS the caller rebases onto
 // the continuous output clock.
+//
+// Audio is gated on sawKeyframe (the first video IDR), same as video.
+// Without this, after a switch the audio (which has no keyframe
+// concept) starts flowing immediately and anchors the shared rebase
+// offset BEFORE the gated video does — leaving audio ~1 GOP (≈4 s)
+// ahead of video as a constant skew. Gating audio to the first video
+// IDR makes both tracks start from the same point so they share the
+// offset cleanly.
 func (p *StreamPipeline) handleAudio(frames []esFrame) ([]OutputFrame, error) {
-	if len(frames) == 0 {
+	if len(frames) == 0 || !p.sawKeyframe {
 		return nil, nil
 	}
 	if p.audioReenc == nil {
@@ -548,14 +556,25 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 		p.formatProbed = false
 	}
 	p.sawKeyframe = false
-	p.pendingSessionStart = true
 	p.pendingForceKeyframe = true
 	p.pendingRebase = true
+	// EXT-X-DISCONTINUITY is only needed when the OUTPUT stream's shape
+	// can change across the switch. With audio re-encode the output is
+	// fully continuous — same encoder (identical SPS/PPS), continuous
+	// rebased PTS, and a FIXED audio format (the configured rate
+	// regardless of source) — so signalling a discontinuity would force
+	// the player to needlessly re-init its MSE decoder and re-buffer
+	// (the "slight loading" seen at every scene change). Suppressing it
+	// makes the switch seamless. Passthrough audio still needs it: the
+	// source audio sample rate (44.1 vs 48 kHz) changes mid-stream,
+	// which a player can only absorb at a discontinuity boundary.
 	if p.audioReenc != nil {
 		// Drop the audio decoder + resampler so they rebuild against
 		// the new source's sample rate / channels; encoder survives so
 		// the output AAC stream stays continuous.
 		p.audioReenc.SwitchInput()
+	} else {
+		p.pendingSessionStart = true
 	}
 
 	newDec, err := NewDecoder(newCfg)

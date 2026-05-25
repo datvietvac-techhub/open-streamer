@@ -60,6 +60,9 @@ func renditionPipeline(t *testing.T, fps int) *StreamPipeline {
 				},
 			},
 		},
+		// Passthrough audio: these tests exercise the video + switch
+		// path, where the discontinuity signal is expected.
+		Audio: AudioConfig{Copy: true},
 	})
 	require.NoError(t, err)
 	return p
@@ -95,6 +98,7 @@ func multiRenditionPipeline(t *testing.T, fps int) *StreamPipeline {
 			mk(1280, 720, 1600),
 			mk(854, 480, 800),
 		},
+		Audio: AudioConfig{Copy: true},
 	})
 	require.NoError(t, err)
 	return p
@@ -456,6 +460,39 @@ func TestStreamPipeline_SwitchInputLatchesSessionStartAndForcedIDR(t *testing.T)
 				"SessionStart leaked into a non-first OutputFrame batch (target %d)", f.TargetIndex)
 		}
 	}
+}
+
+// TestStreamPipeline_SwitchSuppressesDiscontinuityWhenReencoding locks
+// the seamless-switch contract: when audio is re-encoded (Audio.Copy=
+// false) the output is fully continuous (same encoder SPS/PPS,
+// rebased PTS, fixed audio format), so SwitchInput must NOT latch
+// pendingSessionStart — emitting EXT-X-DISCONTINUITY there would make
+// the player re-buffer at every scene change. forceKeyframe is still
+// latched so the boundary segment starts at a clean IDR.
+func TestStreamPipeline_SwitchSuppressesDiscontinuityWhenReencoding(t *testing.T) {
+	t.Parallel()
+	p, err := NewStreamPipeline(PipelineConfig{
+		Decoder: DecoderConfig{Codec: "h264"},
+		Renditions: []RenditionConfig{
+			{
+				Scaler:  ScalerConfig{DstWidth: 1280, DstHeight: 720, DstPixelFmt: astiav.PixelFormatYuv420P},
+				Encoder: EncoderConfig{Width: 1280, Height: 720, Framerate: 25, BitrateKbps: 1600, GOPSize: 25, Options: map[string]string{"preset": "ultrafast", "tune": "zerolatency"}},
+			},
+		},
+		Audio: AudioConfig{Codec: "aac", SampleRate: 44100, Channels: 2, BitrateK: 128}, // Copy=false → re-encode
+	})
+	if err != nil {
+		t.Skipf("aac encoder unavailable: %v", err)
+	}
+	defer p.Close()
+	require.NotNil(t, p.audioReenc, "re-encode config must build an audioReencoder")
+
+	_, err = p.SwitchInput(DecoderConfig{Codec: "h264"})
+	require.NoError(t, err)
+	assert.False(t, p.pendingSessionStart,
+		"re-encoded audio → continuous output → must NOT signal discontinuity (would force player re-buffer)")
+	assert.True(t, p.pendingForceKeyframe,
+		"boundary segment must still start at a forced IDR")
 }
 
 // SwitchInput on a multi-rendition pipeline must preserve identity of
