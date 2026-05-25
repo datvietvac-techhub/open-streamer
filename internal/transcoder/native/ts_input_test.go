@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 )
 
 // TestLooksLikeTS_DetectsSyncByte locks in the byte-pattern probe the
@@ -65,6 +66,39 @@ func TestTSInput_CloseIsIdempotent(t *testing.T) {
 	in := newTSInput(context.Background())
 	in.Close()
 	in.Close()
+}
+
+// TestTSInput_FeedDoesNotBlockUnderChurn feeds far more chunks than
+// the chunks buffer holds, of data that makes astits restart
+// repeatedly (sync bytes but no valid PAT/PMT — the mid-switch
+// shape). The demuxer-restart loop must keep draining chunks so Feed
+// never blocks permanently; a regression here reintroduces the hard
+// stall under rapid input switching. A watchdog goroutine fails the
+// test if any Feed call hangs.
+func TestTSInput_FeedDoesNotBlockUnderChurn(t *testing.T) {
+	t.Parallel()
+	in := newTSInput(context.Background())
+	defer in.Close()
+
+	chunk := buildShortTSChunk(1) // sync byte, PID 0x1FFF, no PSI
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// 10x the buffer size — if the consumer dies, this blocks well
+		// before finishing.
+		for i := 0; i < tsChunksBufferSize*10; i++ {
+			if err := in.Feed(append([]byte(nil), chunk...)); err != nil {
+				return // ErrClosedPipe is acceptable (consumer gone)
+			}
+			in.DrainReady()
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Feed blocked under demuxer churn — rapid-switch stall regression")
+	}
 }
 
 // TestTSInput_DrainReadyEmptyReturnsNil — the pipeline's lazy-drain

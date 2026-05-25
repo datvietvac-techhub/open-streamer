@@ -108,8 +108,18 @@ func (t *tsInput) Feed(chunk []byte) error {
 		return io.ErrClosedPipe
 	default:
 	}
+	// demuxDoneCh guards against a permanent block: if the demuxer
+	// goroutine exited on its own (astits returned EOF / unrecoverable
+	// parse error) the chunks queue has no consumer, so a plain
+	// `chunks <- chunk` would fill the 64-slot buffer and then block
+	// the caller — and the pipeline's dispatch loop — forever. Failing
+	// fast here lets the pipeline tear this tsInput down and rebuild a
+	// fresh one on the next packet. This was the root cause of the
+	// hard stall under rapid input switching.
 	select {
 	case <-t.done:
+		return io.ErrClosedPipe
+	case <-t.demuxDoneCh:
 		return io.ErrClosedPipe
 	case t.chunks <- chunk:
 		return nil
@@ -165,19 +175,28 @@ func (t *tsInput) Close() {
 	<-t.demuxDoneCh
 }
 
-// runDemux blocks reading TS bytes from the chunks channel via
-// chanReader, dispatching every assembled PES through tsdemux.OnFrame
-// into the frames queue.
+// runDemux reads TS bytes from the chunks channel via chanReader,
+// dispatching every assembled PES through tsdemux.OnFrame into the
+// frames / audio queues.
 //
-// Audio frames are intentionally dropped here — the StreamPipeline is
-// video-only today. When P6 adds audio, the OnFrame callback will fan
-// out to a second queue keyed by codec.
+// The demuxer is RESTARTED on any astits error or early return rather
+// than letting the goroutine exit. astits stops on the first bad TS
+// packet — common when a fresh source's first bytes land mid-PES or
+// before the PAT/PMT (exactly what happens on every input switch).
+// If the goroutine exited there, the chunks channel would lose its
+// consumer, Feed would fill the buffer and block the whole pipeline
+// (the hard stall under rapid switching). A fresh astits demuxer
+// resumes from wherever chanReader left off, scanning forward for the
+// next 0x47 sync byte. Only a closed `done` (Close) or a drained
+// reader (io.EOF with done observed) ends the loop.
+//
+// Audio frames take the passthrough queue; H.264 / H.265 take the
+// video queue. Other stream types are dropped.
 func (t *tsInput) runDemux(ctx context.Context) {
 	defer close(t.demuxDoneCh)
 
 	cr := &tsChanReader{ch: t.chunks, done: t.done}
-	dmx := tsdemux.New()
-	dmx.OnFrame = func(cid tsdemux.StreamType, frame []byte, pts, dts uint64) {
+	onFrame := func(cid tsdemux.StreamType, frame []byte, pts, dts uint64) {
 		if len(frame) == 0 {
 			return
 		}
@@ -207,7 +226,22 @@ func (t *tsInput) runDemux(ctx context.Context) {
 		case <-t.done:
 		}
 	}
-	_ = dmx.Input(ctx, cr)
+
+	for {
+		select {
+		case <-t.done:
+			return
+		default:
+		}
+		dmx := tsdemux.New()
+		dmx.OnFrame = onFrame
+		// Input returns on: done-driven io.EOF (clean stop), or an
+		// astits parse error (transient — restart). The done check at
+		// the top of the loop is the only exit; everything else loops
+		// to a fresh demuxer so the chunks consumer never dies while
+		// the input is live.
+		_ = dmx.Input(ctx, cr)
+	}
 }
 
 // tsChanReader is an io.Reader that drains a channel of byte slices,

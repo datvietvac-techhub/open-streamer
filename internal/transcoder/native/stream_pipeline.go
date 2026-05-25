@@ -147,6 +147,28 @@ type StreamPipeline struct {
 	// garbage.
 	pendingSessionStart  bool
 	pendingForceKeyframe bool
+
+	// Output-PTS rebasing keeps the emitted timeline continuous and
+	// monotonic across input switches. Raw source PTS jumps on every
+	// switch (each input has its own wallclock anchor and framerate),
+	// so feeding it straight to the encoder produces a chaotic
+	// timeline that players can't assemble even with an
+	// EXT-X-DISCONTINUITY tag — the live edge stalls. Rebasing onto a
+	// single continuous clock is what makes switching actually work
+	// (the design Flussonic-style servers rely on).
+	//
+	// ptsOffset is added to every source PTS; recomputed on the first
+	// frame after each switch so the new input continues right after
+	// the last emitted output instead of jumping. lastVideoOut /
+	// lastAudioOut track per-track monotonic ceilings (video and
+	// audio are independent streams that interleave, so a single
+	// shared ceiling would corrupt their relative timing). The shared
+	// ptsOffset keeps A/V in sync because both ride the same source
+	// timeline.
+	ptsOffset     int64
+	lastVideoOut  int64
+	lastAudioOut  int64
+	pendingRebase bool
 }
 
 // NewStreamPipeline constructs the decoder + every rendition's
@@ -193,12 +215,58 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 		return nil, fmt.Errorf("pipeline: decoder: %w", err)
 	}
 	return &StreamPipeline{
-		cfg:          cfg,
-		encoders:     encoders,
-		scalers:      scalers,
-		watermarkers: watermarkers,
-		decoder:      dec,
+		cfg:           cfg,
+		encoders:      encoders,
+		scalers:       scalers,
+		watermarkers:  watermarkers,
+		decoder:       dec,
+		pendingRebase: true, // first-ever frame anchors the output clock
 	}, nil
+}
+
+// rebaseVideoPTS / rebaseAudioPTS map a source-stream PTS (ms) onto
+// the pipeline's continuous output timeline. The offset is recomputed
+// lazily on the first frame after a switch (pendingRebase) so the new
+// input continues one tick past the last emitted output rather than
+// jumping to its own wallclock anchor. Per-track monotonic clamps
+// guard against intra-track regressions without coupling video and
+// audio ordering.
+func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
+	p.anchorRebase(srcPTS)
+	out := srcPTS + p.ptsOffset
+	if out <= p.lastVideoOut {
+		out = p.lastVideoOut + 1
+	}
+	p.lastVideoOut = out
+	return out
+}
+
+func (p *StreamPipeline) rebaseAudioPTS(srcPTS int64) int64 {
+	p.anchorRebase(srcPTS)
+	out := srcPTS + p.ptsOffset
+	if out <= p.lastAudioOut {
+		out = p.lastAudioOut + 1
+	}
+	p.lastAudioOut = out
+	return out
+}
+
+// anchorRebase recomputes ptsOffset from the first frame seen after a
+// switch so the new input's output continues just past whichever
+// track last emitted. Computed from whichever track (video or audio)
+// arrives first; the shared offset then keeps both in their original
+// A/V relationship.
+func (p *StreamPipeline) anchorRebase(srcPTS int64) {
+	if !p.pendingRebase {
+		return
+	}
+	p.pendingRebase = false
+	base := p.lastVideoOut
+	if p.lastAudioOut > base {
+		base = p.lastAudioOut
+	}
+	// base==0 on the first-ever frame → output starts at 1 ms.
+	p.ptsOffset = base + 1 - srcPTS
 }
 
 // buildRendition allocates one rendition's encoder + scaler +
@@ -324,11 +392,15 @@ func (p *StreamPipeline) passthroughAudio(frames []esFrame) []OutputFrame {
 	}
 	out := make([]OutputFrame, 0, len(frames))
 	for _, f := range frames {
+		// Rebase onto the same continuous clock as video (shared
+		// ptsOffset) so audio stays in A/V sync across switches and
+		// the output timeline never jumps backward.
+		pts := p.rebaseAudioPTS(f.pts)
 		out = append(out, OutputFrame{
 			Data:        f.data,
 			Codec:       f.codec,
-			PTS:         f.pts,
-			DTS:         f.dts,
+			PTS:         pts,
+			DTS:         pts,
 			TargetIndex: BroadcastTargetIndex,
 		})
 	}
@@ -416,6 +488,7 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 	p.sawKeyframe = false
 	p.pendingSessionStart = true
 	p.pendingForceKeyframe = true
+	p.pendingRebase = true
 
 	newDec, err := NewDecoder(newCfg)
 	if err != nil {
@@ -586,17 +659,26 @@ func (p *StreamPipeline) runFramesThroughEncoder(frames []*astiav.Frame) ([]Outp
 // from every rendition carries the discontinuity marker and rides
 // an IDR keyframe.
 func (p *StreamPipeline) encodeOne(f *astiav.Frame) ([]OutputFrame, error) {
-	pts := f.Pts()
-	if pts <= 0 {
-		pts = p.encoders[0].NextPTS()
+	srcPTS := f.Pts()
+	if srcPTS <= 0 {
+		srcPTS = p.encoders[0].NextPTS()
 	}
-	if p.pendingForceKeyframe {
+	// Rebase onto the continuous output clock so the encoder emits a
+	// monotonic timeline that survives input switches — the source
+	// PTS jumps on every switch and would otherwise stall the player.
+	pts := p.rebaseVideoPTS(srcPTS)
+	// forceIDR is consumed atomically with the per-rendition encode
+	// loop — every encoder gets the I-frame hint on the SAME source
+	// frame so all renditions land an IDR together. The hint is set
+	// on the SCALED frame in encodeOneRendition (PictType doesn't
+	// transit through the scaler).
+	forceIDR := p.pendingForceKeyframe
+	if forceIDR {
 		p.pendingForceKeyframe = false
-		f.SetPictureType(astiav.PictureTypeI)
 	}
 	var out []OutputFrame
 	for i := range p.encoders {
-		pkts, err := p.encodeOneRendition(i, f, pts)
+		pkts, err := p.encodeOneRendition(i, f, pts, forceIDR)
 		if err != nil {
 			return out, err
 		}
@@ -621,7 +703,15 @@ func (p *StreamPipeline) encodeOne(f *astiav.Frame) ([]OutputFrame, error) {
 // actually consumes — for the watermark path that's the filtered
 // frame, since the filter graph passes PTS through and the encoder
 // reads it back from there.
-func (p *StreamPipeline) encodeOneRendition(i int, f *astiav.Frame, pts int64) ([]OutputFrame, error) {
+//
+// forceIDR, when true, marks the encoder's input frame with
+// PictureType=I AND its pkt_flags with PacketFlagKey so NVENC and
+// libx264 both emit an IDR (libx264 honours pict_type directly;
+// NVENC requires the forced-idr encoder option, set at Open time).
+// The hint MUST land on the frame the encoder actually consumes —
+// applying it to the pre-scaler frame loses the flag when sws_scale
+// allocates a fresh output frame.
+func (p *StreamPipeline) encodeOneRendition(i int, f *astiav.Frame, pts int64, forceIDR bool) ([]OutputFrame, error) {
 	scaled, err := p.scalers[i].Scale(f)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: rendition %d scale: %w", i, err)
@@ -637,6 +727,10 @@ func (p *StreamPipeline) encodeOneRendition(i int, f *astiav.Frame, pts int64) (
 		}
 		filtered.SetPts(pts)
 		toEncode = filtered
+	}
+	if forceIDR {
+		toEncode.SetPictureType(astiav.PictureTypeI)
+		toEncode.SetFlags(toEncode.Flags().Add(astiav.FrameFlagKey))
 	}
 
 	pkts, err := p.encoders[i].Encode(toEncode)

@@ -248,6 +248,15 @@ func pipelineConfigFromProto(c *pb.ConfigureRequest) PipelineConfig {
 		if t.GetLevel() != "" {
 			enc.Options["level"] = t.GetLevel()
 		}
+		// NVENC ignores frame.PictType=I by default — the pipeline's
+		// forceIDR mechanism (set after SwitchInput so post-switch
+		// segments start with a clean IDR) only works when this opt
+		// is on. libx264 honours the hint unconditionally and
+		// ignores unknown options, so setting it for every backend
+		// is safe.
+		if isNVENCEncoder(enc.Codec) {
+			enc.Options["forced-idr"] = "1"
+		}
 		cfg.Renditions = append(cfg.Renditions, RenditionConfig{
 			Encoder: enc,
 			Scaler: ScalerConfig{
@@ -300,6 +309,17 @@ func AudioConfigFromProto(a *pb.AudioConfig) AudioConfig {
 		Channels:   int(a.GetChannels()),
 		Normalize:  a.GetNormalize(),
 	}
+}
+
+// isNVENCEncoder reports whether the encoder name is one of NVIDIA's
+// NVENC variants. Used to attach NVENC-specific options (forced-idr)
+// that other encoders ignore harmlessly.
+func isNVENCEncoder(name string) bool {
+	switch name {
+	case "h264_nvenc", "hevc_nvenc", "av1_nvenc":
+		return true
+	}
+	return false
 }
 
 // encoderCodecForBackend resolves the per-backend libavcodec encoder
