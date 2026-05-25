@@ -700,10 +700,16 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 // place needs no extra lock.
 func (p *StreamPipeline) rebuildGPURenditions() error {
 	for i := range p.encoders {
+		// Close the encoder BEFORE its scale_cuda graph. The encoder holds
+		// an av_buffer_ref on the graph's output CUDA frames pool; freeing
+		// the graph first tears that pool down while the encoder still
+		// references it, so the encoder's avcodec_free_context then faults
+		// (SIGSEGV) unref'ing a dangling CUDA hwframe. Encoder-first keeps
+		// the pool alive until the encoder has released its ref.
+		p.encoders[i].Close()
 		if p.gpuScalers[i] != nil {
 			p.gpuScalers[i].Close()
 		}
-		p.encoders[i].Close()
 		r := p.cfg.Renditions[i]
 		r.Encoder.cuda = p.cuda
 		enc, gs, err := buildGPURendition(r, p.cuda)
@@ -839,13 +845,18 @@ func (p *StreamPipeline) Close() {
 			sc.Close()
 		}
 	}
+	// Encoders before gpuScalers: an NVENC encoder holds an av_buffer_ref
+	// on its scale_cuda graph's output CUDA frames pool, so it must
+	// release that ref before the graph tears the pool down (otherwise
+	// avcodec_free_context faults on a dangling CUDA hwframe). cuda device
+	// last, once nothing references it.
+	for _, enc := range p.encoders {
+		enc.Close()
+	}
 	for _, g := range p.gpuScalers {
 		if g != nil {
 			g.Close()
 		}
-	}
-	for _, enc := range p.encoders {
-		enc.Close()
 	}
 	p.cuda.Free() // nil-safe
 }
