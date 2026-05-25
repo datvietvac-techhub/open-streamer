@@ -76,6 +76,58 @@ func TestSupervisor_WriteOutputPacket_BroadcastFansToAllTargets(t *testing.T) {
 	}
 }
 
+// TestSupervisor_WriteOutputPacket_SessionStartPropagates locks in
+// the discontinuity wire contract: an OutputPacket with
+// session_start=true on the wire must land on buffer.Packet.SessionStart
+// so the publisher's existing onSessionBoundary handler fires and
+// emits EXT-X-DISCONTINUITY on the next HLS segment. Without that
+// marker reaching the publisher, players keep their MSE init state
+// across input switches and corrupt-decode the new source.
+func TestSupervisor_WriteOutputPacket_SessionStartPropagates(t *testing.T) {
+	t.Parallel()
+	buf := buffer.NewServiceForTesting(8)
+
+	const stream domain.StreamCode = "test_sessionstart"
+	target := RenditionTarget{BufferID: stream + "/t0", Profile: Profile{Width: 1920, Height: 1080}}
+	buf.Create(target.BufferID)
+	sub, err := buf.Subscribe(target.BufferID)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer buf.Unsubscribe(target.BufferID, sub)
+
+	sv := &supervisor{
+		svc:      &Service{buf: buf},
+		streamID: stream,
+		targets:  []RenditionTarget{target},
+	}
+
+	err = sv.writeOutputPacket(&pb.OutputPacket{
+		TargetIndex:  0,
+		Data:         []byte{0x00, 0x00, 0x00, 0x01, 0x67},
+		Codec:        pb.Codec_CODEC_H264,
+		PtsMs:        5000,
+		DtsMs:        5000,
+		Keyframe:     true,
+		SessionStart: true,
+	})
+	if err != nil {
+		t.Fatalf("writeOutputPacket: %v", err)
+	}
+
+	select {
+	case pkt := <-sub.Recv():
+		if !pkt.SessionStart {
+			t.Fatal("buffer.Packet.SessionStart not set — publisher will skip EXT-X-DISCONTINUITY")
+		}
+		if pkt.AV == nil || !pkt.AV.KeyFrame {
+			t.Fatalf("expected keyframe AV packet alongside SessionStart, got %+v", pkt)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for SessionStart packet")
+	}
+}
+
 // TestSupervisor_WriteOutputPacket_SpecificTargetOnlyOneBufferGets
 // covers the opposite case — a video frame with TargetIndex=1 must
 // land ONLY in target 1's buffer. Catches a regression where the

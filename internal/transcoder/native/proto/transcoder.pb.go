@@ -911,13 +911,21 @@ func (x *InputPacket) GetSessionId() int64 {
 }
 
 type OutputPacket struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetIndex   int32                  `protobuf:"varint,1,opt,name=target_index,json=targetIndex,proto3" json:"target_index,omitempty"` // matches Target.index
-	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`                                   // codec ES bytes (Annex-B for H.264/H.265, raw ADTS for AAC)
-	Codec         Codec                  `protobuf:"varint,3,opt,name=codec,proto3,enum=transcoder.v1.Codec" json:"codec,omitempty"`       // identifies the codec for the supervisor's AV-path write
-	PtsMs         int64                  `protobuf:"varint,4,opt,name=pts_ms,json=ptsMs,proto3" json:"pts_ms,omitempty"`                   // milliseconds; from encoder for video, demuxer for audio
-	DtsMs         int64                  `protobuf:"varint,5,opt,name=dts_ms,json=dtsMs,proto3" json:"dts_ms,omitempty"`                   // milliseconds; equals pts_ms when source has no separate DTS
-	Keyframe      bool                   `protobuf:"varint,6,opt,name=keyframe,proto3" json:"keyframe,omitempty"`                          // IDR for H.264/H.265; always false for AAC
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	TargetIndex int32                  `protobuf:"varint,1,opt,name=target_index,json=targetIndex,proto3" json:"target_index,omitempty"` // matches Target.index
+	Data        []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`                                   // codec ES bytes (Annex-B for H.264/H.265, raw ADTS for AAC)
+	Codec       Codec                  `protobuf:"varint,3,opt,name=codec,proto3,enum=transcoder.v1.Codec" json:"codec,omitempty"`       // identifies the codec for the supervisor's AV-path write
+	PtsMs       int64                  `protobuf:"varint,4,opt,name=pts_ms,json=ptsMs,proto3" json:"pts_ms,omitempty"`                   // milliseconds; from encoder for video, demuxer for audio
+	DtsMs       int64                  `protobuf:"varint,5,opt,name=dts_ms,json=dtsMs,proto3" json:"dts_ms,omitempty"`                   // milliseconds; equals pts_ms when source has no separate DTS
+	Keyframe    bool                   `protobuf:"varint,6,opt,name=keyframe,proto3" json:"keyframe,omitempty"`                          // IDR for H.264/H.265; always false for AAC
+	// session_start=true marks the first packet emitted after an
+	// input switch so the supervisor sets buffer.Packet.SessionStart
+	// and the publisher emits EXT-X-DISCONTINUITY on the next HLS
+	// segment. Without that, players keep the old source's MSE init
+	// context across the switch and decode the new source's frames
+	// (different PTS base, sometimes different framerate) into
+	// visible corruption that doesn't recover without a reload.
+	SessionStart  bool `protobuf:"varint,7,opt,name=session_start,json=sessionStart,proto3" json:"session_start,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -990,6 +998,13 @@ func (x *OutputPacket) GetDtsMs() int64 {
 func (x *OutputPacket) GetKeyframe() bool {
 	if x != nil {
 		return x.Keyframe
+	}
+	return false
+}
+
+func (x *OutputPacket) GetSessionStart() bool {
+	if x != nil {
+		return x.SessionStart
 	}
 	return false
 }
@@ -1324,14 +1339,15 @@ const file_transcoder_proto_rawDesc = "" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12#\n" +
 	"\rsession_start\x18\x02 \x01(\bR\fsessionStart\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\x03R\tsessionId\"\xbb\x01\n" +
+	"session_id\x18\x03 \x01(\x03R\tsessionId\"\xe0\x01\n" +
 	"\fOutputPacket\x12!\n" +
 	"\ftarget_index\x18\x01 \x01(\x05R\vtargetIndex\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12*\n" +
 	"\x05codec\x18\x03 \x01(\x0e2\x14.transcoder.v1.CodecR\x05codec\x12\x15\n" +
 	"\x06pts_ms\x18\x04 \x01(\x03R\x05ptsMs\x12\x15\n" +
 	"\x06dts_ms\x18\x05 \x01(\x03R\x05dtsMs\x12\x1a\n" +
-	"\bkeyframe\x18\x06 \x01(\bR\bkeyframe\"?\n" +
+	"\bkeyframe\x18\x06 \x01(\bR\bkeyframe\x12#\n" +
+	"\rsession_start\x18\a \x01(\bR\fsessionStart\"?\n" +
 	"\vSwitchInput\x120\n" +
 	"\x15new_raw_ingest_buf_id\x18\x01 \x01(\tR\x11newRawIngestBufId\"\x1e\n" +
 	"\x04Stop\x12\x16\n" +

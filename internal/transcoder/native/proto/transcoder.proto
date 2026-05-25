@@ -136,6 +136,14 @@ message OutputPacket {
   int64  pts_ms         = 4; // milliseconds; from encoder for video, demuxer for audio
   int64  dts_ms         = 5; // milliseconds; equals pts_ms when source has no separate DTS
   bool   keyframe       = 6; // IDR for H.264/H.265; always false for AAC
+  // session_start=true marks the first packet emitted after an
+  // input switch so the supervisor sets buffer.Packet.SessionStart
+  // and the publisher emits EXT-X-DISCONTINUITY on the next HLS
+  // segment. Without that, players keep the old source's MSE init
+  // context across the switch and decode the new source's frames
+  // (different PTS base, sometimes different framerate) into
+  // visible corruption that doesn't recover without a reload.
+  bool   session_start  = 7;
 }
 
 // Codec identifies the elementary-stream type of an OutputPacket so the

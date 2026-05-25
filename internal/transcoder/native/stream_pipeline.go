@@ -51,16 +51,23 @@ const BroadcastTargetIndex int32 = -1
 // sentinel BroadcastTargetIndex (-1) means write to every rendition
 // (used for the shared audio passthrough).
 //
+// SessionStart marks the first packet emitted after a SwitchInput
+// so the supervisor sets buffer.Packet.SessionStart and the
+// publisher emits EXT-X-DISCONTINUITY on the next HLS segment.
+// Without this signal players keep the previous source's MSE init
+// context and corrupt-decode the new source's frames.
+//
 // PTS / DTS are in milliseconds — converted to the publisher's
 // expected time base at the pipeline edge so downstream consumers
 // (tsmux.FromAV, segmenters, players) all see a uniform clock.
 type OutputFrame struct {
-	Data        []byte
-	Codec       esFrameCodec
-	PTS         int64
-	DTS         int64
-	Keyframe    bool
-	TargetIndex int32
+	Data         []byte
+	Codec        esFrameCodec
+	PTS          int64
+	DTS          int64
+	Keyframe     bool
+	TargetIndex  int32
+	SessionStart bool
 }
 
 // StreamPipeline composes decoder → N renditions (scaler + encoder)
@@ -123,6 +130,23 @@ type StreamPipeline struct {
 	// Reset in SwitchInput so the new source's pre-IDR period is
 	// gated too.
 	sawKeyframe bool
+
+	// pendingSessionStart is set on every SwitchInput and consumed
+	// by the first OutputFrame emitted afterwards (drained tail of
+	// the old decoder doesn't count — only the first frame coming
+	// from the NEW input). The supervisor forwards it as
+	// buffer.Packet.SessionStart so the publisher emits an
+	// EXT-X-DISCONTINUITY tag on the next HLS segment, telling
+	// players to re-init their MSE decoder for the new source.
+	//
+	// pendingForceKeyframe goes hand-in-hand: the first frame from
+	// the new input must be encoded as an IDR so the new segment
+	// is independently decodable. Without this the encoder may
+	// emit P-frames first that reference reordered buffers from
+	// the OLD input — invalid output that decodes as macroblock
+	// garbage.
+	pendingSessionStart  bool
+	pendingForceKeyframe bool
 }
 
 // NewStreamPipeline constructs the decoder + every rendition's
@@ -390,6 +414,8 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 		p.formatProbed = false
 	}
 	p.sawKeyframe = false
+	p.pendingSessionStart = true
+	p.pendingForceKeyframe = true
 
 	newDec, err := NewDecoder(newCfg)
 	if err != nil {
@@ -554,10 +580,19 @@ func (p *StreamPipeline) runFramesThroughEncoder(frames []*astiav.Frame) ([]Outp
 // audio so monotonic frame indices are still self-consistent. The
 // fallback is taken from the FIRST encoder so renditions stay PTS-
 // aligned across the ladder.
+//
+// SessionStart + forceKeyframe latch flags get consumed here on
+// the first frame after SwitchInput so the next emitted OutputFrame
+// from every rendition carries the discontinuity marker and rides
+// an IDR keyframe.
 func (p *StreamPipeline) encodeOne(f *astiav.Frame) ([]OutputFrame, error) {
 	pts := f.Pts()
 	if pts <= 0 {
 		pts = p.encoders[0].NextPTS()
+	}
+	if p.pendingForceKeyframe {
+		p.pendingForceKeyframe = false
+		f.SetPictureType(astiav.PictureTypeI)
 	}
 	var out []OutputFrame
 	for i := range p.encoders {
@@ -566,6 +601,16 @@ func (p *StreamPipeline) encodeOne(f *astiav.Frame) ([]OutputFrame, error) {
 			return out, err
 		}
 		out = append(out, pkts...)
+	}
+	// Latch consumption deferred until at least one rendition emits a
+	// packet — the first frame after SwitchInput often produces zero
+	// output (encoder warm-up / B-frame reorder hold), and consuming
+	// the flag eagerly would lose the discontinuity marker entirely.
+	if p.pendingSessionStart && len(out) > 0 {
+		p.pendingSessionStart = false
+		for j := range out {
+			out[j].SessionStart = true
+		}
 	}
 	return out, nil
 }

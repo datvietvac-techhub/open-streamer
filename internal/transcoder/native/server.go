@@ -155,12 +155,13 @@ func (s *Server) sendOutputs(stream pb.Transcoder_RunServer, outs []OutputFrame)
 		if err := stream.Send(&pb.Event{
 			Body: &pb.Event_Packet{
 				Packet: &pb.OutputPacket{
-					TargetIndex: o.TargetIndex,
-					Data:        o.Data,
-					Codec:       protoCodec(o.Codec),
-					PtsMs:       o.PTS,
-					DtsMs:       o.DTS,
-					Keyframe:    o.Keyframe,
+					TargetIndex:  o.TargetIndex,
+					Data:         o.Data,
+					Codec:        protoCodec(o.Codec),
+					PtsMs:        o.PTS,
+					DtsMs:        o.DTS,
+					Keyframe:     o.Keyframe,
+					SessionStart: o.SessionStart,
 				},
 			},
 		}); err != nil {

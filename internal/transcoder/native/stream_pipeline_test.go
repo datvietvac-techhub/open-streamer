@@ -390,6 +390,74 @@ func TestStreamPipeline_MultiRenditionFansOutPerTarget(t *testing.T) {
 	}
 }
 
+// TestStreamPipeline_SwitchInputLatchesSessionStartAndForcedIDR locks
+// the discontinuity contract: after SwitchInput, the next decoded
+// frame's encoded output (from every rendition) carries
+// SessionStart=true exactly once, and the encoder was asked for an
+// IDR via the frame's picture-type hint. Without these, the player
+// downstream keeps the old source's MSE init context and decodes
+// new-source frames into permanent garbage that requires a reload.
+func TestStreamPipeline_SwitchInputLatchesSessionStartAndForcedIDR(t *testing.T) {
+	t.Parallel()
+	p := multiRenditionPipeline(t, 25)
+	defer p.Close()
+
+	src1 := buildSourceEncoder(t, 1920, 1080, 25)
+	feed(t, p, src1, 1920, 1080, 10)
+	src1.Close()
+
+	_, err := p.SwitchInput(DecoderConfig{Codec: "h264"})
+	require.NoError(t, err)
+	assert.True(t, p.pendingSessionStart, "SwitchInput must latch pendingSessionStart")
+	assert.True(t, p.pendingForceKeyframe, "SwitchInput must latch pendingForceKeyframe")
+
+	src2 := buildSourceEncoder(t, 1920, 1080, 25)
+	defer src2.Close()
+
+	// Push exactly one frame; the latches must be consumed by the
+	// first OutputFrame batch emitted and not carry into subsequent
+	// frames.
+	var firstBatch []OutputFrame
+	for i := 0; i < 5 && len(firstBatch) == 0; i++ {
+		frame := allocTestNV12Frame(t, 1920, 1080, astiav.PixelFormatYuv420P, int64(i))
+		pkts, err := src2.Encode(frame)
+		frame.Free()
+		require.NoError(t, err)
+		for _, pkt := range pkts {
+			out, err := p.ProcessPacket(pkt.Data, int64(i), int64(i))
+			require.NoError(t, err)
+			if len(out) > 0 {
+				firstBatch = out
+				break
+			}
+		}
+	}
+	require.NotEmpty(t, firstBatch, "no output produced after SwitchInput")
+
+	for _, f := range firstBatch {
+		assert.True(t, f.SessionStart,
+			"target %d: first OutputFrame after SwitchInput must carry SessionStart=true", f.TargetIndex)
+	}
+	assert.False(t, p.pendingSessionStart,
+		"pendingSessionStart must be consumed by the first emitted batch")
+	assert.False(t, p.pendingForceKeyframe,
+		"pendingForceKeyframe must be consumed by the first emitted batch")
+
+	// Drive more frames; their OutputFrames must NOT carry SessionStart.
+	frame := allocTestNV12Frame(t, 1920, 1080, astiav.PixelFormatYuv420P, 1000)
+	pkts, err := src2.Encode(frame)
+	frame.Free()
+	require.NoError(t, err)
+	for _, pkt := range pkts {
+		out, err := p.ProcessPacket(pkt.Data, 1000, 1000)
+		require.NoError(t, err)
+		for _, f := range out {
+			assert.False(t, f.SessionStart,
+				"SessionStart leaked into a non-first OutputFrame batch (target %d)", f.TargetIndex)
+		}
+	}
+}
+
 // SwitchInput on a multi-rendition pipeline must preserve identity of
 // EVERY scaler + encoder, not just the first. A regression here would
 // drop frames for renditions 1..N on every input switch.

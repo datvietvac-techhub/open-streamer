@@ -390,6 +390,7 @@ func (sv *supervisor) writeOutputPacket(pkt *pb.OutputPacket) error {
 		DTSms:    uint64(pkt.GetDtsMs()), //nolint:gosec
 		KeyFrame: pkt.GetKeyframe(),
 	}
+	bufPkt := buffer.Packet{AV: av, SessionStart: pkt.GetSessionStart()}
 
 	idx := pkt.GetTargetIndex()
 
@@ -399,7 +400,7 @@ func (sv *supervisor) writeOutputPacket(pkt *pb.OutputPacket) error {
 	// keeping every variant in A/V sync on the same wallclock.
 	if idx < 0 {
 		for i, target := range sv.targets {
-			if err := sv.svc.buf.Write(target.BufferID, buffer.Packet{AV: av}); err != nil {
+			if err := sv.svc.buf.Write(target.BufferID, bufPkt); err != nil {
 				return fmt.Errorf("broadcast buffer write target %d: %w", i, err)
 			}
 		}
@@ -412,7 +413,7 @@ func (sv *supervisor) writeOutputPacket(pkt *pb.OutputPacket) error {
 		return nil
 	}
 	target := sv.targets[idx]
-	if err := sv.svc.buf.Write(target.BufferID, buffer.Packet{AV: av}); err != nil {
+	if err := sv.svc.buf.Write(target.BufferID, bufPkt); err != nil {
 		return fmt.Errorf("buffer write target %d: %w", idx, err)
 	}
 	return nil
