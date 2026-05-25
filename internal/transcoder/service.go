@@ -1,20 +1,16 @@
 // Package transcoder is the public surface for stream transcoding.
 //
-// MIGRATION IN PROGRESS — see internal/transcoder/native/.
+// Transcoding runs in-process via libavcodec. Service supervises one
+// `open-streamer-transcoder` subprocess per transcoded stream (the `native`
+// subpackage, built as cmd/open-streamer-transcoder): it streams raw
+// packets to the subprocess and reads encoded packets back over a
+// bidirectional gRPC `Run` stream on a Unix-domain socket. The subprocess
+// decodes the source once and fans the decoded frames out to every
+// rendition. Passthrough streams (no transcoder config) never start one.
 //
-// The previous implementation spawned FFmpeg subprocesses (one per stream
-// in multi-output mode, one per profile in per-profile mode) and parsed
-// stderr / progress lines to track health. That implementation has been
-// removed in favour of an in-process libavcodec pipeline (the `native`
-// package, driven from a separate `open-streamer-transcoder` binary over
-// gRPC). Until the native runner is wired through, Service.Start returns
-// ErrNotImplemented so transcoded streams fail to start with a clear
-// message; passthrough streams (no transcoder config) are unaffected.
-//
-// Public API (Profile, RenditionTarget, RuntimeStatus, Service.Start /
-// Stop / StartProfile / StopProfile / RuntimeStatus / SetConfig / Config /
-// SetUnhealthyCallback / SetHealthyCallback) is preserved so coordinator
-// and API handlers compile unchanged across the migration.
+// The subprocess owns all renditions, so there is no per-rung lifecycle:
+// StartProfile returns ErrNotImplemented and a ladder change restarts the
+// whole subprocess (see Coordinator.reloadTranscoderFull).
 package transcoder
 
 import (
@@ -38,10 +34,10 @@ import (
 	"github.com/samber/do/v2"
 )
 
-// ErrNotImplemented is returned by Start while the native pipeline is being
-// rolled out. Coordinator unwinds the stream's buffers / publisher / manager
-// entry cleanly on this error, leaving the rest of the server unaffected.
-var ErrNotImplemented = errors.New("transcoder: native pipeline not yet implemented; transcoded streams cannot start")
+// ErrNotImplemented is returned by StartProfile: the subprocess produces
+// every rendition from a single decode, so one rung cannot be started or
+// stopped on its own — callers restart the whole subprocess instead.
+var ErrNotImplemented = errors.New("transcoder: per-profile start is not supported; the subprocess owns all renditions")
 
 // Profile defines a single transcoding output rendition.
 // Rendition label in logs and URLs is track_<n> from ladder order (see buffer.VideoTrackSlug).
@@ -62,9 +58,9 @@ type Profile struct {
 	ResizeMode       string
 }
 
-// profileWorker tracks a single rendition's encoder runtime state. Retained
-// across the migration because RuntimeStatus surfaces RestartCount + Errors
-// to the UI and we need the same shape from the native runner.
+// profileWorker tracks a single rendition's runtime state. RuntimeStatus
+// surfaces RestartCount + Errors per rendition to the UI; index 0 carries
+// the live subprocess state, the rest are bookkeeping shells.
 type profileWorker struct {
 	cancel       context.CancelFunc
 	done         chan struct{}
@@ -109,12 +105,10 @@ type RuntimeStatus struct {
 	Profiles []ProfileSnapshot `json:"profiles"`
 }
 
-// streamWorker holds the per-stream pipeline handle. Today it's just a
-// bookkeeping shell because Start returns ErrNotImplemented before any
-// pipeline is spawned; once the native runner lands it will hold the
-// supervisor goroutine + the channels to talk to the open-streamer-
-// transcoder subprocess. baseCtx / rawIngest / tc are populated by the
-// future Start path; lint-suppressed until P1 wires them.
+// streamWorker holds one stream's transcoder handle: the supervisor that
+// owns the open-streamer-transcoder subprocess + gRPC connection, plus a
+// profileWorker per rendition for RuntimeStatus. baseCtx / baseCancel
+// scope the subprocess lifetime; rawIngest / tc capture what it transcodes.
 type streamWorker struct {
 	baseCtx    context.Context //nolint:containedctx // pipelinex spawn pattern; cancel exposed via baseCancel
 	baseCancel context.CancelFunc
@@ -125,9 +119,9 @@ type streamWorker struct {
 	profiles   map[int]*profileWorker
 }
 
-// Service is the public transcoder entry point. Public API is preserved
-// across the FFmpeg → native migration; internals are being rewritten in
-// the `native` subpackage.
+// Service is the public transcoder entry point: it starts / stops /
+// restarts per-stream transcoder subprocesses and reports their runtime
+// status to the coordinator and API handlers.
 type Service struct {
 	cfg     config.TranscoderConfig
 	buf     *buffer.Service
@@ -345,8 +339,8 @@ func (s *Service) Config() config.TranscoderConfig {
 // Unix-domain socket, opens the gRPC stream, forwards Configure +
 // raw-ingest bytes, and pipes encoded output back into the rendition
 // buffers. The supervisor goroutine survives subprocess crashes by
-// respawning with exponential backoff — same contract as the legacy
-// FFmpeg restart loop.
+// respawning with exponential backoff, so a subprocess crash never tears
+// down the stream.
 //
 // Returns an error when the subprocess binary isn't reachable so the
 // coordinator unwinds buffers / publisher / manager entries cleanly
@@ -526,10 +520,12 @@ func (s *Service) StopProfile(streamID domain.StreamCode, profileIndex int) {
 
 // StartProfile starts a single encoder for one profile index.
 //
-// MIGRATION STUB: returns ErrNotImplemented; coordinator surfaces error.
+// StartProfile is unsupported: the subprocess produces every rendition, so a
+// single rung can't be started on its own. Returns ErrNotImplemented; the
+// coordinator surfaces it and restarts the whole subprocess instead.
 func (s *Service) StartProfile(streamID domain.StreamCode, profileIndex int, target RenditionTarget) error {
 	_ = target
-	slog.Warn("transcoder: StartProfile refused — native pipeline not yet wired",
+	slog.Warn("transcoder: StartProfile refused — the subprocess owns all renditions",
 		"stream_code", streamID,
 		"profile_index", profileIndex,
 	)

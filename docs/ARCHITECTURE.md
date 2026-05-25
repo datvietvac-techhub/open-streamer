@@ -17,14 +17,17 @@ Five non-negotiable rules drive every component:
 
 2. **Failover is a Go-level operation.** The Stream Manager swaps the
    active input by stopping the old ingestor goroutine and starting a
-   new one — **FFmpeg is never restarted for failover**. Buffer continuity
+   new one — **the transcoder is never restarted for failover** (it swaps
+   its decoder in-process, keeping the encoders alive). Buffer continuity
    means downstream HLS playlists just emit a `#EXT-X-DISCONTINUITY`
    marker; players resume immediately.
 
 3. **One goroutine per ingest stream, not one process.** Pull workers
    live in the same address space, share connections to the storage
-   layer, and tear down with `context.Cancel`. No process supervision.
-   The single FFmpeg subprocess we spawn is for transcoding only.
+   layer, and tear down with `context.Cancel`. No process supervision on
+   the ingest path. The lone subprocess we spawn per *transcoded* stream
+   (`open-streamer-transcoder`, in-process libavcodec, supervised over
+   gRPC) is the only exception.
 
 4. **Write never blocks.** The Buffer Hub's fan-out uses non-blocking
    sends (`select { case ch <- pkt: default: }`). Slow consumers
@@ -37,8 +40,8 @@ Five non-negotiable rules drive every component:
    computes a structured diff of the persisted record and routes each
    change to the minimal set of service calls. Adding a push
    destination doesn't disturb HLS viewers; toggling DASH doesn't drop
-   RTMP push sessions; changing one ABR rung restarts only that
-   FFmpeg.
+   RTMP push sessions; changing the transcode ladder restarts the
+   stream's transcoder subprocess.
 
 Two derived rules:
 
@@ -64,7 +67,7 @@ flowchart TB
 
     Hub(("Buffer Hub<br/>ring buffer / stream<br/>write never blocks")):::data
 
-    Tx["Transcoder<br/>(FFmpeg pool<br/>+ watermark filter)"]:::svc
+    Tx["Transcoder<br/>(open-streamer-transcoder<br/>libavcodec subprocess)"]:::svc
     DVR["DVR<br/>(TS segmenter + retention)"]:::svc
     Pub["Publisher<br/>(HLS · DASH · RTSP<br/>RTMP · SRT · Push)"]:::svc
     WM["Watermarks<br/>(asset library)"]:::svc
@@ -124,20 +127,19 @@ data path — pure orchestration.
 2. Create raw + rendition buffers as needed
 3. Register stream with Manager (which spawns ingest worker)
 4. Start Publisher goroutines for enabled protocols + push destinations
-5. Optionally start Transcoder workers (one per profile, OR one
-   multi-output for the whole stream)
+5. Optionally start the Transcoder (one `open-streamer-transcoder`
+   subprocess for the whole stream — all renditions from one decode)
 6. Optionally start DVR
 
 **`Update(old, new)`** runs the **diff engine** — 5 independent change
 categories:
 - **inputs** — Manager.UpdateInputs (add/remove/update without stopping
   the active worker)
-- **transcoder topology** — nil↔non-nil or mode change → full pipeline
-  rebuild (`reloadTranscoderFull`)
-- **profiles** — Add/remove individual rungs:
-  - changed: `StopProfile + StartProfile`
-  - added: `buf.Create + StartProfile`
-  - removed: `StopProfile + buf.Delete`
+- **transcoder topology** — nil↔non-nil → full pipeline rebuild
+  (`reloadTranscoderFull`)
+- **profiles** — a ladder add/remove/change rebuilds the stream's
+  transcoder subprocess: every rendition is produced inside it from one
+  decode, so the rungs cycle together rather than one at a time
 - **protocols / push** — Publisher.UpdateProtocols (only changed
   protocols cycle; live RTSP viewers preserved)
 - **DVR** — toggle on/off; restart with new mediaBuf if best rendition
@@ -389,51 +391,46 @@ switch so coordinator status flips back to Active.
 
 ### Transcoder (`internal/transcoder`)
 
-Each ABR rung is one FFmpeg subprocess (legacy mode) OR all rungs share
-one FFmpeg with N output pipes (multi-output mode).
+One `open-streamer-transcoder` subprocess per transcoded stream
+(`cmd/open-streamer-transcoder`) runs the whole pipeline in-process via
+libavcodec (cgo / go-astiav). The `transcoder.Service` supervisor streams
+raw packets to it and reads encoded packets back over a single
+bidirectional gRPC `Run` stream on a Unix-domain socket
+(`internal/transcoder/native/proto/transcoder.proto`). The subprocess
+decodes the source ONCE and fans the decoded frames out to every rendition
+(scaler + encoder), so an N-rung ABR ladder costs 1×decode +
+N×(scale+encode).
 
 ```mermaid
 flowchart LR
-    subgraph Legacy["Legacy mode — N processes"]
-        Raw1[("raw ingest<br/>buffer")] --> F1["FFmpeg 1<br/>1080p"]
-        Raw1 --> F2["FFmpeg 2<br/>720p"]
-        Raw1 --> F3["FFmpeg 3<br/>480p"]
-        F1 --> R1a[("rendition<br/>track 1")]
-        F2 --> R2a[("rendition<br/>track 2")]
-        F3 --> R3a[("rendition<br/>track 3")]
+    Raw[("raw ingest<br/>$raw$ {code}")] -->|"gRPC InputPacket"| Sub
+    subgraph Sub["open-streamer-transcoder subprocess (libavcodec)"]
+        Dec["decode once<br/>(cuvid / CPU)"] --> E1["scale → encode<br/>track 1"]
+        Dec --> E2["scale → encode<br/>track 2"]
+        Dec --> E3["scale → encode<br/>track 3"]
     end
-
-    subgraph Multi["Multi-output mode — 1 process / N pipes"]
-        Raw2[("raw ingest<br/>buffer")] --> FM["FFmpeg<br/>1 decode + N encode"]
-        FM -->|"pipe 3"| R1b[("rendition<br/>track 1")]
-        FM -->|"pipe 4"| R2b[("rendition<br/>track 2")]
-        FM -->|"pipe 5"| R3b[("rendition<br/>track 3")]
-    end
+    E1 -->|"gRPC OutputPacket"| R1[("$r$ track_1")]
+    E2 -->|"gRPC OutputPacket"| R2[("$r$ track_2")]
+    E3 -->|"gRPC OutputPacket"| R3[("$r$ track_3")]
 ```
 
-**Legacy mode** (default):
+**Process isolation**: a decoder/encoder fault in libavcodec is a C-level
+SIGSEGV. Running the pipeline in a child process contains it — the
+supervisor's watchdog sees the exit and respawns (exponential backoff)
+while ingest, publishers, and every other stream keep running. Because the
+subprocess produces every rendition, there is no per-rung start/stop; a
+ladder change restarts the whole subprocess.
 
-- N FFmpeg processes per stream (1 per profile)
-- Each subscribes to `$raw$<code>` independently
-- Each writes to its own `$r$<code>$track_N` rendition buffer
-- One profile crash → just that rung restarts
+**Seamless input switch**: on failover the subprocess swaps only its
+decoder for the new source — the encoders stay alive (same SPS/PPS,
+continuous rebased PTS), so players don't re-initialise their decoder
+(`internal/transcoder/native/stream_pipeline.go`, `SwitchInput`).
 
-**Multi-output mode** (`transcoder.multi_output=true`):
-
-- 1 FFmpeg process per stream
-- Single decode → N video filter chains → N encoders → N output pipes
-  (`pipe:3`, `pipe:4`, ... via `cmd.ExtraFiles`)
-- Parent reads each pipe in its own goroutine → fans out to rendition
-  buffer
-- Saves ~50% NVDEC sessions + ~40% RAM per ABR stream
-- Trade-off: one input glitch interrupts all profiles together
-  (~2-3s) instead of just one rendition
-
-The `streamWorker` map tracks profile workers under per-(stream,
-profile-index) keys. Multi-output uses **shadow `profileWorker`
-entries** for indices ≥ 1 — same shape so the existing
-`recordProfileError` / `RuntimeStatus` paths see N rungs uniformly,
-even though only index 0 owns the real goroutine.
+`RuntimeStatus` exposes a per-rendition `restart_count` + last-5-errors
+shape via `runtime.transcoder.profiles[]`. The `streamWorker` keeps one
+`profileWorker` per rendition for that shape — index 0 owns the real
+supervisor handle, the rest are bookkeeping shells so the UI sees N rungs
+uniformly.
 
 **Encoder routing** (`domain.ResolveVideoEncoder`):
 - `codec=""` + `hw=nvenc` → `h264_nvenc`
@@ -441,30 +438,30 @@ even though only index 0 owns the real goroutine.
 - `codec="h265"` + `hw=nvenc` → `hevc_nvenc`
 - explicit names (`h264_nvenc`, `h264_qsv`) preserved verbatim
 
-**Preset normalization** (`normalizePreset`):
-- `veryfast` + NVENC → `p2` (translate)
-- `medium` + libx264 → `medium` (passthrough)
-- `p4` + libx264 → `medium` (translate)
-- garbage value → `""` (drop, encoder uses default — never crash on
-  invalid syntax)
+**Crash auto-restart**: the supervisor respawns the subprocess with
+exponential backoff (2s → 30s cap) and never tears the pipeline down on a
+crash. Spam suppression: after 3 consecutive identical errors, warn drops
+to debug; events fire only on power-of-2 attempts. `restart_count` + last 5
+errors stay visible via `runtime.transcoder.profiles[]`.
 
-**Crash auto-restart**: per-profile loop with exponential backoff (2s →
-30s cap). Retries forever — pipeline never tears down on FFmpeg
-failure. Spam suppression: after 3 consecutive identical errors, warn
-drops to debug; events fire only on power-of-2 attempts. `restart_count`
-+ last 5 errors stay visible via `runtime.transcoder.profiles[]`.
+**Health detection**: the supervisor tracks consecutive fast crashes
+(under 30s). Crossing 3 fires `onUnhealthy` to the coordinator → status
+Degraded; a sustained run (≥30s) fires `onHealthy` → back to Active. Stop /
+hot-restart paths also fire `onHealthy` so a freshly-started transcoder
+begins from a healthy baseline.
 
-**Health detection**: each profile loop tracks consecutive fast
-crashes (under 30s). Crossing 3 fires `onUnhealthy` to coordinator →
-status Degraded. A sustained run (≥30s) fires `onHealthy` → status
-back to Active. Stop / hot-restart paths also fire `onHealthy` so a
-freshly-started transcoder always begins from a healthy baseline.
-
-**Pure-GPU pipeline** (NVENC): `decode → scale_cuda → encode` with no
-CPU round-trip via hwdownload. All resize modes (`pad`/`crop`/`stretch`/
-`fit`) execute on GPU; `pad`/`crop` degrade to aspect-preserving fit
-(no server-side letterbox) since the cuda filter graph has no native
-crop/pad primitives.
+**Full-GPU pipeline** (NVENC host): frames never leave VRAM — NVDEC
+(`h264_cuvid`) → `scale_cuda` → NVENC, sharing one CUDA device. The decoder
+allocates its CUDA frames pool at the source resolution (rebuilt on each
+input switch); `scale_cuda` outputs the fixed rendition dimensions; the
+encoder opens once and survives a source-resolution change (NVENC
+re-registers each CUDA frame by device pointer), so a mixed-resolution
+failover stays seamless. A watermark folds into the same graph via a
+`hwdownload → drawtext/overlay → hwupload_cuda` round-trip (those filters
+are CPU-only). CPU hosts decode (`h264`/`hevc`) → `sws` scale → encode
+(`libx264`). All resize modes (`pad`/`crop`/`stretch`/`fit`) run on the GPU;
+`pad`/`crop` degrade to aspect-preserving fit (the cuda filter graph has no
+native crop/pad primitive).
 
 ### Publisher (`internal/publisher`)
 
@@ -640,7 +637,7 @@ longer the place HTTP latency lives.
 /api/v1/hooks/{id}/test                — synthetic event delivery
 /api/v1/config                         — GlobalConfig get/post
 /api/v1/config/defaults                — implicit values for UI
-/api/v1/config/transcoder/probe        — FFmpeg capability check
+/api/v1/config/transcoder/probe        — transcoder capability check
 /api/v1/config/yaml                    — full system state YAML editor
 /api/v1/vod                            — on-disk VOD browse
 /api/v1/watermarks                     — watermark asset library (upload / list / get / raw / delete)
@@ -722,8 +719,8 @@ flowchart LR
     Stream["Stream.Watermark.AssetID"] --> Resolve["coordinator.transcoderConfigWithWatermark"]
     Cache --> Resolve
     Resolve -->|"clones tc, sets ImagePath"| TC["transcoder.Service.Start"]
-    TC --> Filter["buildVideoFilter<br/>+ applyWatermark"]
-    Filter --> FFmpeg["ffmpeg -vf"]
+    TC --> Filter["watermark.go<br/>BuildWatermarkFilter"]
+    Filter --> Graph["libavfilter graph<br/>(in subprocess)"]
 
     classDef data fill:#5a3a1f,stroke:#e0a060,color:#fff
     class Disk,Cache data
@@ -751,10 +748,11 @@ keep loading).
    asks `watermarks.Service.ResolvePath(AssetID)` for the on-disk path.
 3. Sets `clone.Watermark.ImagePath` to the resolved absolute path,
    clears `AssetID`. Transcoder layer never sees the AssetID.
-4. `buildVideoFilter` calls `applyWatermark(base, wm, onGPU)`.
+4. The subprocess folds the watermark into each rendition's libavfilter
+   graph (`internal/transcoder/watermark.go`, `BuildWatermarkFilter`).
 
-**Filter graph shapes** the transcoder emits (all single `-vf` chains
-so the multi-output args builder works without restructuring):
+**Filter graph shapes** the transcoder builds (libavfilter, in the
+subprocess):
 
 | Type | HW | Filter chain |
 |---|---|---|
@@ -763,20 +761,21 @@ so the multi-output args builder works without restructuring):
 | Image | CPU | `<base>[mid];movie=<path>,format=rgba,colorchannelmixer=aa=α[wm];[mid][wm]overlay=x=…:y=…` |
 | Image | NVENC | `<base>,hwdownload,format=nv12[mid];movie=…[wm];[mid][wm]overlay=…,hwupload_cuda` |
 
-`movie=` source filter is used instead of an extra `-i` input so the
-multi-output args builder doesn't need filter_complex restructuring.
-The GPU round-trip pays ~5% CPU per FFmpeg process at 1080p25 in
-exchange for portability — `overlay_cuda` requires
-`--enable-cuda-nvcc` which Ubuntu apt builds skip.
+`movie=` source filter is used instead of a second input so image and
+text watermarks share one uniform graph shape. The GPU round-trip pays
+~5% CPU per rendition at 1080p25 in exchange for portability —
+`overlay_cuda` requires `--enable-cuda-nvcc` (as does `scale_cuda`), which
+stock distro builds skip; our builder image (`Dockerfile.builder`) enables
+it.
 
 **Position model**:
 
 - 5 named anchors (`top_left` / `top_right` / `bottom_left` /
   `bottom_right` / `center`) — `offset_x` / `offset_y` are inward edge
   padding (Center ignores them).
-- `position=custom` — `x` / `y` are raw FFmpeg expressions: pixel ints
+- `position=custom` — `x` / `y` are raw libavfilter expressions: pixel ints
   ("100"), expressions ("main_w-overlay_w-50"), or time-aware fades
-  ("if(gt(t,5),10,-100)"). All FFmpeg overlay/drawtext variables are
+  ("if(gt(t,5),10,-100)"). All libavfilter overlay/drawtext variables are
   available.
 
 Validation at the API boundary rejects mutually-exclusive `image_path`
@@ -956,9 +955,10 @@ GlobalConfig from the store and calls `applyAll(cfg)` — starting each
 configured service. On `POST /config` it diffs old vs new and
 hot-starts/stops services to match.
 
-Probes FFmpeg at boot via `transcoder.Probe` — fail-fast on missing
-required encoders. Hot-swaps `transcoder.multi_output` toggle by
-calling `Transcoder.SetConfig` + restarting running streams.
+Probes the transcoder at boot — fail-fast if the
+`open-streamer-transcoder` binary or a required encoder is unavailable. A
+transcoder config change (`Transcoder.SetConfig`) restarts running
+streams' subprocesses.
 
 ---
 
@@ -1013,10 +1013,11 @@ Circular deps are broken via post-construction setters
 ### Testing
 
 - Narrow service interfaces (`coordinator/deps.go`) enable spy-based
-  testing without spinning up real ingestors / FFmpeg / RTSP servers
-- Build-tagged integration tests (`make test-integration`) spawn real
-  ffmpeg with the generated `-vf` chain to catch version-specific
-  syntax bugs that pass Go-level checks
+  testing without spinning up real ingestors / transcoder subprocesses /
+  RTSP servers
+- The native transcoder's libavcodec stages (decoder / encoder / scaler /
+  pipeline) have table tests that link against libav; the cgo path is
+  exercised in the builder image (`Dockerfile.builder`)
 - Per-package fixtures avoid cross-package coupling
 - Race detector + shuffled order in CI: `-race -shuffle=on -count=1`
 
@@ -1026,9 +1027,8 @@ Circular deps are broken via post-construction setters
   minimal restart
 - Adding a push destination: 0 viewer impact
 - Toggling DASH: HLS viewers unaffected
-- Changing one ABR profile: only that FFmpeg restarts (legacy mode)
-- Multi-output toggle: restarts every running stream's transcoder
-  (~2-3s downtime per stream)
+- Changing the transcode ladder: restarts the stream's transcoder
+  subprocess (~1-3s; renditions share one decode)
 - Server config change: runtime manager diffs services, only changed
   ones cycle (no app restart)
 
@@ -1039,13 +1039,13 @@ Circular deps are broken via post-construction setters
 | Invariant | Where enforced | Why |
 |---|---|---|
 | Write never blocks | Buffer Hub fan-out | Slow consumer must never freeze ingest |
-| Failover doesn't restart FFmpeg | Manager + Coordinator | Transcoder warm-up is expensive (~1-3s) |
+| Failover swaps the decoder, not the transcoder process | Manager + Coordinator + native `SwitchInput` | Restarting the encoder drops the player's decode context; keeping it alive makes the switch seamless |
 | One goroutine per stream | Ingestor | OS process limit + IPC overhead |
 | Buffer Hub is sole data source | All consumers | Decouples ingest topology from output |
 | `internal/store/` is the only DB-importing package | Module boundary | Pluggable storage, testable services |
 | Modules talk via interfaces | `coordinator/deps.go` | No sibling-module direct imports |
 | All state changes emit events | Coordinator + Manager + Transcoder + Publisher | Hooks must see consistent timeline |
-| Pipeline never tears down on crash | Transcoder retry-forever loop | Streams self-heal — no manual ops needed |
+| Pipeline never tears down on crash | Supervisor respawn loop (subprocess) | Streams self-heal — no manual ops needed |
 | Stream status reflects all degradation sources | `streamDegradation` reconciliation | UI green badge must mean "actually working" |
 | Sessions tracker survives config edits | `atomic.Pointer[runtimeConfig]` + `UpdateConfig` | Toggling `enabled` / `idle_timeout` must not lose in-flight session state |
 | Watermark assets are coordinator-resolved | `transcoderConfigWithWatermark` clones tc | Persisted Stream.Watermark stays untouched; transcoder never sees AssetID |

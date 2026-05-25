@@ -1,14 +1,14 @@
 # Open Streamer
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/ntt0601zcoder/open-streamer.svg)](https://pkg.go.dev/github.com/ntt0601zcoder/open-streamer)
-[![CI](https://github.com/ntt0601zcoder/open-streamer/actions/workflows/ci.yml/badge.svg)](https://github.com/ntt0601zcoder/open-streamer/actions/workflows/ci.yml)
+[![CI](https://github.com/datvietvac-techhub/open-streamer/actions/workflows/ci.yml/badge.svg)](https://github.com/datvietvac-techhub/open-streamer/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ntt0601zcoder/open-streamer)](https://goreportcard.com/report/github.com/ntt0601zcoder/open-streamer)
 [![Coverage](https://codecov.io/gh/ntt0601zcoder/open-streamer/branch/main/graph/badge.svg)](https://codecov.io/gh/ntt0601zcoder/open-streamer)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A high-availability live media server in Go. Ingests from any
 common protocol, normalises through an internal MPEG-TS pipeline,
-optionally transcodes with FFmpeg, and publishes over HLS, DASH, RTMP,
+optionally transcodes in-process via libavcodec, and publishes over HLS, DASH, RTMP,
 RTSP, and SRT — all from one binary, one process per host.
 
 ```mermaid
@@ -22,7 +22,7 @@ flowchart LR
 
     subgraph Pipeline
         Hub(("Buffer Hub")):::data
-        Tx["Transcoder<br/>FFmpeg pool"]
+        Tx["Transcoder<br/>libavcodec subprocess"]
         DVR["DVR + events"]
         Hub --> Tx
         Tx --> Hub
@@ -46,7 +46,7 @@ flowchart LR
     Hub --> D3
     DVR -.->|"events"| D4
 
-    Mgr["Stream Manager<br/>failover — no FFmpeg restart"]
+    Mgr["Stream Manager<br/>failover — no transcoder restart"]
     Mgr -.->|"health"| Ingest
 
     classDef data fill:#5a3a1f,stroke:#e0a060,color:#fff
@@ -57,10 +57,11 @@ flowchart LR
 ## Why Open Streamer
 
 - **No process-per-stream.** One Go process handles N streams across N
-  goroutines. FFmpeg is only spawned for transcoding — never for ingest.
+  goroutines. Transcoding runs in-process (libavcodec) in a per-stream
+  subprocess; ingest is pure Go.
 - **Failover at the Go level.** When an input degrades, the Stream
   Manager swaps to the next-priority source in ~150ms without
-  restarting FFmpeg. Buffer continuity → players see one
+  restarting the transcoder. Buffer continuity → players see one
   `#EXT-X-DISCONTINUITY` and resume.
 - **Hot-reload by diff.** `PUT /streams/{code}` restarts only what
   changed — adding a push destination doesn't disturb HLS viewers,
@@ -68,8 +69,8 @@ flowchart LR
 - **Write never blocks.** The Buffer Hub fan-out is non-blocking —
   slow consumers drop packets, the writer is shielded. One stuck DVR
   cannot freeze every viewer.
-- **Self-healing.** FFmpeg crashes restart with exponential backoff
-  forever; the pipeline never tears down. Health detection flips
+- **Self-healing.** Transcoder-subprocess crashes restart with exponential
+  backoff forever; the pipeline never tears down. Health detection flips
   status to `degraded` after sustained failure so ops sees it.
 
 ---
@@ -130,15 +131,15 @@ regenerate from annotations).
   monitors health, switches transparently. Last 20 switches recorded
   with reason (`error` / `timeout` / `manual` / `failback` / `recovery`
   / `input_added` / `input_removed`).
-- **ABR transcoding** — bounded FFmpeg pool with NVENC / VAAPI / QSV /
+- **ABR transcoding** — in-process libavcodec with NVENC / VAAPI / QSV /
   VideoToolbox. Per-rung profiles (resolution, bitrate, codec, preset,
-  GOP, B-frames, refs, SAR, resize mode). Pure-GPU pipeline (no
-  hwdownload round-trip) for NVENC.
-- **Multi-output mode** — single FFmpeg per stream emits N rendition
-  pipes; ~50% NVDEC + ~40% RAM saved per ABR stream.
-- **Cross-encoder preset translation** — `veryfast` (libx264) auto-maps
-  to `p2` (NVENC) etc. so codec/preset family mismatches never crash
-  encoders.
+  GOP, B-frames, refs, SAR, resize mode). Full-GPU pipeline
+  (NVDEC → scale_cuda → NVENC, no hwdownload round-trip) on NVENC hosts.
+- **Single decode, N renditions** — one `open-streamer-transcoder`
+  subprocess per stream decodes once and fans out to every rung, so an
+  N-rung ladder costs 1×decode + N×encode.
+- **Seamless input switch** — on failover the subprocess swaps only its
+  decoder; the encoders stay alive, so players don't re-initialise.
 - **HLS + DASH ABR** — master playlist + per-track variants;
   `#EXT-X-DISCONTINUITY` per failover.
 - **RTSP / RTMP / SRT play** — shared listeners (one port per
@@ -166,7 +167,7 @@ regenerate from annotations).
   restarts; absolute / relative timeshift VOD endpoints; size + time
   retention.
 - **Watermarks** — text (drawtext + strftime) or image (overlay) per
-  stream. Position presets + raw FFmpeg expressions for full
+  stream. Position presets + raw libavfilter expressions for full
   flexibility (animated, time-aware). Image asset library with REST
   upload (`POST /watermarks`). Pure-GPU pipeline auto-bridges via
   hwdownload/hwupload_cuda for portability.

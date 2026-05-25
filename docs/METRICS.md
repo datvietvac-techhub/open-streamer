@@ -149,8 +149,8 @@ as the early-warning rule) see [ARCHITECTURE.md § Buffer Hub](./ARCHITECTURE.md
 
 - **Type**: gauge
 - **Labels**: `stream_code`
-- **Updated by**: transcoder on FFmpeg subprocess spawn / exit
-- **Use**: dashboard "FFmpeg processes per stream" tile
+- **Updated by**: transcoder on subprocess spawn / exit
+- **Use**: dashboard "transcoder subprocesses per stream" tile
 
 ### `open_streamer_transcoder_qualities_active`
 
@@ -163,7 +163,7 @@ as the early-warning rule) see [ARCHITECTURE.md § Buffer Hub](./ARCHITECTURE.md
 
 - **Type**: counter
 - **Labels**: `stream_code`
-- **Updated by**: transcoder per-profile restart loop on every retry
+- **Updated by**: the supervisor's subprocess respawn loop on every retry
 - **Alert**: `rate(open_streamer_transcoder_restarts_total[10m]) > 0.1` → profile crashing repeatedly
 
 ---
