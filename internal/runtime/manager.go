@@ -331,11 +331,10 @@ func (m *Manager) diff(old, new *domain.GlobalConfig) {
 		}
 	}
 
-	// Transcoder — not a service of its own, but the cached cfg field on
-	// transcoder.Service decides FFmpeg dispatch shape (per-profile vs
-	// multi-output). Hot-swap the cache so future Start() calls use the
-	// new value, then bounce every running stream pipeline so the change
-	// takes effect immediately on already-encoding streams.
+	// Transcoder — not a service of its own, but the cached cfg on
+	// transcoder.Service feeds future Start() calls. Hot-swap the cache so
+	// future starts use the new value, then bounce every running stream
+	// pipeline so the change takes effect on already-encoding streams.
 	if configChanged(old.Transcoder, new.Transcoder) && m.deps.Transcoder != nil {
 		m.applyTranscoderChange(old.Transcoder, new.Transcoder)
 	}
@@ -391,15 +390,12 @@ func (m *Manager) applyTranscoderChange(oldCfg, newCfg *config.TranscoderConfig)
 }
 
 // transcoderRequiresRestart reports whether the change in transcoder config
-// affects already-running FFmpeg processes. Fields that only feed the next
-// Start() (and have no in-flight effect) can be hot-swapped without bouncing
-// streams.
+// affects already-running transcoder subprocesses. Fields that only feed the
+// next Start() (and have no in-flight effect) can be hot-swapped without
+// bouncing streams.
 //
-// The only behaviour-affecting field left at the global level is FFmpegPath
-// (an in-flight ffmpeg subprocess can't pivot to a different binary). The
-// per-stream `transcoder.mode` is part of Stream config — the stream
-// handler stops/starts when it changes, so this function doesn't need to
-// observe it.
+// The only behaviour-affecting field at the global level is FFmpegPath (an
+// in-flight subprocess can't pivot to a different binary).
 func transcoderRequiresRestart(oldCfg, newCfg *config.TranscoderConfig) bool {
 	oldFP, newFP := "", ""
 	if oldCfg != nil {

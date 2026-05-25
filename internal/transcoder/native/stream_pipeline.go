@@ -80,8 +80,8 @@ type OutputFrame struct {
 // into the single data-flow the StreamRunner subprocess will execute
 // per stream. Its central design invariant is: SwitchInput tears down
 // and recreates the Decoder while every Scaler + Encoder stays alive.
-// That is the property the FFmpeg subprocess implementation could not
-// provide and is the whole reason for the migration.
+// Keeping the encoder alive across the switch is what makes the output
+// seamless: stable SPS/PPS and a continuous rebased PTS.
 //
 // N renditions sharing one decoder is the multi-rendition design
 // choice: decoding once and fanning out to N scaler/encoder pairs

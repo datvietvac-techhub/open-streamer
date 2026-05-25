@@ -6,15 +6,11 @@ import (
 	"net/http"
 )
 
-// MIGRATION P0 STUB — FFmpeg capability probe deleted alongside the
-// FFmpeg subprocess transcoder implementation. The native pipeline (see
-// internal/transcoder/native) will replace this with an in-process libav
-// capability inventory once it lands.
-//
-// Until then the endpoint stays mounted (UI keeps its "Test" button
-// wired) but always reports "ok" with an empty backend set. Save-time
-// validation also no-ops so operators are not blocked from editing
-// config that touches transcoder fields.
+// The transcoder capability probe is a no-op: the endpoint stays mounted
+// (the UI keeps its "Test" button wired) but always reports "ok" with an
+// empty backend set, and save-time validation does not block edits to
+// transcoder fields. The native pipeline links libavcodec directly; a
+// future in-process libav capability inventory could populate this.
 
 // probeRequest is the body shape for POST /config/transcoder/probe.
 // Path field kept for forward-compat with the UI; ignored server-side.
@@ -22,8 +18,7 @@ type probeRequest struct {
 	FFmpegPath string `json:"ffmpeg_path"`
 }
 
-// probeStubResponse is the placeholder body returned until the native
-// capability probe is wired through.
+// probeStubResponse is the body returned by the no-op capability probe.
 type probeStubResponse struct {
 	OK     bool   `json:"ok"`
 	Notice string `json:"notice"`

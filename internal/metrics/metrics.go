@@ -25,9 +25,9 @@ type Metrics struct {
 	ManagerInputHealth *prometheus.GaugeVec
 
 	// ── Transcoder ────────────────────────────────────────────────────────────
-	// TranscoderWorkersActive is the number of active FFmpeg processes per stream.
+	// TranscoderWorkersActive is the number of active transcoder subprocesses per stream.
 	TranscoderWorkersActive *prometheus.GaugeVec
-	// TranscoderRestartsTotal counts FFmpeg crash-restarts per stream.
+	// TranscoderRestartsTotal counts transcoder subprocess crash-restarts per stream.
 	TranscoderRestartsTotal *prometheus.CounterVec
 	// TranscoderQualitiesActive is the number of active ABR renditions per stream.
 	TranscoderQualitiesActive *prometheus.GaugeVec

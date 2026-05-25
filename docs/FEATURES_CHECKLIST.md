@@ -26,7 +26,7 @@ Legend:
 | Graceful shutdown | Complete | SIGINT/SIGTERM with 10s timeout; reverse-order teardown |
 | Prometheus metrics | Complete | Per-stream uptime, bytes/packets, failovers, restarts, active workers, buffer depth |
 | Hardware detection | Complete | `internal/hwdetect` probes /dev for NVIDIA / DRI / Intel — listed in `/config.hw_accels` |
-| FFmpeg compatibility probe | Complete | `internal/transcoder.Probe` runs at boot (fail-fast on missing required encoders) + `POST /config/transcoder/probe` for UI test + save-time validation |
+| Transcoder capability probe | Stub | `POST /config/transcoder/probe` is a no-op (always reports ok); encoder availability is fixed when the `open-streamer-transcoder` binary is built |
 | Build version stamping | Complete | `pkg/version` injected at compile via Makefile ldflags / Release workflow |
 
 ---
@@ -178,7 +178,7 @@ Single unification of the three legacy PTS rebasers (`ingestor/ptsrebaser`, `ing
 
 | Feature | Status | Notes |
 |---|---|---|
-| Multi-input failover (Go-level, no FFmpeg restart) | Complete | Old ingestor stops, new one starts; buffer continuity preserved |
+| Multi-input failover (Go-level, no transcoder restart) | Complete | Old ingestor stops, new one starts; buffer continuity preserved |
 | Packet timeout detection | Complete | `manager.input_packet_timeout_sec` (default 30); hot-reload via `SetConfig` (atomic.Int64) — change applies on next health-check tick without pipeline restart |
 | Background failback probe | Complete | Cooldown 8s probe / 12s switch |
 | Bypass-probe recovery | Complete | When ingestor reader auto-reconnects faster than probe cycle, `RecordPacket` clears exhausted state + records recovery switch |
@@ -195,30 +195,29 @@ Single unification of the three legacy PTS rebasers (`ingestor/ptsrebaser`, `ing
 
 | Feature | Status | Notes |
 |---|---|---|
-| FFmpeg subprocess (stdin TS → stdout TS) | Complete | `exec.CommandContext`; killed via context cancel |
-| Per-profile encoder pool | Complete | Each `track_N` is independent `profileWorker`; hot start/stop one without affecting others |
-| Transcoder mode (per-stream) | Complete | `Stream.TranscoderMode`: `multi_output` (default) runs ONE FFmpeg per stream emitting N rendition pipes — single decode + multi encode → ~50% NVDEC + ~40% RAM saved per ABR stream. `per_profile` runs one FFmpeg per ladder rung. Hot-switch restarts the affected stream only |
-| Shadow profile workers (multi-output) | Complete | All N ladder rungs appear in `RuntimeStatus.Profiles[]` even though one process drives them — error history accurate per rung |
+| Transcoder subprocess | Complete | `open-streamer-transcoder` per stream; in-process libavcodec, gRPC over a Unix socket; killed via context cancel |
+| Single decode → N renditions | Complete | One subprocess decodes once and fans out to every rendition (scaler + encoder); an N-rung ladder costs 1×decode + N×encode |
+| Seamless input switch | Complete | On failover the subprocess swaps only its decoder; encoders stay alive (stable SPS/PPS, continuous rebased PTS) so players don't re-initialise |
+| Per-rendition runtime status | Complete | All N rungs appear in `RuntimeStatus.Profiles[]`; restart_count + last-5 errors per rung (index 0 carries live subprocess state) |
 | ABR profile config | Complete | Resolution, bitrate, codec, preset, profile, level, framerate, GOP, B-frames, refs, SAR, resize_mode |
 | Encoder codec routing | Complete | `domain.ResolveVideoEncoder` maps user alias (`""`/`h264`/`h265`/`vp9`/`av1`) + HW backend → FFmpeg encoder name; explicit names (`h264_nvenc`, `h264_qsv`) preserved |
 | Preset normalization | Complete | Translates between encoder families (`veryfast` ↔ `p2`, `medium` ↔ `p4`); drops invalid values for backends without `-preset` (VAAPI, VideoToolbox) so cross-family preset choices remain valid |
 | Audio encoding | Complete | AAC / MP3 / Opus / AC3 / copy |
-| Copy video / copy audio modes | Complete | `video.copy=true` + `audio.copy=true` skips FFmpeg entirely (passthrough) |
+| Copy video / copy audio modes | Complete | `video.copy=true` + `audio.copy=true` skips the transcoder entirely (passthrough) |
 | Hardware acceleration | Complete | NVENC, VAAPI, VideoToolbox, QSV; full-GPU pipeline (decode→scale_cuda→encode) when HW matches encoder family |
 | Resize modes (pure GPU) | Complete | `pad`, `crop`, `stretch`, `fit` — all stay on GPU (no CPU round-trip via hwdownload) for NVENC; `pad`/`crop` degrade to aspect-preserving fit on GPU |
 | Deinterlace | Complete | yadif (CPU) / yadif_cuda (GPU); auto-detect parity or operator-specified tff/bff |
-| Watermark — text overlay | Complete | drawtext-based; per-position presets + custom (raw FFmpeg expressions for X/Y); strftime fields supported in text |
-| Watermark — image overlay | Complete | `movie=`-source overlay (no second `-i` needed → uniform with multi-output); PNG / JPG / GIF; opacity; CPU + GPU pipelines (GPU round-trip via hwdownload/hwupload_cuda) |
+| Watermark — text overlay | Complete | drawtext-based; per-position presets + custom (raw libavfilter expressions for X/Y); strftime fields supported in text |
+| Watermark — image overlay | Complete | `movie=`-source overlay (no second `-i` needed → uniform image/text graph); PNG / JPG / GIF; opacity; CPU + GPU pipelines (GPU round-trip via hwdownload/hwupload_cuda) |
 | Watermark asset library | Complete | `/watermarks` REST API + on-disk store under `watermarks.dir`; ID-keyed files + JSON sidecar; resolved by coordinator before transcoder.Start |
 | Thumbnail | Schema only | Domain fields exist; not yet generated |
-| Extra FFmpeg args passthrough | Complete | `extra_args` per stream |
-| FFmpeg crash auto-restart | Complete | Per-profile exponential backoff: 2s → 30s cap; retries forever |
+| Subprocess crash auto-restart | Complete | Supervisor respawns with exponential backoff: 2s → 30s cap; retries forever |
 | Crash log spam suppression | Complete | After 3 consecutive identical errors, warn drops to debug; events fire only on power-of-2 attempts |
-| Per-profile error history (last 5) | Complete | `runtime.transcoder.profiles[].errors[]` — stderr-tail context embedded ("No such filter X") |
-| Stderr filtering | Complete | Timestamp resync, packet-corrupt, MMCO chatter → debug; real errors → warn |
+| Per-rendition error history (last 5) | Complete | `runtime.transcoder.profiles[].errors[]` — subprocess error context embedded |
+| Subprocess log forwarding | Complete | Subprocess stdout/stderr captured into the parent's structured log |
 | Health detection → coordinator | Complete | After 3 consecutive crashes (sub-30s) fires `onUnhealthy` → status Degraded; sustained run (>30s) fires `onHealthy` → status Active. Hot-restart (Update path) clears flag via `dropHealthState` callback |
-| Hot-swap config (`SetConfig`) | Complete | runtime updates `FFmpegPath`; per-stream `TranscoderMode` swap is handled by stream-level diff (restarts only the affected stream) |
-| `StopProfile` / `StartProfile` | Complete | Granular ladder control; multi-output mode loses granularity (must full-restart) |
+| Hot-swap config (`SetConfig`) | Complete | runtime updates the cached config (e.g. `FFmpegPath`); a transcoder config change restarts running streams' subprocesses |
+| `StartProfile` / `StopProfile` | N/A | Not supported — the subprocess owns all renditions; a ladder change restarts the whole subprocess |
 
 ---
 
@@ -231,10 +230,10 @@ Single unification of the three legacy PTS rebasers (`ingestor/ptsrebaser`, `ing
 | Bootstrap persisted streams on boot | Complete | Skips disabled / zero-input streams |
 | Stream reconciler (self-healing) | Complete | Background goroutine started by `runtime.Manager`; every 10s lists persisted streams and `Start`s any non-disabled stream with at least one input that is not currently running. Handles transient bootstrap failures (HLS source down at boot, recovers later), restart errors, and the create-handler edge case where a brand-new stream was saved but never dispatched. Idempotent — `Coordinator.Start` short-circuits when already running |
 | Hot-reload (`Update`) | Complete | Diff engine: 5 categories — inputs, transcoder topology, profiles, protocols/push, DVR |
-| Per-profile granular reload | Complete | Add/remove/update one profile without touching others |
+| Ladder add/remove/update | Complete | Restarts the stream's transcoder subprocess (renditions share one decode); other streams + protocols untouched |
 | ABR ladder add/remove → `RestartHLSDASH` | Complete | Only HLS+DASH goroutines restart; RTSP/RTMP/SRT viewers preserved |
-| ABR profile metadata update | Complete | `UpdateABRMasterMeta` rewrites HLS master playlist in-place (no FFmpeg restart) |
-| Topology change → `reloadTranscoderFull` | Complete | Full pipeline rebuild when transcoder nil↔non-nil or mode changes |
+| ABR profile metadata update | Complete | `UpdateABRMasterMeta` rewrites HLS master playlist in-place (no transcoder restart) |
+| Topology change → `reloadTranscoderFull` | Complete | Full pipeline rebuild when transcoder nil↔non-nil |
 | ABR-copy pipeline (`copy://` upstream with ladder) | Complete | N tap goroutines re-publish each upstream rendition; bypasses ingest worker + transcoder; reconnects on upstream restart (relies on `buffer.Delete` channel-close signal). Note: bypassing manager means `runtime.media` is empty — see Operational Notes |
 | ABR-mixer pipeline | Complete | Mirror video ladder + audio fan-out from two upstream streams; reconnects on upstream restart; **PTS/DTS rebased per-source against shared wall-clock anchor** so video (upstream A) and audio (upstream B) collapse onto a common timeline — without this, divergent PCR bases between unrelated sources caused players to render black + silent. Note: bypassing manager means `runtime.media` is empty — see Operational Notes |
 | Stream-level health reconciliation | Complete | `streamDegradation` flags (`inputsExhausted`, `transcoderUnhealthy`) — Degraded if either set, Active when all clear |
@@ -316,7 +315,7 @@ All live state is exposed under `runtime.*` in `GET /streams/{code}` so the UI h
 | `runtime.active_input_priority` + `override_input_priority` | Complete | Manager state |
 | `runtime.inputs[]` | Complete | Per-input snapshot: status, last_packet_at, bitrate_kbps, errors[] |
 | `runtime.switches[]` | Complete | Last 20 active-input switches with reason + detail |
-| `runtime.transcoder.profiles[]` | Complete | Per-rung restart_count + errors[]; FFmpeg stderr-tail embedded |
+| `runtime.transcoder.profiles[]` | Complete | Per-rung restart_count + errors[]; subprocess error context embedded |
 | `runtime.publisher.pushes[]` | Complete | Per-destination status + attempts + errors[]; resets on Active |
 | Defensive snapshot copies | Complete | Caller-side mutation cannot leak back into service state |
 
@@ -374,9 +373,9 @@ records, viewers reconnect into fresh sessions.
 | Text overlay (drawtext) | Complete | `text` supports `%{localtime}` and friends; opacity folded into `fontcolor=…@α` |
 | Image overlay (overlay+movie) | Complete | `movie=` source filter avoids second `-i`; opacity via `colorchannelmixer=aa` |
 | GPU round-trip on NVENC | Complete | `hwdownload,format=nv12 → drawtext/overlay → hwupload_cuda`; portable across distros without `--enable-cuda-nvcc` |
-| Multi-output mode support | Complete | Same filter chain emitted on every `-vf:v:0` so each rendition draws the watermark independently |
+| Per-rendition watermark | Complete | The filter graph is built for each rendition so every variant draws the watermark independently |
 | Position presets | Complete | `top_left` / `top_right` / `bottom_left` / `bottom_right` / `center`; `offset_x` / `offset_y` act as edge padding |
-| Custom position | Complete | `position=custom` + raw FFmpeg expressions in `x` / `y` ("100", "main_w-overlay_w-50", "if(gt(t,5),10,-100)") |
+| Custom position | Complete | `position=custom` + raw libavfilter expressions in `x` / `y` ("100", "main_w-overlay_w-50", "if(gt(t,5),10,-100)") |
 | Asset library upload | Complete | `POST /watermarks` multipart; PNG / JPG / GIF sniffed via `http.DetectContentType`; cap 8 MiB image / 16 MiB request |
 | Asset library list / get / raw / delete | Complete | Mirrors VOD UX; `/raw` serves with `Cache-Control: immutable` |
 | Sidecar metadata | Complete | One `<id>.json` per asset → `os.ReadDir` rebuilds registry on restart, no DB |
@@ -417,14 +416,13 @@ Tracking what is intentionally NOT done. Each row is a deliberate scope decision
 | Unit tests — protocol detection | Complete | |
 | Unit tests — buffer ring / fan-out | Complete | |
 | Unit tests — manager state machine + bypass-recovery + switch history | Complete | |
-| Unit tests — transcoder args, encoder routing, preset normalization, multi-output args | Complete | |
+| Unit tests — encoder routing, native pipeline (decoder / encoder / scaler), audio reencode | Complete | |
 | Unit tests — transcoder health detection (3-fail edge, sustain recovery, multi-profile aggregation) | Complete | |
 | Unit tests — coordinator diff engine + degradation reconciliation | Complete | |
 | Unit tests — publisher HLS/DASH segmenters, push state | Complete | |
 | Unit tests — DVR playlist parsing, gap recording | Complete | |
 | Unit tests — error history rings (manager / transcoder / push) | Complete | |
 | Unit tests — runtime status snapshots (defensive copy, sort order) | Complete | |
-| Unit tests — FFmpeg probe (parsers, integration on PATH, missing binary, non-FFmpeg) | Complete | |
 | Unit tests — config defaults endpoint (shape, codec routing table, determinism) | Complete | |
 | Unit tests — sessions tracker (HTTP + conn paths, idle reaper, kick, filter, hot-reload) | Complete | |
 | Unit tests — sessions HTTP middleware (proto detection, byte counting, error path) | Complete | |
@@ -433,7 +431,7 @@ Tracking what is intentionally NOT done. Each row is a deliberate scope decision
 | Unit tests — watermark domain validation (mutual-exclusion, asset-id charset, opacity range, custom requires X/Y) | Complete | |
 | Unit tests — watermarks asset service (save/list/get/delete, content-type sniff, rebuild from disk) | Complete | |
 | Integration tests — coordinator.Update routing | Complete | 14 cases, spy implementations of all service interfaces |
-| Integration tests — ffmpeg filter chain | Complete | Build-tagged; spawns real ffmpeg with generated `-vf` |
+| Tests — native libavcodec pipeline | Complete | Decoder / encoder / scaler / pipeline table tests link against libav; run in the builder image |
 | CI (GitHub Actions) | Complete | `mod-tidy`, `test` (matrix Go 1.25.9 + stable), `lint` (allow-fail), `govulncheck` |
 | Pre-commit hook (auto-regen swagger) | Complete | `make hooks-install` symlinks `scripts/git-hooks/pre-commit` |
 | golangci-lint | Complete | 0 issues |
@@ -442,7 +440,7 @@ Tracking what is intentionally NOT done. Each row is a deliberate scope decision
 ### Benchmarking (`bench/`)
 
 Operator-facing capacity tooling — runs sweeps across passthrough,
-ABR, multi-output, libx264 and HLS+DASH multi-protocol phases. See
+ABR (NVENC / libx264) and HLS+DASH multi-protocol phases. See
 [`bench/README.md`](../bench/README.md) for the full sweep plan.
 
 | Tool | Purpose |
@@ -458,13 +456,12 @@ ABR, multi-output, libx264 and HLS+DASH multi-protocol phases. See
 
 ## Operational Notes
 
-- **FFmpeg required for transcoding.** Boot probes `transcoder.ffmpeg_path` (or `$PATH`) — REQUIRED encoders missing → server exits non-zero with a clear error. Optional encoders missing → boot warns but continues.
+- **Transcoding links libavcodec.** The `open-streamer-transcoder` binary is built against libav (see `Dockerfile.builder`); its available encoders are fixed at build time. `ffmpeg_path` is only for auxiliary tasks (e.g. thumbnails).
 - **HLS and DASH dirs must differ** when both publishers are active.
 - **DVR is per-stream opt-in.** No global enable.
-- **Failover timestamp jumps** produce `#EXT-X-DISCONTINUITY` in HLS and are logged at debug level from FFmpeg stderr.
+- **Failover timestamp jumps** produce `#EXT-X-DISCONTINUITY` in HLS and are logged at debug level.
 - **`PUT /streams/{code}` is non-disruptive** when the stream is running — only changed components restart.
-- **Pipeline never tears down on FFmpeg crash.** Each profile retries forever with backoff. Status flips to `degraded` after 3 consecutive crashes; flips back to `active` after a sustained run (>30s) or hot-restart.
-- **Multi-output toggle restarts running streams** — operator confirmation expected via UI before enabling on a busy server (~2-3s downtime per stream).
+- **Pipeline never tears down on a subprocess crash.** The supervisor respawns forever with backoff. Status flips to `degraded` after 3 consecutive crashes; flips back to `active` after a sustained run (>30s) or hot-restart.
 - **ABR-copy / ABR-mixer streams without a downstream transcoder report empty `runtime.media`** — these paths bypass the manager (their pipeline is N in-process taps, not an ingest worker), so the per-input track tracker that fills "Input Media" / "Output Media" / "Input throughput" panels is not exercised. Enable a downstream transcoder if you need those metrics — that routes the stream through the normal ingest+transcode pipeline where tracking is wired (input tracks observed by the ingestor, output tracks derived from the transcoder ladder config).
 - **`mixer://` A/V drift with clock-independent sources** — combining two upstreams that don't share a sample/frame clock (e.g. live HLS video + file-paced audio) accumulates A/V drift mid-stream. The PTS Anchoring Layer's cross-track snap aligns V and A at startup, but the bursty source's GOP-by-GOP delivery keeps producing micro-drift after both tracks are seeded. Symptom: HLS player loads slowly (10–15 s waiting for V/A buffer alignment) but eventually plays smoothly. NOT a regression — production mixer usage should pair clock-coherent sources (e.g. two RTMP feeds from the same encoder).
 - **Build version** stamped at compile time (`make build` runs `git describe --tags --always --dirty`); exposed via `GET /config.version`.

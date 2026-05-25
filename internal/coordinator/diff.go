@@ -103,14 +103,13 @@ func diffInputs(old, new *domain.Stream, d *StreamDiff) {
 // diffTranscoder compares transcoder configs with two granularity levels:
 //  1. Topology change (buffer layout changes OR watermark filter graph change)
 //     → full restart needed
-//  2. Per-profile diff (only specific FFmpeg processes need restart).
+//  2. Per-profile diff (only specific renditions need restart).
 //
 // Watermark belongs in this function because the filter graph it produces
-// lives in `-vf` baked into the FFmpeg argv — there's no way to swap it
+// lives in the encoder's libavfilter chain — there's no way to swap it
 // without restarting the encoder. Coordinator's `transcoderConfigWithWatermark`
 // rebuilds the runtime config on each `tc.Start`, so a topology reload is
-// the cheapest reliable path that picks up the new watermark across both
-// legacy and multi-output modes.
+// the cheapest reliable path that picks up the new watermark.
 func diffTranscoder(old, new *domain.Stream, d *StreamDiff) {
 	transcoderEq := reflect.DeepEqual(old.Transcoder, new.Transcoder)
 	watermarkEq := reflect.DeepEqual(old.Watermark, new.Watermark)

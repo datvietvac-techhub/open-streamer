@@ -18,8 +18,8 @@ type Config struct {
 	Audio       AudioConfig
 }
 
-// HWBackend names the encode acceleration the pipeline should use. Probe
-// the host (P1) and fall back to CPU when the chosen backend is missing.
+// HWBackend names the encode acceleration the pipeline should use. Falls
+// back to CPU when the chosen backend is missing.
 type HWBackend string
 
 // HWBackend values.
@@ -83,8 +83,9 @@ type Sink interface {
 	Write(targetIndex int, ts []byte) error
 }
 
-// NewRunner constructs a Runner for the given config. P0 stub returns
-// ErrNotImplemented; P1 will wire the encoder, P2 the decoder + scaler.
+// NewRunner constructs a Runner for the given config. It returns
+// ErrNotImplemented — the active pipeline is native.StreamPipeline, driven
+// by the gRPC server in server.go.
 func NewRunner(_ Config) (Runner, error) {
 	return nil, ErrNotImplemented
 }

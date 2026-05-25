@@ -548,7 +548,7 @@ func (c *Coordinator) Update(ctx context.Context, old, new *domain.Stream) error
 		return c.reloadTranscoderFull(ctx, old, new)
 	}
 
-	// Per-profile transcoder changes: stop/start only affected FFmpeg processes.
+	// Per-profile transcoder changes: reload only the affected profiles.
 	if diff.TranscoderChanged && diff.ProfilesDiff != nil {
 		//nolint:contextcheck // StartProfile derives from streamWorker.baseCtx; by design
 		if err := c.reloadProfiles(new, diff.ProfilesDiff); err != nil {
@@ -665,9 +665,9 @@ func (c *Coordinator) reloadTranscoderFull(ctx context.Context, old, new *domain
 }
 
 // reloadProfiles applies per-profile transcoder changes without touching unchanged profiles.
-// Updated profiles: stop+start the corresponding FFmpeg process.
-// Added profiles: create rendition buffer + start FFmpeg process.
-// Removed profiles: stop FFmpeg process + delete rendition buffer.
+// Updated profiles: stop+start the corresponding rendition.
+// Added profiles: create rendition buffer + start the rendition.
+// Removed profiles: stop the rendition + delete its rendition buffer.
 func (c *Coordinator) reloadProfiles(new *domain.Stream, pd *ProfilesDiff) error {
 	newProfiles := transcoderProfilesFromDomain(&new.Transcoder.Video)
 
@@ -805,8 +805,8 @@ func (c *Coordinator) handleInputRestored(streamCode domain.StreamCode) {
 	})
 }
 
-// handleTranscoderUnhealthy is called by the transcoder when one of its
-// FFmpeg workers has crashed N consecutive times — signal that downstream
+// handleTranscoderUnhealthy is called by the transcoder when its
+// subprocess has crashed N consecutive times — signal that downstream
 // publishers (HLS / DASH / RTMP) are receiving no packets and the stream
 // is effectively broken even though inputs may still be flowing.
 //

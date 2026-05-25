@@ -2,7 +2,7 @@ package coordinator
 
 // deps.go — narrow interfaces that Coordinator uses for each collaborating service.
 // Using interfaces instead of concrete types keeps the coordinator testable without
-// starting real ingestors, FFmpeg processes, or RTSP servers.
+// starting real ingestors, transcoder subprocesses, or RTSP servers.
 
 import (
 	"context"

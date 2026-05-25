@@ -164,7 +164,7 @@ type VideoTranscodeConfig struct {
 	Copy bool `json:"copy" yaml:"copy"`
 
 	// Interlace selects the deinterlace pre-filter applied before scaling.
-	// Applies once per FFmpeg subprocess (i.e. per profile in the ABR ladder).
+	// Applies in the transcoder's video pipeline, before scaling.
 	// "" disables the filter; use ResizeModeProgressive to assert progressive source.
 	Interlace InterlaceMode `json:"interlace,omitempty" yaml:"interlace,omitempty"`
 

@@ -2542,8 +2542,6 @@ const docTemplate = `{
         "domain.EventType": {
             "type": "string",
             "enum": [
-                "session.opened",
-                "session.closed",
                 "stream.created",
                 "stream.updated",
                 "stream.started",
@@ -2577,7 +2575,9 @@ const docTemplate = `{
                 "template.updated",
                 "template.deleted",
                 "stream.runtime_created",
-                "stream.runtime_expired"
+                "stream.runtime_expired",
+                "session.opened",
+                "session.closed"
             ],
             "x-enum-comments": {
                 "EventDVRSegmentPruned": "retention loop deleted an aged-out segment",
@@ -2594,8 +2594,6 @@ const docTemplate = `{
                 "EventStreamUpdated": "PUT /streams/{code} on existing record"
             },
             "x-enum-descriptions": [
-                "",
-                "",
                 "",
                 "PUT /streams/{code} on existing record",
                 "",
@@ -2629,11 +2627,11 @@ const docTemplate = `{
                 "",
                 "",
                 "",
+                "",
+                "",
                 ""
             ],
             "x-enum-varnames": [
-                "EventSessionOpened",
-                "EventSessionClosed",
                 "EventStreamCreated",
                 "EventStreamUpdated",
                 "EventStreamStarted",
@@ -2667,7 +2665,9 @@ const docTemplate = `{
                 "EventTemplateUpdated",
                 "EventTemplateDeleted",
                 "EventStreamRuntimeCreated",
-                "EventStreamRuntimeExpired"
+                "EventStreamRuntimeExpired",
+                "EventSessionOpened",
+                "EventSessionClosed"
             ]
         },
         "domain.GlobalConfig": {
@@ -3542,7 +3542,7 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "interlace": {
-                    "description": "Interlace selects the deinterlace pre-filter applied before scaling.\nApplies once per FFmpeg subprocess (i.e. per profile in the ABR ladder).\n\"\" disables the filter; use ResizeModeProgressive to assert progressive source.",
+                    "description": "Interlace selects the deinterlace pre-filter applied before scaling.\nApplies in the transcoder's video pipeline, before scaling.\n\"\" disables the filter; use ResizeModeProgressive to assert progressive source.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/domain.InterlaceMode"

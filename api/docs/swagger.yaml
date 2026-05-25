@@ -634,8 +634,6 @@ definitions:
     type: object
   domain.EventType:
     enum:
-    - session.opened
-    - session.closed
     - stream.created
     - stream.updated
     - stream.started
@@ -670,6 +668,8 @@ definitions:
     - template.deleted
     - stream.runtime_created
     - stream.runtime_expired
+    - session.opened
+    - session.closed
     type: string
     x-enum-comments:
       EventDVRSegmentPruned: retention loop deleted an aged-out segment
@@ -686,8 +686,6 @@ definitions:
       EventPushStarted: dialing target, pre-handshake
       EventStreamUpdated: PUT /streams/{code} on existing record
     x-enum-descriptions:
-    - ""
-    - ""
     - ""
     - PUT /streams/{code} on existing record
     - ""
@@ -722,9 +720,9 @@ definitions:
     - ""
     - ""
     - ""
+    - ""
+    - ""
     x-enum-varnames:
-    - EventSessionOpened
-    - EventSessionClosed
     - EventStreamCreated
     - EventStreamUpdated
     - EventStreamStarted
@@ -759,6 +757,8 @@ definitions:
     - EventTemplateDeleted
     - EventStreamRuntimeCreated
     - EventStreamRuntimeExpired
+    - EventSessionOpened
+    - EventSessionClosed
   domain.GlobalConfig:
     properties:
       buffer:
@@ -1583,7 +1583,7 @@ definitions:
         - $ref: '#/definitions/domain.InterlaceMode'
         description: |-
           Interlace selects the deinterlace pre-filter applied before scaling.
-          Applies once per FFmpeg subprocess (i.e. per profile in the ABR ladder).
+          Applies in the transcoder's video pipeline, before scaling.
           "" disables the filter; use ResizeModeProgressive to assert progressive source.
       profiles:
         description: Profiles defines ABR renditions when re-encoding.

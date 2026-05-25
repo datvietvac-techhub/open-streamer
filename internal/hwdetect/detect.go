@@ -1,5 +1,5 @@
 // Package hwdetect probes the host OS for available hardware acceleration backends.
-// Detection is based on device files and PCI vendor IDs — no FFmpeg subprocess is needed.
+// Detection is based on device files and PCI vendor IDs — no subprocess is spawned.
 package hwdetect
 
 import (

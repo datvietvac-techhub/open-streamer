@@ -179,9 +179,8 @@ regenerate from annotations).
   signed) or appended as JSON-lines to a local log file (drop-in for
   Filebeat / Vector / Promtail). Per-hook retries, event/stream filters,
   metadata injection.
-- **FFmpeg compatibility probe** — boot + on-demand check for
-  required/optional encoders/muxers; UI sees a checklist before
-  saving the path.
+- **Transcoder capability probe** — boot + on-demand check for
+  required/optional encoders; UI sees a checklist before saving.
 - **Pluggable storage** — JSON flat-file (default) or YAML single-document.
 - **Prometheus metrics** + structured slog logging.
 
@@ -203,8 +202,9 @@ make hooks-install  # install pre-commit hook (auto-regen swagger)
 
 Single test: `go test -run TestName ./internal/<pkg>/...`
 
-Requires Go 1.25.9+. FFmpeg required for transcoding (boot probe will
-catch missing required encoders).
+Requires Go 1.25.x+. Transcoding links libavcodec (FFmpeg's libraries) into
+the `open-streamer-transcoder` binary — the builder image and release
+bundles provide them; the boot probe catches missing required encoders.
 
 Repository layout:
 
@@ -218,7 +218,7 @@ internal/
   coordinator/        # pipeline lifecycle + diff engine
   ingestor/           # pull workers (RTMP/RTSP/SRT/HLS/...) + push servers
   manager/            # input failover state machine
-  transcoder/         # FFmpeg worker pool + multi-output + watermark filter graph
+  transcoder/         # libavcodec subprocess supervisor + native pipeline + watermarks
   publisher/          # HLS/DASH segmenters + serve listeners + push out
   dvr/                # recording + retention + timeshift
   events/             # in-process event bus
@@ -246,9 +246,9 @@ PRs welcome. Before submitting:
 3. Match the project's design invariants documented in
    [ARCHITECTURE.md § Design mindset](./docs/ARCHITECTURE.md#1-design-mindset)
 
-Tests are required for new features. Build-tagged integration tests
-(`make test-integration`) spawn real FFmpeg — useful for filter chain
-work.
+Tests are required for new features. The native transcoder's libavcodec
+stages (decoder / encoder / scaler / pipeline) have table tests that link
+against libav — exercised in the builder image (`Dockerfile.builder`).
 
 ---
 
