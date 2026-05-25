@@ -24,6 +24,7 @@ on:
 
 permissions:
   contents: write
+  packages: read # pull the GHCR builder image to cross-build the cgo transcoder
 
 concurrency:
   group: release-${{ github.ref }}
@@ -100,6 +101,48 @@ jobs:
           cp build/install.sh "$DST/build/"
           cp build/open-streamer.service "$DST/build/"
           chmod +x "$DST/build/install.sh" "$DST/bin/open-streamer"
+
+      # ── Native transcoder (cgo + libav 8) ─────────────────────────────────
+      # Only linux/amd64 for now: the transcoder is built by cross-compiling
+      # inside the prebuilt builder image and bundling every libav .so the
+      # binary dlopens (Dockerfile.transcoder `export` stage → binary + lib/).
+      # arm64 / darwin / windows transcoder builds are staged as follow-ups —
+      # each needs its own builder + per-OS shared-lib bundling. The server
+      # binary itself still ships for every matrix platform.
+      - name: Set up Buildx (transcoder build)
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR (pull builder image)
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build native transcoder + bundle libav (linux/amd64)
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.transcoder
+          target: export
+          build-args: |
+            BUILDER_IMAGE=ghcr.io/${{ github.repository_owner }}/open-streamer-builder:v1
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ github.sha }}
+          outputs: type=local,dest=transcoder-out
+
+      - name: Stage transcoder into archive (linux/amd64)
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        run: |
+          DST=stage/${{ steps.version.outputs.stage }}
+          cp transcoder-out/open-streamer-transcoder "$DST/bin/"
+          chmod +x "$DST/bin/open-streamer-transcoder"
+          mkdir -p "$DST/lib"
+          cp -a transcoder-out/lib/. "$DST/lib/"
+          echo "→ staged transcoder + $(ls "$DST/lib" | wc -l) bundled libs"
 
       - name: Stage docs and version metadata
         run: |

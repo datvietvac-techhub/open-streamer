@@ -1,4 +1,14 @@
 # Continuous integration: build, test, lint, vulnerability scan.
+#
+# The native transcoder (internal/transcoder/native, cmd/open-streamer-transcoder)
+# is cgo against go-astiav → libav 8. FFmpeg 8 is not in any runner's apt, so
+# every job that COMPILES Go runs inside the prebuilt builder image
+# (ghcr.io/<owner>/open-streamer-builder:v1, published by builder-image.yml).
+# `go mod tidy` doesn't compile cgo, so it stays on a plain runner.
+#
+# Bootstrap note: the builder image must exist in GHCR before these jobs can
+# pull it — run the "Builder image" workflow once (it auto-runs when
+# Dockerfile.builder changes).
 name: CI
 
 on:
@@ -9,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,19 +43,29 @@ jobs:
           git diff --exit-code go.mod go.sum
 
   test:
-    name: test (go ${{ matrix.go }})
+    name: test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go: ["1.25.10", "stable"]
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/open-streamer-builder:v1
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - name: Cache Go build + module cache
+        uses: actions/cache@v4
         with:
-          go-version: ${{ matrix.go }}
-          cache: true
+          path: |
+            /root/.cache/go-build
+            /root/go/pkg/mod
+          key: ${{ runner.os }}-gocgo-${{ hashFiles('go.sum') }}
+          restore-keys: ${{ runner.os }}-gocgo-
+
+      - name: Toolchain stamp
+        run: |
+          go version
+          pkg-config --modversion libavcodec libavformat libavfilter libswscale libavutil
 
       - name: Download modules
         run: go mod download
@@ -62,7 +83,6 @@ jobs:
         run: go test -race -shuffle=on -count=1 -timeout=5m -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage to Codecov
-        if: matrix.go == 'stable'
         uses: codecov/codecov-action@v6
         with:
           files: coverage.out
@@ -73,30 +93,48 @@ jobs:
     name: golangci-lint
     runs-on: ubuntu-latest
     continue-on-error: true
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/open-streamer-builder:v1
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - name: Cache Go build + module cache
+        uses: actions/cache@v4
         with:
-          go-version-file: go.mod
-          cache: true
+          path: |
+            /root/.cache/go-build
+            /root/go/pkg/mod
+          key: ${{ runner.os }}-gocgo-${{ hashFiles('go.sum') }}
+          restore-keys: ${{ runner.os }}-gocgo-
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.3
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.11.3
-          args: --timeout=5m
+        run: golangci-lint run --timeout=5m ./...
 
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/open-streamer-builder:v1
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
+      - name: Cache Go build + module cache
+        uses: actions/cache@v4
         with:
-          go-version-file: go.mod
-          cache: true
+          path: |
+            /root/.cache/go-build
+            /root/go/pkg/mod
+          key: ${{ runner.os }}-gocgo-${{ hashFiles('go.sum') }}
+          restore-keys: ${{ runner.os }}-gocgo-
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
