@@ -57,7 +57,7 @@ const (
 // inside Service.Start; the supervisor's Run goroutine then handles
 // the full lifecycle until ctx is cancelled by Service.Stop.
 type supervisor struct {
-	svc *Service // for callbacks: recordProfileError, fireUnhealthy/Healthy
+	svc *Service // for callbacks: recordError, fireUnhealthy/Healthy
 
 	streamID    domain.StreamCode
 	rawIngestID domain.StreamCode
@@ -110,7 +110,7 @@ func (sv *supervisor) Run(ctx context.Context) {
 		}
 		runtime := time.Since(started)
 		if err != nil {
-			sv.svc.recordProfileError(sv.streamID, 0,
+			sv.svc.recordError(sv.streamID,
 				fmt.Sprintf("native transcoder: %s", err))
 			slog.Warn("transcoder: subprocess exited, will respawn",
 				"stream_code", sv.streamID,
@@ -119,7 +119,7 @@ func (sv *supervisor) Run(ctx context.Context) {
 				"err", err,
 			)
 			if runtime < fastCrashThreshold {
-				sv.svc.fireUnhealthyIfTransitioned(sv.streamID, 0, err.Error())
+				sv.svc.fireUnhealthyIfTransitioned(sv.streamID, err.Error())
 			} else {
 				// Sustained run before crash → reset backoff so the
 				// next crash gets the short delay too.
@@ -250,7 +250,7 @@ func (sv *supervisor) runOnce(ctx context.Context) error {
 	// If the supervisor was healthy before this exit, signal recovery
 	// once the subprocess is gone — coordinator's status engine
 	// expects healthy edges on respawn / clean stop alike.
-	sv.svc.fireHealthyIfTransitioned(sv.streamID, 0)
+	sv.svc.fireHealthyIfTransitioned(sv.streamID)
 
 	if errors.Is(firstErr, context.Canceled) {
 		return nil
@@ -362,9 +362,9 @@ func (sv *supervisor) dispatchEvent(ev *pb.Event) error {
 	case ev.GetError() != nil:
 		return sv.handleSubprocessError(ev.GetError())
 	case ev.GetHealth() != nil:
-		// P5 will plumb subprocess-reported per-profile health
-		// into recordProfileError; today the supervisor's own
-		// crash counter is the only signal.
+		// The subprocess can report health per rendition over gRPC;
+		// today the supervisor's own crash counter is the only signal
+		// we act on (subprocess-level).
 		slog.Debug("transcoder: subprocess health event",
 			"stream_code", sv.streamID,
 			"profiles", len(ev.GetHealth().GetProfiles()),

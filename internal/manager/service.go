@@ -184,13 +184,13 @@ type streamState struct {
 
 // RuntimeStatus is the single "runtime" envelope returned by the API for a
 // stream. Sub-systems contribute their own sections — manager owns input
-// health; transcoder owns per-profile state — but the API exposes one shape so
-// clients have a single root for all live data.
+// health; transcoder owns its subprocess state — but the API exposes one shape
+// so clients have a single root for all live data.
 //
 // Status and PipelineActive are populated by the API handler from the
 // coordinator (not by manager itself). Transcoder and Publisher are also
 // handler-populated and named after the subsystem they wrap, so frontend
-// reads `runtime.transcoder.profiles[]` and `runtime.publisher.pushes[]` —
+// reads `runtime.transcoder` and `runtime.publisher.pushes[]` —
 // no collision with the persisted `transcoder` / `push` config fields on
 // domain.Stream.
 //

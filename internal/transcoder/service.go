@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -57,65 +56,53 @@ type Profile struct {
 	ResizeMode       string
 }
 
-// profileWorker tracks a single rendition's runtime state. RuntimeStatus
-// surfaces RestartCount + Errors per rendition to the UI; index 0 carries
-// the live subprocess state, the rest are bookkeeping shells.
-type profileWorker struct {
-	cancel       context.CancelFunc
-	done         chan struct{}
-	restartCount int
-	errors       []domain.ErrorEntry
-}
+const maxTranscoderErrorHistory = 5
 
-const maxProfileErrorHistory = 5
+// ProcessStatus reports the CURRENT health of a stream's transcoder subprocess.
+type ProcessStatus string
 
-// recordProfileErrorEntry prepends an entry, capped at maxProfileErrorHistory.
-// Caller must hold the parent streamWorker.mu.
-func recordProfileErrorEntry(pw *profileWorker, msg string, at time.Time) {
-	e := domain.ErrorEntry{Message: msg, At: at}
-	if len(pw.errors) >= maxProfileErrorHistory {
-		copy(pw.errors[1:], pw.errors[:maxProfileErrorHistory-1])
-		pw.errors[0] = e
-		return
-	}
-	pw.errors = append([]domain.ErrorEntry{e}, pw.errors...)
-}
-
-// ProfileStatus reports the CURRENT health of one profile encoder.
-type ProfileStatus string
-
-// ProfileStatus values.
+// ProcessStatus values.
 const (
-	ProfileStatusHealthy   ProfileStatus = "healthy"
-	ProfileStatusUnhealthy ProfileStatus = "unhealthy"
+	ProcessStatusHealthy   ProcessStatus = "healthy"
+	ProcessStatusUnhealthy ProcessStatus = "unhealthy"
 )
 
-// ProfileSnapshot is a serialisable copy of one profile encoder's state.
-type ProfileSnapshot struct {
-	Index        int                 `json:"index"`
-	Track        string              `json:"track"`
-	Status       ProfileStatus       `json:"status"`
+// RenditionSnapshot identifies one output rendition (ABR rung) the subprocess
+// produces. Health is reported once at the subprocess level (see RuntimeStatus),
+// not per rendition, because one subprocess transcodes them all.
+type RenditionSnapshot struct {
+	Index int    `json:"index"`
+	Track string `json:"track"`
+}
+
+// RuntimeStatus is a JSON-safe snapshot of a stream's transcoder subprocess.
+// One subprocess produces every rendition, so status / restart_count / errors
+// describe the subprocess as a whole; renditions lists the ABR rungs it emits.
+type RuntimeStatus struct {
+	Status       ProcessStatus       `json:"status"`
 	RestartCount int                 `json:"restart_count"`
 	Errors       []domain.ErrorEntry `json:"errors,omitempty"`
+	Renditions   []RenditionSnapshot `json:"renditions"`
 }
 
-// RuntimeStatus is a JSON-safe snapshot of transcoder state for one stream.
-type RuntimeStatus struct {
-	Profiles []ProfileSnapshot `json:"profiles"`
-}
-
-// streamWorker holds one stream's transcoder handle: the supervisor that
-// owns the open-streamer-transcoder subprocess + gRPC connection, plus a
-// profileWorker per rendition for RuntimeStatus. baseCtx / baseCancel
-// scope the subprocess lifetime; rawIngest / tc capture what it transcodes.
+// streamWorker holds one stream's transcoder handle: the supervisor that owns
+// the open-streamer-transcoder subprocess + gRPC connection. One subprocess
+// transcodes every rendition, so health state (restartCount / errors) is
+// per-subprocess, not per-rendition. baseCtx / baseCancel scope the subprocess
+// lifetime; rawIngest / tc capture what it transcodes; done closes when the
+// supervisor goroutine exits.
 type streamWorker struct {
 	baseCtx    context.Context //nolint:containedctx // pipelinex spawn pattern; cancel exposed via baseCancel
 	baseCancel context.CancelFunc
 	rawIngest  domain.StreamCode
 	tc         *domain.TranscoderConfig
 	supervisor *supervisor // the native subprocess + gRPC supervisor; nil only in tests
-	mu         sync.Mutex
-	profiles   map[int]*profileWorker
+	done       chan struct{}
+
+	mu           sync.Mutex
+	renditions   []int // rendition track indices (0..N-1) the subprocess emits
+	restartCount int
+	errors       []domain.ErrorEntry // newest first, capped at maxTranscoderErrorHistory
 }
 
 // Service is the public transcoder entry point: it starts / stops /
@@ -131,8 +118,8 @@ type Service struct {
 	onUnhealthy func(streamID domain.StreamCode, reason string)
 	onHealthy   func(streamID domain.StreamCode)
 
-	healthMu          sync.Mutex
-	unhealthyProfiles map[domain.StreamCode]map[int]struct{}
+	healthMu  sync.Mutex
+	unhealthy map[domain.StreamCode]struct{}
 }
 
 // New creates a Service and registers it with the DI injector.
@@ -142,15 +129,15 @@ func New(i do.Injector) (*Service, error) {
 	m := do.MustInvoke[*metrics.Metrics](i)
 
 	return &Service{
-		buf:               buf,
-		bus:               bus,
-		m:                 m,
-		workers:           make(map[domain.StreamCode]*streamWorker),
-		unhealthyProfiles: make(map[domain.StreamCode]map[int]struct{}),
+		buf:       buf,
+		bus:       bus,
+		m:         m,
+		workers:   make(map[domain.StreamCode]*streamWorker),
+		unhealthy: make(map[domain.StreamCode]struct{}),
 	}, nil
 }
 
-// RuntimeStatus returns a snapshot of per-profile encoder state.
+// RuntimeStatus returns a snapshot of the stream's transcoder subprocess.
 // Returns ok=false if the stream has no transcoder pipeline running.
 func (s *Service) RuntimeStatus(streamID domain.StreamCode) (RuntimeStatus, bool) {
 	s.mu.Lock()
@@ -161,42 +148,38 @@ func (s *Service) RuntimeStatus(streamID domain.StreamCode) (RuntimeStatus, bool
 	}
 
 	s.healthMu.Lock()
-	unhealthy := make(map[int]struct{}, len(s.unhealthyProfiles[streamID]))
-	for idx := range s.unhealthyProfiles[streamID] {
-		unhealthy[idx] = struct{}{}
-	}
+	_, unhealthy := s.unhealthy[streamID]
 	s.healthMu.Unlock()
 
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	out := RuntimeStatus{Profiles: make([]ProfileSnapshot, 0, len(sw.profiles))}
-	for idx, pw := range sw.profiles {
-		status := ProfileStatusHealthy
-		if _, bad := unhealthy[idx]; bad {
-			status = ProfileStatusUnhealthy
-		}
-		snap := ProfileSnapshot{
-			Index:        idx,
-			Track:        buffer.VideoTrackSlug(idx),
-			Status:       status,
-			RestartCount: pw.restartCount,
-		}
-		if len(pw.errors) > 0 {
-			snap.Errors = make([]domain.ErrorEntry, len(pw.errors))
-			copy(snap.Errors, pw.errors)
-		}
-		out.Profiles = append(out.Profiles, snap)
+	status := ProcessStatusHealthy
+	if unhealthy {
+		status = ProcessStatusUnhealthy
 	}
-	sort.Slice(out.Profiles, func(i, j int) bool { return out.Profiles[i].Index < out.Profiles[j].Index })
+	out := RuntimeStatus{
+		Status:       status,
+		RestartCount: sw.restartCount,
+		Renditions:   make([]RenditionSnapshot, 0, len(sw.renditions)),
+	}
+	if len(sw.errors) > 0 {
+		out.Errors = make([]domain.ErrorEntry, len(sw.errors))
+		copy(out.Errors, sw.errors)
+	}
+	for _, idx := range sw.renditions {
+		out.Renditions = append(out.Renditions, RenditionSnapshot{
+			Index: idx,
+			Track: buffer.VideoTrackSlug(idx),
+		})
+	}
 	return out, true
 }
 
-// recordProfileError appends a crash entry to the profile's history.
-// Called by the native runner supervisor when an encoder pipeline restarts.
-//
-//nolint:unparam // tests pass profileIndex=0; native runner (P1) will iterate per target.
-func (s *Service) recordProfileError(streamID domain.StreamCode, profileIndex int, msg string) {
+// recordError bumps the subprocess restart count and appends a crash entry to
+// the stream's transcoder error history (newest first, capped). Called by the
+// supervisor when the open-streamer-transcoder subprocess exits and respawns.
+func (s *Service) recordError(streamID domain.StreamCode, msg string) {
 	s.mu.Lock()
 	sw, ok := s.workers[streamID]
 	s.mu.Unlock()
@@ -205,12 +188,14 @@ func (s *Service) recordProfileError(streamID domain.StreamCode, profileIndex in
 	}
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
-	pw, ok := sw.profiles[profileIndex]
-	if !ok {
+	sw.restartCount++
+	e := domain.ErrorEntry{Message: msg, At: time.Now()}
+	if len(sw.errors) >= maxTranscoderErrorHistory {
+		copy(sw.errors[1:], sw.errors[:maxTranscoderErrorHistory-1])
+		sw.errors[0] = e
 		return
 	}
-	pw.restartCount++
-	recordProfileErrorEntry(pw, msg, time.Now())
+	sw.errors = append([]domain.ErrorEntry{e}, sw.errors...)
 }
 
 // SetUnhealthyCallback registers a function the Service calls the FIRST
@@ -229,47 +214,33 @@ func (s *Service) SetHealthyCallback(fn func(streamID domain.StreamCode)) {
 	s.mu.Unlock()
 }
 
-// markProfileUnhealthy adds (streamID, profileIndex) to the unhealthy set.
-// Returns true on the healthy → unhealthy edge.
-func (s *Service) markProfileUnhealthy(streamID domain.StreamCode, profileIndex int) bool {
+// markUnhealthy marks the stream's transcoder unhealthy. Returns true on the
+// healthy → unhealthy edge.
+func (s *Service) markUnhealthy(streamID domain.StreamCode) bool {
 	s.healthMu.Lock()
 	defer s.healthMu.Unlock()
-	set, ok := s.unhealthyProfiles[streamID]
-	if !ok {
-		set = make(map[int]struct{})
-		s.unhealthyProfiles[streamID] = set
-	}
-	wasEmpty := len(set) == 0
-	if _, already := set[profileIndex]; already {
+	if _, already := s.unhealthy[streamID]; already {
 		return false
 	}
-	set[profileIndex] = struct{}{}
-	return wasEmpty
+	s.unhealthy[streamID] = struct{}{}
+	return true
 }
 
-// markProfileHealthy removes (streamID, profileIndex) from the unhealthy set.
-// Returns true on the unhealthy → healthy edge.
-func (s *Service) markProfileHealthy(streamID domain.StreamCode, profileIndex int) bool {
+// markHealthy clears the stream's transcoder unhealthy flag. Returns true on
+// the unhealthy → healthy edge.
+func (s *Service) markHealthy(streamID domain.StreamCode) bool {
 	s.healthMu.Lock()
 	defer s.healthMu.Unlock()
-	set, ok := s.unhealthyProfiles[streamID]
-	if !ok {
+	if _, present := s.unhealthy[streamID]; !present {
 		return false
 	}
-	if _, present := set[profileIndex]; !present {
-		return false
-	}
-	delete(set, profileIndex)
-	if len(set) == 0 {
-		delete(s.unhealthyProfiles, streamID)
-		return true
-	}
-	return false
+	delete(s.unhealthy, streamID)
+	return true
 }
 
 // fireUnhealthyIfTransitioned invokes onUnhealthy on the transition edge.
-func (s *Service) fireUnhealthyIfTransitioned(streamID domain.StreamCode, profileIndex int, reason string) {
-	if !s.markProfileUnhealthy(streamID, profileIndex) {
+func (s *Service) fireUnhealthyIfTransitioned(streamID domain.StreamCode, reason string) {
+	if !s.markUnhealthy(streamID) {
 		return
 	}
 	s.mu.Lock()
@@ -281,10 +252,8 @@ func (s *Service) fireUnhealthyIfTransitioned(streamID domain.StreamCode, profil
 }
 
 // fireHealthyIfTransitioned mirrors fireUnhealthyIfTransitioned for recovery.
-//
-//nolint:unparam // profileIndex=0 today (single-encoder supervisor); per-profile granularity returns in P5+ multi-rendition phase.
-func (s *Service) fireHealthyIfTransitioned(streamID domain.StreamCode, profileIndex int) {
-	if !s.markProfileHealthy(streamID, profileIndex) {
+func (s *Service) fireHealthyIfTransitioned(streamID domain.StreamCode) {
+	if !s.markHealthy(streamID) {
 		return
 	}
 	s.mu.Lock()
@@ -295,13 +264,13 @@ func (s *Service) fireHealthyIfTransitioned(streamID domain.StreamCode, profileI
 	}
 }
 
-// dropHealthState clears every profile entry for a stream.
+// dropHealthState clears the stream's transcoder unhealthy flag.
 func (s *Service) dropHealthState(streamID domain.StreamCode) {
 	s.healthMu.Lock()
-	_, hadEntries := s.unhealthyProfiles[streamID]
-	delete(s.unhealthyProfiles, streamID)
+	_, hadEntry := s.unhealthy[streamID]
+	delete(s.unhealthy, streamID)
 	s.healthMu.Unlock()
-	if !hadEntries {
+	if !hadEntry {
 		return
 	}
 	s.mu.Lock()
@@ -352,17 +321,13 @@ func (s *Service) Start(
 		baseCancel: baseCancel,
 		rawIngest:  rawIngestID,
 		tc:         tc,
-		profiles:   make(map[int]*profileWorker, len(targets)),
+		done:       make(chan struct{}),
+		renditions: make([]int, len(targets)),
 	}
-	// Maintain one profileWorker per rendition so RuntimeStatus
-	// continues to surface per-profile restart counts + errors.
-	// The supervisor calls recordProfileError on profile index 0
-	// for now (single-encoder pipeline); shadow entries for the
-	// other indices keep the JSON shape the UI expects.
-	pw0 := &profileWorker{cancel: func() {}, done: make(chan struct{})}
-	sw.profiles[0] = pw0
-	for i := 1; i < len(targets); i++ {
-		sw.profiles[i] = &profileWorker{cancel: func() {}, done: pw0.done}
+	// One subprocess produces every rendition; renditions[i] = i records the
+	// ladder so RuntimeStatus can list the track slugs (track_0, track_1, ...).
+	for i := range targets {
+		sw.renditions[i] = i
 	}
 	supervisor := newSupervisor(s, logStreamCode, rawIngestID, tc, targets)
 	sw.supervisor = supervisor
@@ -389,7 +354,7 @@ func (s *Service) Start(
 	})
 
 	go func() {
-		defer close(pw0.done)
+		defer close(sw.done)
 		supervisor.Run(baseCtx)
 	}()
 	return nil
@@ -449,16 +414,7 @@ func (s *Service) Stop(streamID domain.StreamCode) {
 	s.mu.Unlock()
 
 	sw.baseCancel()
-
-	sw.mu.Lock()
-	profiles := make(map[int]*profileWorker, len(sw.profiles))
-	for k, v := range sw.profiles {
-		profiles[k] = v
-	}
-	sw.mu.Unlock()
-	for _, pw := range profiles {
-		<-pw.done
-	}
+	<-sw.done // wait for the supervisor goroutine (subprocess) to exit
 
 	s.m.TranscoderWorkersActive.WithLabelValues(string(streamID)).Set(0)
 	s.m.TranscoderQualitiesActive.WithLabelValues(string(streamID)).Set(0)
@@ -470,32 +426,15 @@ func (s *Service) Stop(streamID domain.StreamCode) {
 	})
 }
 
-// StopProfile stops a single encoder for one profile index.
+// StopProfile is unsupported: one subprocess produces every rendition, so a
+// single rung can't be stopped on its own — use Stop to tear down the stream's
+// subprocess. Kept as a no-op so the coordinator's per-profile diff path
+// compiles; a ladder change is routed to a full transcoder restart.
 func (s *Service) StopProfile(streamID domain.StreamCode, profileIndex int) {
-	s.mu.Lock()
-	sw, ok := s.workers[streamID]
-	s.mu.Unlock()
-	if !ok {
-		return
-	}
-
-	sw.mu.Lock()
-	pw, ok := sw.profiles[profileIndex]
-	if !ok {
-		sw.mu.Unlock()
-		return
-	}
-	delete(sw.profiles, profileIndex)
-	sw.mu.Unlock()
-
-	pw.cancel()
-	<-pw.done
-
-	slog.Info("transcoder: profile stopped",
+	slog.Warn("transcoder: StopProfile is a no-op — the subprocess owns all renditions",
 		"stream_code", streamID,
-		"profile", buffer.VideoTrackSlug(profileIndex),
+		"profile_index", profileIndex,
 	)
-	s.updateMetrics(streamID, sw)
 }
 
 // StartProfile starts a single encoder for one profile index.
@@ -510,13 +449,4 @@ func (s *Service) StartProfile(streamID domain.StreamCode, profileIndex int, tar
 		"profile_index", profileIndex,
 	)
 	return fmt.Errorf("transcoder: profile %d: %w", profileIndex, ErrNotImplemented)
-}
-
-// updateMetrics refreshes the active worker/quality gauge for a stream.
-func (s *Service) updateMetrics(streamID domain.StreamCode, sw *streamWorker) {
-	sw.mu.Lock()
-	n := float64(len(sw.profiles))
-	sw.mu.Unlock()
-	s.m.TranscoderWorkersActive.WithLabelValues(string(streamID)).Set(n)
-	s.m.TranscoderQualitiesActive.WithLabelValues(string(streamID)).Set(n)
 }

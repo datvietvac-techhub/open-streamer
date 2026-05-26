@@ -70,7 +70,7 @@ type configDefaultsResponse struct {
 	} `json:"dvr"`
 
 	Transcoder struct {
-		Video      struct {
+		Video struct {
 			BitrateK   int               `json:"bitrate_k"`
 			ResizeMode domain.ResizeMode `json:"resize_mode"`
 			// Codec is the codec family used when the user leaves

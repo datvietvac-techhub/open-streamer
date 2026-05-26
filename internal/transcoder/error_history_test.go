@@ -9,83 +9,84 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// recordProfileErrorEntry contract — newest at index 0, capped at
-// maxProfileErrorHistory. Same shape as recordInputError so frontend can read
-// Errors[0] for the most recent crash.
-func TestRecordProfileErrorEntry_OrderingAndCap(t *testing.T) {
+// newErrService builds a Service + one running streamWorker (N renditions) for
+// the error/status tests, without spinning up buffer/bus/metrics. The stream is
+// always registered under "live" — test bodies reference that code directly.
+func newErrService(renditions int) (*Service, *streamWorker) {
+	rends := make([]int, renditions)
+	for i := range rends {
+		rends[i] = i
+	}
+	sw := &streamWorker{renditions: rends}
+	s := &Service{
+		workers:   map[domain.StreamCode]*streamWorker{"live": sw},
+		unhealthy: map[domain.StreamCode]struct{}{},
+	}
+	return s, sw
+}
+
+// recordError bumps the subprocess restart count AND appends an error entry
+// (newest at index 0). The two are 1:1 — every recorded crash counts as one
+// respawn.
+func TestRecordError_IncrementsAndRecords(t *testing.T) {
 	t.Parallel()
-	pw := &profileWorker{}
-	base := time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC)
+	s, sw := newErrService(1)
+
+	s.recordError("live", "native transcoder: exit status 234")
+	s.recordError("live", "native transcoder: exit status 1")
+
+	require.Equal(t, 2, sw.restartCount)
+	require.Len(t, sw.errors, 2)
+	require.Equal(t, "native transcoder: exit status 1", sw.errors[0].Message, "newest first")
+	require.Equal(t, "native transcoder: exit status 234", sw.errors[1].Message)
+}
+
+// Error history is capped at maxTranscoderErrorHistory, newest first.
+func TestRecordError_OrderingAndCap(t *testing.T) {
+	t.Parallel()
+	s, sw := newErrService(1)
 
 	for i := 0; i < 7; i++ {
-		recordProfileErrorEntry(pw, profileErrMsg(i), base.Add(time.Duration(i)*time.Second))
+		s.recordError("live", profileErrMsg(i))
 	}
 
-	require.Len(t, pw.errors, maxProfileErrorHistory)
-	require.Equal(t, "crash-6", pw.errors[0].Message)
-	require.Equal(t, "crash-2", pw.errors[maxProfileErrorHistory-1].Message)
+	require.Len(t, sw.errors, maxTranscoderErrorHistory)
+	require.Equal(t, "crash-6", sw.errors[0].Message)
+	require.Equal(t, "crash-2", sw.errors[maxTranscoderErrorHistory-1].Message)
 }
 
-// recordProfileError increments restartCount AND appends an error entry. The
-// two are 1:1 — every recorded crash counts as one restart attempt.
-func TestRecordProfileError_IncrementsAndRecords(t *testing.T) {
-	t.Parallel()
-	sw := &streamWorker{
-		profiles: map[int]*profileWorker{0: {}},
-	}
-	s := &Service{
-		workers: map[domain.StreamCode]*streamWorker{"live": sw},
-	}
-
-	s.recordProfileError("live", 0, "ffmpeg exit: status 234")
-	s.recordProfileError("live", 0, "ffmpeg exit: status 1")
-
-	require.Equal(t, 2, sw.profiles[0].restartCount)
-	require.Len(t, sw.profiles[0].errors, 2)
-	require.Equal(t, "ffmpeg exit: status 1", sw.profiles[0].errors[0].Message, "newest first")
-	require.Equal(t, "ffmpeg exit: status 234", sw.profiles[0].errors[1].Message)
-}
-
-// recordProfileError is a no-op when stream/profile have been torn down — it
-// runs from the retry loop which can fire after Stop().
-func TestRecordProfileError_NoOpOnMissing(t *testing.T) {
+// recordError is a no-op when the stream has been torn down — it runs from the
+// respawn loop, which can fire after Stop().
+func TestRecordError_NoOpOnMissing(t *testing.T) {
 	t.Parallel()
 	s := &Service{workers: map[domain.StreamCode]*streamWorker{}}
 	require.NotPanics(t, func() {
-		s.recordProfileError("nope", 0, "boom")
+		s.recordError("nope", "boom")
 	})
 }
 
-// RuntimeStatus exposes the per-profile state (track slug, restart count,
-// defensively-copied error slice) sorted by index.
-func TestRuntimeStatus_ShapeAndSort(t *testing.T) {
+// RuntimeStatus reports subprocess-level health (status, restart_count,
+// defensively-copied errors) plus the rendition list in index order.
+func TestRuntimeStatus_Shape(t *testing.T) {
 	t.Parallel()
-	now := time.Now()
-	sw := &streamWorker{
-		profiles: map[int]*profileWorker{
-			2: {restartCount: 3, errors: []domain.ErrorEntry{{Message: "z", At: now}}},
-			0: {restartCount: 1, errors: []domain.ErrorEntry{{Message: "a", At: now}}},
-			1: {restartCount: 0, errors: nil},
-		},
-	}
-	s := &Service{workers: map[domain.StreamCode]*streamWorker{"live": sw}}
+	s, sw := newErrService(3)
+	sw.restartCount = 3
+	sw.errors = []domain.ErrorEntry{{Message: "z", At: time.Now()}}
 
 	rt, ok := s.RuntimeStatus("live")
 	require.True(t, ok)
-	require.Len(t, rt.Profiles, 3)
-	// Sorted by index ascending — stable output across calls.
-	require.Equal(t, 0, rt.Profiles[0].Index)
-	require.Equal(t, 1, rt.Profiles[1].Index)
-	require.Equal(t, 2, rt.Profiles[2].Index)
-	require.Equal(t, buffer.VideoTrackSlug(0), rt.Profiles[0].Track)
-	require.Equal(t, 1, rt.Profiles[0].RestartCount)
-	require.Equal(t, 3, rt.Profiles[2].RestartCount)
-	require.Empty(t, rt.Profiles[1].Errors, "no errors → omitted")
-	require.Equal(t, "z", rt.Profiles[2].Errors[0].Message)
+	require.Equal(t, ProcessStatusHealthy, rt.Status)
+	require.Equal(t, 3, rt.RestartCount)
+	require.Equal(t, "z", rt.Errors[0].Message)
+	require.Len(t, rt.Renditions, 3)
+	require.Equal(t, 0, rt.Renditions[0].Index)
+	require.Equal(t, 2, rt.Renditions[2].Index)
+	require.Equal(t, buffer.VideoTrackSlug(0), rt.Renditions[0].Track)
 
-	// Mutate state after snapshot — snapshot must be unaffected.
-	s.recordProfileError("live", 0, "after-snapshot")
-	require.Equal(t, "a", rt.Profiles[0].Errors[0].Message, "snapshot is a defensive copy")
+	// Mutate state after snapshot — snapshot must be unaffected (defensive copy).
+	s.recordError("live", "after-snapshot")
+	require.Equal(t, "z", rt.Errors[0].Message, "snapshot is a defensive copy")
+	require.Equal(t, 3, rt.RestartCount, "snapshot restart_count unaffected")
 }
 
 func TestRuntimeStatus_NotRunning(t *testing.T) {
@@ -95,57 +96,42 @@ func TestRuntimeStatus_NotRunning(t *testing.T) {
 	require.False(t, ok)
 }
 
-// Status reflects CURRENT health, not history. A profile with restart_count > 0
-// but not in unhealthyProfiles is "healthy" (recovered after past crashes).
-// One in unhealthyProfiles is "unhealthy" even if restart_count is small.
+// Status reflects CURRENT health, not history: a subprocess with
+// restart_count > 0 but not currently in the unhealthy set is "healthy".
 func TestRuntimeStatus_StatusReflectsCurrentHealth(t *testing.T) {
 	t.Parallel()
-	sw := &streamWorker{
-		profiles: map[int]*profileWorker{
-			0: {restartCount: 5}, // crashed in the past, currently fine
-			1: {restartCount: 1}, // currently in crash loop
-			2: {restartCount: 0}, // never crashed
-		},
-	}
-	s := &Service{
-		workers: map[domain.StreamCode]*streamWorker{"live": sw},
-		unhealthyProfiles: map[domain.StreamCode]map[int]struct{}{
-			"live": {1: {}},
-		},
-	}
+	s, sw := newErrService(1)
+	sw.restartCount = 5 // crashed in the past, currently fine
+	require.Equal(t, ProcessStatusHealthy, mustStatus(t, s, "live"))
 
-	rt, ok := s.RuntimeStatus("live")
-	require.True(t, ok)
-	require.Len(t, rt.Profiles, 3)
-	require.Equal(t, ProfileStatusHealthy, rt.Profiles[0].Status, "past crashes don't latch status")
-	require.Equal(t, ProfileStatusUnhealthy, rt.Profiles[1].Status, "currently in unhealthy set")
-	require.Equal(t, ProfileStatusHealthy, rt.Profiles[2].Status, "never crashed")
+	s.markUnhealthy("live")
+	require.Equal(t, ProcessStatusUnhealthy, mustStatus(t, s, "live"))
+
+	s.markHealthy("live")
+	require.Equal(t, ProcessStatusHealthy, mustStatus(t, s, "live"))
 }
 
-// Snapshot copies the unhealthy set, so flipping a profile to unhealthy AFTER
-// the snapshot was taken must not retroactively change the returned Status.
+// The status is snapshotted: marking unhealthy AFTER the snapshot must not
+// retroactively change the returned value.
 func TestRuntimeStatus_StatusIsSnapshotted(t *testing.T) {
 	t.Parallel()
-	sw := &streamWorker{profiles: map[int]*profileWorker{0: {}}}
-	s := &Service{
-		workers:           map[domain.StreamCode]*streamWorker{"live": sw},
-		unhealthyProfiles: map[domain.StreamCode]map[int]struct{}{},
-	}
+	s, _ := newErrService(1)
 
 	rt, ok := s.RuntimeStatus("live")
 	require.True(t, ok)
-	require.Equal(t, ProfileStatusHealthy, rt.Profiles[0].Status)
+	require.Equal(t, ProcessStatusHealthy, rt.Status)
 
-	// Mark unhealthy after snapshot — already-returned snapshot must
-	// still show healthy because Service copied the set defensively.
-	s.markProfileUnhealthy("live", 0)
-	require.Equal(t, ProfileStatusHealthy, rt.Profiles[0].Status, "stale snapshot stays consistent")
+	s.markUnhealthy("live")
+	require.Equal(t, ProcessStatusHealthy, rt.Status, "stale snapshot stays consistent")
+}
+
+func mustStatus(t *testing.T, s *Service, code domain.StreamCode) ProcessStatus {
+	t.Helper()
+	rt, ok := s.RuntimeStatus(code)
+	require.True(t, ok)
+	return rt.Status
 }
 
 func profileErrMsg(i int) string {
 	return "crash-" + string(rune('0'+i))
 }
-
-// Stderr-tail tests deleted along with the FFmpeg subprocess implementation —
-// the native pipeline raises errors via go-astiav return codes, no stderr to
-// parse. See the `native` subpackage for the replacement diagnostics surface.

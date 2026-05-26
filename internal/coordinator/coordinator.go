@@ -810,10 +810,10 @@ func (c *Coordinator) handleInputRestored(streamCode domain.StreamCode) {
 // publishers (HLS / DASH / RTMP) are receiving no packets and the stream
 // is effectively broken even though inputs may still be flowing.
 //
-// reason carries the latest error message ("ffmpeg exit: status 234; …")
-// for ops visibility via slog. UI sees only the StatusDegraded
-// transition; the per-profile error history (already populated via
-// recordProfileError) provides the detailed crash trail.
+// reason carries the latest error message ("native transcoder: exit
+// status 234; …") for ops visibility via slog. UI sees only the
+// StatusDegraded transition; the subprocess error history (already
+// populated via recordError) provides the detailed crash trail.
 func (c *Coordinator) handleTranscoderUnhealthy(streamCode domain.StreamCode, reason string) {
 	slog.Warn("coordinator: transcoder unhealthy, stream degraded",
 		"stream_code", streamCode, "reason", reason)

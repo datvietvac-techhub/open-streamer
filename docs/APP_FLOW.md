@@ -542,7 +542,7 @@ sequenceDiagram
     Note over Coord: 3) clone.Watermark.ImagePath = resolved path<br/>4) clone.Watermark.AssetID = "" (cleared)
     Coord->>TC: Start(ctx, code, rawID, &clone, targets)
     TC->>TC: BuildWatermarkFilter (libavfilter graph)
-    TC->>FF: libavfilter graph '...,movie=(resolved path) (wm) ; (mid) (wm) overlay=...'
+    TC->>FF: libavfilter graph '...,movie=(resolved path) (wm)' then '(mid) (wm) overlay=...'
 ```
 
 Failure modes the coordinator handles inline:

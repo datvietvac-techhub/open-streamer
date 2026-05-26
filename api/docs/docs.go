@@ -2534,8 +2534,6 @@ const docTemplate = `{
         "domain.EventType": {
             "type": "string",
             "enum": [
-                "session.opened",
-                "session.closed",
                 "stream.created",
                 "stream.updated",
                 "stream.started",
@@ -2569,7 +2567,9 @@ const docTemplate = `{
                 "template.updated",
                 "template.deleted",
                 "stream.runtime_created",
-                "stream.runtime_expired"
+                "stream.runtime_expired",
+                "session.opened",
+                "session.closed"
             ],
             "x-enum-comments": {
                 "EventDVRSegmentPruned": "retention loop deleted an aged-out segment",
@@ -2586,8 +2586,6 @@ const docTemplate = `{
                 "EventStreamUpdated": "PUT /streams/{code} on existing record"
             },
             "x-enum-descriptions": [
-                "",
-                "",
                 "",
                 "PUT /streams/{code} on existing record",
                 "",
@@ -2621,11 +2619,11 @@ const docTemplate = `{
                 "",
                 "",
                 "",
+                "",
+                "",
                 ""
             ],
             "x-enum-varnames": [
-                "EventSessionOpened",
-                "EventSessionClosed",
                 "EventStreamCreated",
                 "EventStreamUpdated",
                 "EventStreamStarted",
@@ -2659,7 +2657,9 @@ const docTemplate = `{
                 "EventTemplateUpdated",
                 "EventTemplateDeleted",
                 "EventStreamRuntimeCreated",
-                "EventStreamRuntimeExpired"
+                "EventStreamRuntimeExpired",
+                "EventSessionOpened",
+                "EventSessionClosed"
             ]
         },
         "domain.GlobalConfig": {
@@ -4094,7 +4094,29 @@ const docTemplate = `{
                 }
             }
         },
-        "transcoder.ProfileSnapshot": {
+        "transcoder.ProcessStatus": {
+            "type": "string",
+            "enum": [
+                "healthy",
+                "unhealthy"
+            ],
+            "x-enum-varnames": [
+                "ProcessStatusHealthy",
+                "ProcessStatusUnhealthy"
+            ]
+        },
+        "transcoder.RenditionSnapshot": {
+            "type": "object",
+            "properties": {
+                "index": {
+                    "type": "integer"
+                },
+                "track": {
+                    "type": "string"
+                }
+            }
+        },
+        "transcoder.RuntimeStatus": {
             "type": "object",
             "properties": {
                 "errors": {
@@ -4103,39 +4125,17 @@ const docTemplate = `{
                         "$ref": "#/definitions/domain.ErrorEntry"
                     }
                 },
-                "index": {
-                    "type": "integer"
+                "renditions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/transcoder.RenditionSnapshot"
+                    }
                 },
                 "restart_count": {
                     "type": "integer"
                 },
                 "status": {
-                    "$ref": "#/definitions/transcoder.ProfileStatus"
-                },
-                "track": {
-                    "type": "string"
-                }
-            }
-        },
-        "transcoder.ProfileStatus": {
-            "type": "string",
-            "enum": [
-                "healthy",
-                "unhealthy"
-            ],
-            "x-enum-varnames": [
-                "ProfileStatusHealthy",
-                "ProfileStatusUnhealthy"
-            ]
-        },
-        "transcoder.RuntimeStatus": {
-            "type": "object",
-            "properties": {
-                "profiles": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/transcoder.ProfileSnapshot"
-                    }
+                    "$ref": "#/definitions/transcoder.ProcessStatus"
                 }
             }
         },

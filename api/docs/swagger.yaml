@@ -629,8 +629,6 @@ definitions:
     type: object
   domain.EventType:
     enum:
-    - session.opened
-    - session.closed
     - stream.created
     - stream.updated
     - stream.started
@@ -665,6 +663,8 @@ definitions:
     - template.deleted
     - stream.runtime_created
     - stream.runtime_expired
+    - session.opened
+    - session.closed
     type: string
     x-enum-comments:
       EventDVRSegmentPruned: retention loop deleted an aged-out segment
@@ -681,8 +681,6 @@ definitions:
       EventPushStarted: dialing target, pre-handshake
       EventStreamUpdated: PUT /streams/{code} on existing record
     x-enum-descriptions:
-    - ""
-    - ""
     - ""
     - PUT /streams/{code} on existing record
     - ""
@@ -717,9 +715,9 @@ definitions:
     - ""
     - ""
     - ""
+    - ""
+    - ""
     x-enum-varnames:
-    - EventSessionOpened
-    - EventSessionClosed
     - EventStreamCreated
     - EventStreamUpdated
     - EventStreamStarted
@@ -754,6 +752,8 @@ definitions:
     - EventTemplateDeleted
     - EventStreamRuntimeCreated
     - EventStreamRuntimeExpired
+    - EventSessionOpened
+    - EventSessionClosed
   domain.GlobalConfig:
     properties:
       buffer:
@@ -2029,35 +2029,35 @@ definitions:
           $ref: '#/definitions/publisher.PushSnapshot'
         type: array
     type: object
-  transcoder.ProfileSnapshot:
-    properties:
-      errors:
-        items:
-          $ref: '#/definitions/domain.ErrorEntry'
-        type: array
-      index:
-        type: integer
-      restart_count:
-        type: integer
-      status:
-        $ref: '#/definitions/transcoder.ProfileStatus'
-      track:
-        type: string
-    type: object
-  transcoder.ProfileStatus:
+  transcoder.ProcessStatus:
     enum:
     - healthy
     - unhealthy
     type: string
     x-enum-varnames:
-    - ProfileStatusHealthy
-    - ProfileStatusUnhealthy
+    - ProcessStatusHealthy
+    - ProcessStatusUnhealthy
+  transcoder.RenditionSnapshot:
+    properties:
+      index:
+        type: integer
+      track:
+        type: string
+    type: object
   transcoder.RuntimeStatus:
     properties:
-      profiles:
+      errors:
         items:
-          $ref: '#/definitions/transcoder.ProfileSnapshot'
+          $ref: '#/definitions/domain.ErrorEntry'
         type: array
+      renditions:
+        items:
+          $ref: '#/definitions/transcoder.RenditionSnapshot'
+        type: array
+      restart_count:
+        type: integer
+      status:
+        $ref: '#/definitions/transcoder.ProcessStatus'
     type: object
   version.Info:
     properties:
