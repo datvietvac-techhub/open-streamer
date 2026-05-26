@@ -6,8 +6,8 @@
 #
 #   1. Standalone (easiest — for end users):
 #        curl -fsSL <raw-url>/build/install.sh -o install.sh
-#        sudo bash install.sh            # downloads the LATEST release
-#        sudo bash install.sh v4.0.0     # downloads a specific tag
+#        sudo bash install.sh            # prompts for a release tag (empty = latest)
+#        sudo bash install.sh v4.0.0     # installs a specific tag, no prompt
 #      Downloads the release archive from GitHub, verifies its SHA256, then
 #      installs. No Go, no repo checkout needed.
 #
@@ -279,7 +279,18 @@ cmd_install() {
   else
     detect_arch; setup_downloader
     local tag="$TAG"
-    if [[ -z "$tag" ]]; then resolve_latest_tag; tag="$TAG"; log "latest release: $tag"; fi
+    if [[ -z "$tag" ]]; then
+      # No tag on the command line: ask the operator rather than silently
+      # picking a version. Empty answer falls back to the latest release.
+      if [[ -t 0 ]]; then
+        read -r -p "Release tag to install (e.g. v4.0.0; leave empty for the latest): " tag
+      else
+        err "no release tag given and not running interactively — pass one explicitly:"
+        err "  $0 v4.0.0        (available tags: ${GITHUB}/releases)"
+        exit 1
+      fi
+    fi
+    if [[ -z "$tag" ]]; then resolve_latest_tag; tag="$TAG"; log "using latest release: $tag"; fi
     [[ "$tag" =~ ^v ]] || tag="v$tag"
     fetch_release "$tag"
   fi
@@ -342,8 +353,8 @@ usage() {
 Open Streamer installer (repo: ${REPO})
 
 Usage:
-  sudo bash install.sh            install/upgrade to the LATEST release (downloads)
-  sudo bash install.sh vX.Y.Z     install/upgrade to a specific tag (downloads)
+  sudo bash install.sh            ask for a release tag (empty = latest), then download + install
+  sudo bash install.sh vX.Y.Z     download + install a specific tag (no prompt)
   sudo ./build/install.sh         install from the current extracted archive / checkout
   sudo ./build/install.sh --local DIR    install from an extracted archive at DIR
   sudo ./build/install.sh uninstall      stop + remove service, binary, transcoder
