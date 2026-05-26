@@ -1,116 +1,144 @@
 #!/usr/bin/env bash
-# Install Open Streamer as a systemd service on Linux.
+# Open Streamer installer — ONE script to install/upgrade (or remove) the
+# server + native transcoder as a systemd service on Linux.
 #
-# Two supported layouts (auto-detected from script location):
+# It runs three ways, auto-detected:
 #
-#   1. Release archive (production deploy — no Go required):
-#        open-streamer-<ver>-linux-<arch>/
-#        ├── bin/open-streamer
-#        ├── build/install.sh         ← you are here
-#        └── build/open-streamer.service
+#   1. Standalone (easiest — for end users):
+#        curl -fsSL <raw-url>/build/install.sh -o install.sh
+#        sudo bash install.sh            # downloads the LATEST release
+#        sudo bash install.sh v4.0.0     # downloads a specific tag
+#      Downloads the release archive from GitHub, verifies its SHA256, then
+#      installs. No Go, no repo checkout needed.
 #
-#      Download the archive from https://github.com/ntt0601zcoder/open-streamer/releases,
-#      extract, then: sudo build/install.sh
+#   2. Inside an extracted release archive or a git checkout that already
+#      has bin/open-streamer (e.g. after `make build`):
+#        sudo ./build/install.sh         # installs what's already on disk
 #
-#   2. Git checkout (local install on a dev machine with Go installed):
-#        open-streamer/
-#        ├── bin/open-streamer        ← built via `make build` first
-#        ├── build/install.sh
-#        └── build/open-streamer.service
+#   3. From an explicit directory:
+#        sudo ./build/install.sh --local /path/to/extracted-archive
 #
-# Usage:
-#   sudo ./build/install.sh           # install or upgrade in place
-#   sudo ./build/install.sh uninstall # stop, disable, remove binary + service + user
+# Other commands:
+#   sudo ./build/install.sh uninstall    # stop + remove service, binary, transcoder
+#   sudo ./build/install.sh status       # systemctl status
+#        ./build/install.sh --help
 #
-# Idempotent: safe to re-run to upgrade the binary. Data dir is never touched.
+# Override the download repo:  OPEN_STREAMER_REPO=owner/name sudo -E bash install.sh
+#
+# Idempotent: safe to re-run to upgrade. The data dir (/var/lib/open-streamer —
+# config + DVR) is preserved across upgrades and kept on uninstall.
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN_SRC="${REPO_ROOT}/bin/open-streamer"
-UNIT_SRC="${REPO_ROOT}/build/open-streamer.service"
+# ── Config ───────────────────────────────────────────────────────────────────
+REPO="${OPEN_STREAMER_REPO:-datvietvac-techhub/open-streamer}"
+GITHUB="https://github.com/${REPO}"
+API="https://api.github.com/repos/${REPO}"
 
 BIN_DST="/usr/local/bin/open-streamer"
 UNIT_DST="/etc/systemd/system/open-streamer.service"
 DATA_DIR="/var/lib/open-streamer"
 SERVICE_USER="open-streamer"
 SERVICE_NAME="open-streamer"
+OUTPUT_SUBDIRS=("hls" "dash" "dvr")
 
-# Native transcoder subprocess + bundled libav 8 .so files. The
-# `transcoder/` sub-tree only exists in release archives that
-# scripts/build-dev.sh produced AFTER `make build-transcoder-linux` —
-# absent when an operator builds the main binary alone. Skip silently
-# in that case; transcoded streams will refuse to start with
-# ErrNotImplemented but passthrough streams keep working.
-TRANSCODER_SRC_DIR="${REPO_ROOT}/transcoder"
+# Native transcoder subprocess + bundled libav .so files install here. They
+# ship only in the linux/amd64 archive (bin/open-streamer-transcoder + lib/).
 TRANSCODER_DST_DIR="/opt/open-streamer-native"
 TRANSCODER_BIN_LINK="/usr/local/bin/open-streamer-transcoder"
 TRANSCODER_DROPIN_DIR="/etc/systemd/system/open-streamer.service.d"
 TRANSCODER_DROPIN_FILE="${TRANSCODER_DROPIN_DIR}/native-transcoder.conf"
 
-# Output sub-directories under DATA_DIR. Default GlobalConfig points to
-# /out/{hls,dash,dvr}, but those are not writable by the service user. We
-# create these so users can repoint the config to /var/lib/open-streamer/...
-# via REST without hitting permission errors first.
-OUTPUT_SUBDIRS=("hls" "dash" "dvr")
+# Globals filled in at runtime.
+ARCH=""; SRC=""; TAG=""; LOCAL_DIR=""; CMD="install"
+WORK=""; CLEANUP_WORK=0
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MAYBE_ROOT="$(dirname "$SCRIPT_DIR")"   # parent of build/ — a checkout/archive root
 
 log()  { printf '\033[36m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[warn]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[31m[error]\033[0m %s\n' "$*" >&2; }
 
-require_root() {
-  if [[ $EUID -ne 0 ]]; then
-    err "must run as root (use sudo)"
-    exit 1
+# ── Preconditions ─────────────────────────────────────────────────────────────
+require_root()    { [[ $EUID -eq 0 ]] || { err "must run as root (use sudo)"; exit 1; }; }
+require_linux()   { [[ "$(uname -s)" == "Linux" ]] || { err "this installer only supports Linux; on other OSes run ./bin/open-streamer directly"; exit 1; }; }
+require_systemd() { command -v systemctl >/dev/null 2>&1 || { err "systemctl not found — this installer requires systemd"; exit 1; }; }
+
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)  ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) err "unsupported arch: $(uname -m)"; exit 1 ;;
+  esac
+}
+
+# Pick curl or wget once.
+setup_downloader() {
+  if command -v curl >/dev/null 2>&1; then
+    dl()  { curl -fL  --progress-bar -o "$1" "$2"; }
+    dlq() { curl -fsSL -o "$1" "$2"; }
+    dls() { curl -fsSL "$1"; }
+  elif command -v wget >/dev/null 2>&1; then
+    dl()  { wget --show-progress -qO "$1" "$2"; }
+    dlq() { wget -qO "$1" "$2"; }
+    dls() { wget -qO- "$1"; }
+  else
+    err "need either curl or wget to download a release"; exit 1
   fi
 }
 
-require_linux() {
-  if [[ "$(uname -s)" != "Linux" ]]; then
-    err "systemd installer only supports Linux."
-    err "On other platforms, run the binary directly: ./bin/open-streamer"
-    exit 1
-  fi
+# Resolve the latest release tag via the GitHub API (no jq dependency).
+resolve_latest_tag() {
+  local json
+  json="$(dls "${API}/releases/latest")" || { err "could not query latest release at ${API}/releases/latest"; exit 1; }
+  TAG="$(printf '%s' "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+  [[ -n "$TAG" ]] || { err "could not parse the latest tag — pass one explicitly, e.g. $0 v4.0.0"; exit 1; }
 }
 
-require_systemd() {
-  if ! command -v systemctl >/dev/null 2>&1; then
-    err "systemctl not found — this installer requires systemd."
-    exit 1
+# Download + verify + extract the given tag. Sets SRC to the extracted dir.
+fetch_release() {
+  local tag="$1"
+  local archive="open-streamer-${tag}-linux-${ARCH}.tar.gz"
+  local url="${GITHUB}/releases/download/${tag}/${archive}"
+  local sums_url="${GITHUB}/releases/download/${tag}/SHA256SUMS"
+
+  WORK="$(mktemp -d -t "open-streamer-${tag}.XXXXXX")"; CLEANUP_WORK=1
+  log "downloading ${url}"
+  dl "${WORK}/${archive}" "${url}" || {
+    err "download failed — does ${GITHUB}/releases/tag/${tag} have a linux/${ARCH} archive?"; exit 1; }
+
+  log "verifying checksum"
+  if dlq "${WORK}/SHA256SUMS" "${sums_url}" 2>/dev/null; then
+    local expected actual
+    expected="$(awk -v f="$archive" '$2==f {print $1}' "${WORK}/SHA256SUMS")"
+    if [[ -n "$expected" ]]; then
+      actual="$(sha256sum "${WORK}/${archive}" | awk '{print $1}')"
+      [[ "$expected" == "$actual" ]] || { err "checksum mismatch (expected $expected, got $actual)"; exit 1; }
+      log "checksum OK"
+    else
+      warn "no SHA256SUMS entry for ${archive} — skipping verification"
+    fi
+  else
+    warn "SHA256SUMS not published — skipping verification"
   fi
+
+  log "extracting"
+  tar -xzf "${WORK}/${archive}" -C "${WORK}"
+  SRC="${WORK}/open-streamer-linux-${ARCH}"
+  [[ -d "$SRC" ]] || SRC="$(find "$WORK" -mindepth 1 -maxdepth 1 -type d ! -name '*.tar*' | head -n1)"
 }
 
-require_binary() {
-  if [[ ! -f "$BIN_SRC" ]]; then
-    err "binary not found at: $BIN_SRC"
-    err ""
-    err "If you extracted a release archive, the layout is wrong — re-extract or"
-    err "redownload from: https://github.com/ntt0601zcoder/open-streamer/releases"
-    err ""
-    err "If this is a git checkout, build it first:    make build"
-    exit 1
-  fi
-  if [[ ! -x "$BIN_SRC" ]]; then
-    chmod +x "$BIN_SRC"
-  fi
-  if [[ ! -f "$UNIT_SRC" ]]; then
-    err "systemd unit not found at: $UNIT_SRC"
-    exit 1
-  fi
-}
-
+# ── Install steps (operate on $SRC) ─────────────────────────────────────────
 ensure_user() {
-  if id -u "$SERVICE_USER" >/dev/null 2>&1; then
-    return
-  fi
+  id -u "$SERVICE_USER" >/dev/null 2>&1 && return
   log "creating system user: $SERVICE_USER"
   useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
 }
 
 ensure_gpu_groups() {
-  # Group membership is the standard mechanism to grant access to GPU device
-  # nodes (NVIDIA exposes /dev/nvidia* via the `video` group; Intel/AMD render
-  # nodes via the `render` group). Add the service user to whichever exist.
+  # GPU device nodes are gated by group membership (NVIDIA → video, render
+  # nodes → render). Add the service user to whichever groups exist.
   for grp in video render; do
     if getent group "$grp" >/dev/null 2>&1; then
       if ! id -nG "$SERVICE_USER" | tr ' ' '\n' | grep -qx "$grp"; then
@@ -131,47 +159,84 @@ ensure_data_dirs() {
 
 stop_if_running() {
   if systemctl is-active --quiet "$SERVICE_NAME"; then
-    log "stopping running service before binary replace"
+    log "stopping running service before replace"
     systemctl stop "$SERVICE_NAME"
   fi
 }
 
 install_binary() {
-  log "installing binary → $BIN_DST"
-  install -m 0755 "$BIN_SRC" "$BIN_DST"
+  log "installing server binary → $BIN_DST"
+  install -m 0755 "$SRC/bin/open-streamer" "$BIN_DST"
 }
 
 install_unit() {
+  # Unit is embedded so the script is self-contained regardless of $SRC.
   log "installing systemd unit → $UNIT_DST"
-  install -m 0644 "$UNIT_SRC" "$UNIT_DST"
+  cat >"$UNIT_DST" <<'EOF'
+[Unit]
+Description=Open Streamer — live video media server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=open-streamer
+Group=open-streamer
+WorkingDirectory=/var/lib/open-streamer
+Environment=OPEN_STREAMER_STORAGE_DRIVER=json
+Environment=OPEN_STREAMER_STORAGE_JSON_DIR=/var/lib/open-streamer
+ExecStart=/usr/local/bin/open-streamer
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65536
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/open-streamer
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "$UNIT_DST"
   systemctl daemon-reload
 }
 
-install_transcoder_bundle() {
-  if [[ ! -d "$TRANSCODER_SRC_DIR" ]]; then
-    log "no native transcoder bundle in archive — skipping (transcoded streams will return ErrNotImplemented)"
+install_transcoder() {
+  # The native transcoder + bundled libav 8 .so ship only in the linux/amd64
+  # archive, laid out as bin/open-streamer-transcoder + lib/. When absent
+  # (other arches, or a server-only build) transcoded streams return
+  # ErrNotImplemented; passthrough/copy streams keep working.
+  if [[ ! -f "$SRC/bin/open-streamer-transcoder" || ! -d "$SRC/lib" ]]; then
+    log "no native transcoder in this archive — passthrough only (transcoded streams → ErrNotImplemented)"
     rm -f "$TRANSCODER_BIN_LINK" "$TRANSCODER_DROPIN_FILE" 2>/dev/null || true
     return
   fi
   log "installing native transcoder → $TRANSCODER_DST_DIR"
   install -d -m 0755 "$TRANSCODER_DST_DIR/bin" "$TRANSCODER_DST_DIR/lib"
-  install -m 0755 "$TRANSCODER_SRC_DIR/bin/open-streamer-transcoder" \
-                  "$TRANSCODER_DST_DIR/bin/open-streamer-transcoder"
-  # Wipe + reinstall lib/ so removed deps in newer bundles don't linger.
-  rm -rf "$TRANSCODER_DST_DIR/lib/"*
-  cp -a "$TRANSCODER_SRC_DIR/lib/." "$TRANSCODER_DST_DIR/lib/"
+  install -m 0755 "$SRC/bin/open-streamer-transcoder" "$TRANSCODER_DST_DIR/bin/open-streamer-transcoder"
+  # Wipe + reinstall lib/ so deps dropped in a newer bundle don't linger.
+  rm -rf "${TRANSCODER_DST_DIR:?}/lib/"*
+  cp -a "$SRC/lib/." "$TRANSCODER_DST_DIR/lib/"
 
-  # Service.resolveBinaryPath() looks next to the main binary first,
-  # then $PATH. Symlink so the transcoder is reachable via /usr/local/
-  # bin without polluting it with libav-linked binaries (the actual
-  # .so files live under /opt/open-streamer-native/lib/).
+  # Service.resolveBinaryPath() looks next to the main binary, then $PATH.
+  # Symlink so the transcoder is reachable via /usr/local/bin without putting
+  # the libav-linked binary (and its .so) on the default loader path.
   ln -sf "$TRANSCODER_DST_DIR/bin/open-streamer-transcoder" "$TRANSCODER_BIN_LINK"
 
-  # Systemd drop-in: scope LD_LIBRARY_PATH to the open-streamer
-  # process so the spawned subprocess finds the bundled libav 8 .so
-  # files instead of the host's libav 6.1 (Ubuntu 24.04). The main
-  # binary is pure Go — no libav linkage — so this only matters when
-  # the supervisor execs the subprocess.
+  # Scope LD_LIBRARY_PATH to the service so the spawned subprocess loads the
+  # bundled libav 8 instead of the host's (often older) system libav. The main
+  # binary is pure Go — no libav linkage — so this only matters at exec time.
   install -d -m 0755 "$TRANSCODER_DROPIN_DIR"
   cat >"$TRANSCODER_DROPIN_FILE" <<EOF
 [Service]
@@ -182,44 +247,46 @@ EOF
 }
 
 start_and_verify() {
-  log "enabling and starting service"
+  log "enabling + starting service"
   systemctl enable "$SERVICE_NAME" >/dev/null
   systemctl start "$SERVICE_NAME"
-
-  # Give it a moment to settle, then check it's actually running.
   sleep 2
   if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    err "service failed to start"
-    err "investigate with: journalctl -u $SERVICE_NAME -n 80 --no-pager"
+    err "service failed to start — inspect: journalctl -u $SERVICE_NAME -n 80 --no-pager"
     exit 1
   fi
   log "service is active"
 }
 
-print_summary() {
-  log "installation complete"
-  log "  status:  systemctl status $SERVICE_NAME"
-  log "  logs:    journalctl -u $SERVICE_NAME -f"
-  log "  config:  curl http://localhost:8080/config | jq"
-  log "  data:    $DATA_DIR  (config, hls/, dash/, dvr/)"
-}
-
 print_version() {
-  # VERSION file is included in release archives. Absent in git-checkout layout.
-  local vfile="${REPO_ROOT}/VERSION"
-  if [[ -f "$vfile" ]]; then
-    log "installing from release archive:"
-    sed 's/^/  /' "$vfile" | while read -r line; do log "$line"; done
-  else
-    log "installing from git checkout (no VERSION file)"
-  fi
+  [[ -f "$SRC/VERSION" ]] || return 0
+  log "release metadata:"
+  sed 's/^/  /' "$SRC/VERSION"
 }
 
+# ── Commands ──────────────────────────────────────────────────────────────────
 cmd_install() {
-  require_root
-  require_linux
-  require_systemd
-  require_binary
+  require_root; require_linux; require_systemd
+
+  if [[ -n "$LOCAL_DIR" ]]; then
+    SRC="$LOCAL_DIR"
+    log "installing from --local: $SRC"
+  elif [[ -z "$TAG" && -f "$MAYBE_ROOT/bin/open-streamer" ]]; then
+    # Running from inside an extracted archive / git checkout: install it
+    # rather than downloading. An explicit TAG always forces a download.
+    SRC="$MAYBE_ROOT"
+    log "installing from local layout: $SRC"
+  else
+    detect_arch; setup_downloader
+    local tag="$TAG"
+    if [[ -z "$tag" ]]; then resolve_latest_tag; tag="$TAG"; log "latest release: $tag"; fi
+    [[ "$tag" =~ ^v ]] || tag="v$tag"
+    fetch_release "$tag"
+  fi
+
+  [[ -n "$SRC" && -f "$SRC/bin/open-streamer" ]] || {
+    err "bin/open-streamer not found under: ${SRC:-<unset>}"; exit 1; }
+  [[ -x "$SRC/bin/open-streamer" ]] || chmod +x "$SRC/bin/open-streamer"
 
   print_version
   ensure_user
@@ -228,71 +295,84 @@ cmd_install() {
   stop_if_running
   install_binary
   install_unit
-  install_transcoder_bundle
+  install_transcoder
   start_and_verify
-  print_summary
+
+  log "installation complete"
+  log "  status: systemctl status $SERVICE_NAME"
+  log "  logs:   journalctl -u $SERVICE_NAME -f"
+  log "  api:    curl http://localhost:8080/config | jq"
+  log "  data:   $DATA_DIR  (config, hls/, dash/, dvr/)"
 }
 
 cmd_uninstall() {
-  require_root
-  require_linux
-  require_systemd
+  require_root; require_linux; require_systemd
 
   if [[ -f "$UNIT_DST" ]]; then
-    log "stopping and disabling $SERVICE_NAME"
+    log "stopping + disabling $SERVICE_NAME"
     systemctl disable --now "$SERVICE_NAME" || true
     rm -f "$UNIT_DST"
     systemctl daemon-reload
   fi
+  [[ -f "$BIN_DST" ]] && { log "removing $BIN_DST"; rm -f "$BIN_DST"; }
 
-  if [[ -f "$BIN_DST" ]]; then
-    log "removing binary: $BIN_DST"
-    rm -f "$BIN_DST"
-  fi
-
-  # Native transcoder cleanup. Drop-in must go before daemon-reload.
-  if [[ -f "$TRANSCODER_DROPIN_FILE" ]]; then
-    rm -f "$TRANSCODER_DROPIN_FILE"
-    systemctl daemon-reload
-  fi
+  # Native transcoder cleanup — drop-in removed before daemon-reload.
+  if [[ -f "$TRANSCODER_DROPIN_FILE" ]]; then rm -f "$TRANSCODER_DROPIN_FILE"; systemctl daemon-reload; fi
   rm -f "$TRANSCODER_BIN_LINK"
-  if [[ -d "$TRANSCODER_DST_DIR" ]]; then
-    log "removing native transcoder bundle: $TRANSCODER_DST_DIR"
-    rm -rf "$TRANSCODER_DST_DIR"
-  fi
+  [[ -d "$TRANSCODER_DST_DIR" ]] && { log "removing $TRANSCODER_DST_DIR"; rm -rf "$TRANSCODER_DST_DIR"; }
 
   if id -u "$SERVICE_USER" >/dev/null 2>&1; then
-    # Kill any leftover processes owned by the user before deleting the account.
     pkill -u "$SERVICE_USER" 2>/dev/null || true
     sleep 1
     if userdel "$SERVICE_USER" 2>/dev/null; then
       log "removed service user: $SERVICE_USER"
     else
-      warn "could not remove user $SERVICE_USER (may have running processes); skip"
+      warn "could not remove user $SERVICE_USER (leftover processes?) — skipped"
     fi
   fi
 
-  log "uninstalled service. Data dir kept at: $DATA_DIR"
-  log "remove data manually if desired:  rm -rf $DATA_DIR"
+  log "uninstalled. Data kept at: $DATA_DIR"
+  log "purge data manually if desired: rm -rf $DATA_DIR"
 }
 
-cmd_status() {
-  require_systemd
-  systemctl --no-pager status "$SERVICE_NAME" || true
+cmd_status() { require_systemd; systemctl --no-pager status "$SERVICE_NAME" || true; }
+
+usage() {
+  cat <<EOF
+Open Streamer installer (repo: ${REPO})
+
+Usage:
+  sudo bash install.sh            install/upgrade to the LATEST release (downloads)
+  sudo bash install.sh vX.Y.Z     install/upgrade to a specific tag (downloads)
+  sudo ./build/install.sh         install from the current extracted archive / checkout
+  sudo ./build/install.sh --local DIR    install from an extracted archive at DIR
+  sudo ./build/install.sh uninstall      stop + remove service, binary, transcoder
+  sudo ./build/install.sh status         systemctl status
+       ./build/install.sh --help
+
+Env:
+  OPEN_STREAMER_REPO=owner/name   override the download repo (use sudo -E)
+
+Releases: ${GITHUB}/releases
+EOF
 }
 
-case "${1:-install}" in
+# ── Arg parsing ────────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    install|uninstall|status) CMD="$1"; shift ;;
+    --local) LOCAL_DIR="${2:?--local requires a directory}"; shift 2 ;;
+    -h|--help|help) usage; exit 0 ;;
+    v[0-9]*|[0-9]*) TAG="$1"; shift ;;
+    *) err "unknown argument: $1"; usage; exit 1 ;;
+  esac
+done
+
+trap '[[ "$CLEANUP_WORK" == 1 && -n "$WORK" ]] && rm -rf "$WORK"' EXIT
+
+case "$CMD" in
   install)   cmd_install ;;
   uninstall) cmd_uninstall ;;
   status)    cmd_status ;;
-  -h|--help|help)
-    # Print the leading comment block (everything from line 2 up to the first
-    # blank line that follows a non-comment line, i.e. before `set -euo`).
-    awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
-    ;;
-  *)
-    err "unknown command: $1"
-    err "usage: $0 [install|uninstall|status|help]"
-    exit 1
-    ;;
+  *)         err "unknown command: $CMD"; usage; exit 1 ;;
 esac
