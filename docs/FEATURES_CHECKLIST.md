@@ -337,7 +337,6 @@ Single source of truth: [internal/domain/defaults.go](../internal/domain/default
 | Audio | `DefaultAudioBitrateK=128` |
 | Listeners | `DefaultListenHost="0.0.0.0"`, `DefaultRTMPTimeoutSec=10`, `DefaultRTSPTimeoutSec=10`, `DefaultSRTLatencyMS=120` |
 | Ingestor | `DefaultHLSPlaylistTimeoutSec=15`, `DefaultHLSSegmentTimeoutSec=60`, `DefaultHLSMaxSegmentBuffer=8` |
-| Transcoder | `DefaultFFmpegPath="ffmpeg"` |
 
 ---
 
@@ -456,7 +455,7 @@ ABR (NVENC / libx264) and HLS+DASH multi-protocol phases. See
 
 ## Operational Notes
 
-- **Transcoding links libavcodec.** The `open-streamer-transcoder` binary is built against libav (see `Dockerfile.builder`); its available encoders are fixed at build time. `ffmpeg_path` is only for auxiliary tasks (e.g. thumbnails).
+- **Transcoding links libavcodec.** The `open-streamer-transcoder` binary is built against libav (see `Dockerfile.builder`); its available encoders are fixed at build time.
 - **HLS and DASH dirs must differ** when both publishers are active.
 - **DVR is per-stream opt-in.** No global enable.
 - **Failover timestamp jumps** produce `#EXT-X-DISCONTINUITY` in HLS and are logged at debug level.

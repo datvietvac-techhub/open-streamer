@@ -56,7 +56,6 @@ global_config:
   publisher: ...     # HLS / DASH directories + segment params
   listeners: ...     # Network listeners (RTMP / RTSP / SRT)
   ingestor: ...      # Server-wide ingest settings
-  transcoder: ...    # ffmpeg binary path (auxiliary tasks)
   hooks: ...         # Worker pool
   sessions: ...      # Play-sessions tracker (HLS/DASH/RTMP/SRT/RTSP viewers)
   watermarks: ...    # Watermark asset library directory
@@ -154,17 +153,10 @@ Server-wide. Per-input HLS playlist / segment timeouts derive from `inputs[].net
 
 ### 2.7 transcoder
 
-```yaml
-transcoder:
-  ffmpeg_path:  ""           # ffmpeg binary for auxiliary tasks (e.g. thumbnails). "" = lookup via $PATH.
-```
-
+There is no global `transcoder:` config section — transcoder settings are
+per-stream (`Stream.Transcoder`: ladder, codec, HW backend, GOP, watermark).
 The transcoder runs in-process via libavcodec in a per-stream
-`open-streamer-transcoder` subprocess — one decode fans out to N renditions,
-so there is no per-process topology to choose. `ffmpeg_path` points at an
-ffmpeg binary the server uses only for auxiliary tasks (e.g. thumbnail
-capture); the transcode pipeline itself links libavcodec and never shells
-out. Changing it hot-restarts running streams.
+`open-streamer-transcoder` subprocess (one decode → N renditions).
 
 ### 2.8 hooks
 
@@ -589,7 +581,6 @@ Single source of truth: [internal/domain/defaults.go](../internal/domain/default
 | `timeline.Normaliser.MaxAheadMs` (server-internal) | 0 | **0 = drop semantics disabled.** Setting >0 makes the Normaliser drop incoming AV packets whose proposed output PTS sits more than `N` ms ahead of `now − wallOrigin`. Disabled by default because the drop has a stuck-state pathology when sustained drift exceeds the cap (drift never decreases for real-time input → every subsequent packet drops). DASH packager's `behindPrevSegEnd` pacing gate compensates downstream instead |
 | `timeline.Normaliser.MaxBehindMs` (server-internal) | 3000 | Hard-re-anchor a track when the proposed output sits more than `N` ms behind wallclock. Enabled by default at 3 s — re-anchoring jumps the track FORWARD onto wallclock so there is no stuck-state pathology (unlike MaxAheadMs). Catches the long-runtime A/V split when one track seeds late or pauses while the other keeps flowing (e.g. RTSP relays whose audio appeared minutes after stream start). Set to 0 to disable |
 | `timeline.Normaliser.CrossTrackSnapMs` (server-internal) | 1000 | When a track seeds and the OTHER track has already moved more than this many ms of output PTS, snap this track's `outputAnchor` onto the other's `lastOutputDts` so V and A start in lockstep |
-| `transcoder.ffmpeg_path` | "ffmpeg" | ffmpeg binary for auxiliary tasks (e.g. thumbnails) |
 | `transcoder.video.bitrate_k` | 2500 | — |
 | `transcoder.video.resize_mode` | "pad" | — |
 | `transcoder.audio.codec` | "aac" | — |

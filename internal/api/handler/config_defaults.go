@@ -70,7 +70,6 @@ type configDefaultsResponse struct {
 	} `json:"dvr"`
 
 	Transcoder struct {
-		FFmpegPath string `json:"ffmpeg_path"`
 		Video      struct {
 			BitrateK   int               `json:"bitrate_k"`
 			ResizeMode domain.ResizeMode `json:"resize_mode"`
@@ -221,7 +220,6 @@ func buildConfigDefaults() configDefaultsResponse {
 	resp.DVR.SegmentDuration = domain.DefaultDVRSegmentDuration
 	resp.DVR.StoragePathTemplate = domain.DefaultDVRRoot + "/{streamCode}"
 
-	resp.Transcoder.FFmpegPath = domain.DefaultFFmpegPath
 	resp.Transcoder.Video.BitrateK = domain.DefaultVideoBitrateK
 	resp.Transcoder.Video.ResizeMode = domain.ResizeModePad
 	resp.Transcoder.Video.Codec = string(domain.VideoCodecH264)

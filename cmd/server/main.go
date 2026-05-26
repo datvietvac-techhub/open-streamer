@@ -186,7 +186,6 @@ func provideSubConfigs(i *do.RootScope, gcfg *domain.GlobalConfig) {
 	do.ProvideValue(i, deref(gcfg.Listeners))
 	do.ProvideValue(i, deref(gcfg.Ingestor))
 	do.ProvideValue(i, deref(gcfg.Buffer))
-	do.ProvideValue(i, deref(gcfg.Transcoder))
 	do.ProvideValue(i, deref(gcfg.Publisher))
 	do.ProvideValue(i, deref(gcfg.Manager))
 	do.ProvideValue(i, deref(gcfg.Hooks))

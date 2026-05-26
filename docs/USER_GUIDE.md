@@ -59,10 +59,8 @@ bundles and the builder image (`Dockerfile.builder`) ship:
 - **GPU / extra**: `h264_nvenc` / `hevc_nvenc` (NVENC), `libx265`,
   `libsvtav1`, `libopus`, `libmp3lame`, `ac3`, HLS / DASH muxers
 
-`transcoder.ffmpeg_path` points at an ffmpeg binary used only for auxiliary
-tasks (e.g. thumbnail capture); the transcode pipeline itself never shells
-out. The `POST /api/v1/config/transcoder/probe` endpoint (UI "Test" button)
-is a no-op that always reports ok.
+The `POST /api/v1/config/transcoder/probe` endpoint (UI "Test" button) is a
+no-op that always reports ok.
 
 ---
 

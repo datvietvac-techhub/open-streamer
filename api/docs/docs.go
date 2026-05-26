@@ -2435,14 +2435,6 @@ const docTemplate = `{
                 }
             }
         },
-        "config.TranscoderConfig": {
-            "type": "object",
-            "properties": {
-                "ffmpeg_path": {
-                    "type": "string"
-                }
-            }
-        },
         "config.WatermarksConfig": {
             "type": "object",
             "properties": {
@@ -2542,6 +2534,8 @@ const docTemplate = `{
         "domain.EventType": {
             "type": "string",
             "enum": [
+                "session.opened",
+                "session.closed",
                 "stream.created",
                 "stream.updated",
                 "stream.started",
@@ -2575,9 +2569,7 @@ const docTemplate = `{
                 "template.updated",
                 "template.deleted",
                 "stream.runtime_created",
-                "stream.runtime_expired",
-                "session.opened",
-                "session.closed"
+                "stream.runtime_expired"
             ],
             "x-enum-comments": {
                 "EventDVRSegmentPruned": "retention loop deleted an aged-out segment",
@@ -2594,6 +2586,8 @@ const docTemplate = `{
                 "EventStreamUpdated": "PUT /streams/{code} on existing record"
             },
             "x-enum-descriptions": [
+                "",
+                "",
                 "",
                 "PUT /streams/{code} on existing record",
                 "",
@@ -2627,11 +2621,11 @@ const docTemplate = `{
                 "",
                 "",
                 "",
-                "",
-                "",
                 ""
             ],
             "x-enum-varnames": [
+                "EventSessionOpened",
+                "EventSessionClosed",
                 "EventStreamCreated",
                 "EventStreamUpdated",
                 "EventStreamStarted",
@@ -2665,9 +2659,7 @@ const docTemplate = `{
                 "EventTemplateUpdated",
                 "EventTemplateDeleted",
                 "EventStreamRuntimeCreated",
-                "EventStreamRuntimeExpired",
-                "EventSessionOpened",
-                "EventSessionClosed"
+                "EventStreamRuntimeExpired"
             ]
         },
         "domain.GlobalConfig": {
@@ -2699,9 +2691,6 @@ const docTemplate = `{
                 },
                 "sessions": {
                     "$ref": "#/definitions/config.SessionsConfig"
-                },
-                "transcoder": {
-                    "$ref": "#/definitions/config.TranscoderConfig"
                 },
                 "watermarks": {
                     "$ref": "#/definitions/config.WatermarksConfig"
@@ -3795,9 +3784,6 @@ const docTemplate = `{
                                     "$ref": "#/definitions/domain.AudioCodec"
                                 }
                             }
-                        },
-                        "ffmpeg_path": {
-                            "type": "string"
                         },
                         "global": {
                             "type": "object",

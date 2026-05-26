@@ -13,10 +13,8 @@ import (
 // future in-process libav capability inventory could populate this.
 
 // probeRequest is the body shape for POST /config/transcoder/probe.
-// Path field kept for forward-compat with the UI; ignored server-side.
-type probeRequest struct {
-	FFmpegPath string `json:"ffmpeg_path"`
-}
+// The probe is a no-op, so the body is ignored.
+type probeRequest struct{}
 
 // probeStubResponse is the body returned by the no-op capability probe.
 type probeStubResponse struct {

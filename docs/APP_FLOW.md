@@ -476,7 +476,7 @@ crash), so degradation transitions are clean.
 
 ---
 
-## 6. Hot config update — transcoder.ffmpeg_path change
+## 6. Hot config update (POST /config)
 
 ```mermaid
 sequenceDiagram
@@ -484,34 +484,22 @@ sequenceDiagram
     participant Client
     participant API as ConfigHandler
     participant RTM as RuntimeManager
-    participant Tx as Transcoder
-    participant Coord as Coordinator
+    participant Svc as Target service
 
-    Client->>API: POST /config { transcoder.ffmpeg_path: ... }
+    Client->>API: POST /config { sessions.idle_timeout_sec: 30 }
     API->>API: deep-copy current + merge body
     API->>RTM: Apply(merged)
     RTM->>RTM: persist + diff(old, new)
-    RTM->>Tx: SetConfig(new) (hot-swap cache)
-
-    alt requires restart — ffmpeg_path changed
-        RTM->>Coord: RunningStreams returns codes
-        loop each running stream
-            RTM->>Coord: Stop code
-            RTM->>Coord: Start code with stream
-        end
-    end
-
+    RTM->>Svc: hot-apply each changed section (SetConfig / atomic swap)
     API-->>Client: 200 OK (new config)
 ```
 
 ```text
-1.  POST /api/v1/config { "transcoder": { "ffmpeg_path": "/usr/bin/ffmpeg" } }
+1.  POST /api/v1/config { "sessions": { "idle_timeout_sec": 30 } }
 
 2.  ConfigHandler.UpdateConfig:
     ├── deep-copy current GlobalConfig
     ├── json.Decode body onto copy → merged
-    ├── if transcoderPathChanged(current, merged):
-    │   └── validateTranscoderPath (probe binary)
     └── rtm.Apply(ctx, merged)
 
 3.  RuntimeManager.Apply:
@@ -519,25 +507,15 @@ sequenceDiagram
     ├── update m.current = merged
     └── m.diff(old, new)
 
-4.  RuntimeManager.diff:
-    ├── (other services diff first)
-    └── if transcoder config changed:
-        └── applyTranscoderChange(old, new)
-
-5.  applyTranscoderChange:
-    ├── transcoder.SetConfig(new)              (hot-swap cached cfg)
-    ├── if transcoderRequiresRestart(old, new):
-    │   ├── codes := coordinator.RunningStreams()
-    │   └── for each code: m.restartStream(code)
-    │       ├── repo.FindByCode(code)
-    │       ├── if disabled → skip
-    │       ├── coordinator.Stop(code)
-    │       └── coordinator.Start(code, stream)
-    └── else: log "no restart required"
+4.  RuntimeManager.diff: for each changed section, hot-apply via the
+    service — Sessions swaps an atomic.Pointer, the manager's packet-timeout
+    is an atomic, hooks rebuild their delivery workers. None of these bounce
+    running stream pipelines.
 ```
 
-Restart per stream takes ~2-3s (Stop teardown + Start fresh). Multiple
-streams restart in parallel (one goroutine each).
+Per-stream pipeline changes go through `PUT /streams/{code}` (§5), not the
+global config — that path's diff engine restarts only the components that
+actually changed.
 
 ---
 

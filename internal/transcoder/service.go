@@ -26,7 +26,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
 	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
 	"github.com/ntt0601zcoder/open-streamer/internal/domain"
 	"github.com/ntt0601zcoder/open-streamer/internal/events"
@@ -123,7 +122,6 @@ type streamWorker struct {
 // restarts per-stream transcoder subprocesses and reports their runtime
 // status to the coordinator and API handlers.
 type Service struct {
-	cfg     config.TranscoderConfig
 	buf     *buffer.Service
 	bus     events.Bus
 	m       *metrics.Metrics
@@ -139,13 +137,11 @@ type Service struct {
 
 // New creates a Service and registers it with the DI injector.
 func New(i do.Injector) (*Service, error) {
-	cfg := do.MustInvoke[config.TranscoderConfig](i)
 	buf := do.MustInvoke[*buffer.Service](i)
 	bus := do.MustInvoke[events.Bus](i)
 	m := do.MustInvoke[*metrics.Metrics](i)
 
 	return &Service{
-		cfg:               cfg,
 		buf:               buf,
 		bus:               bus,
 		m:                 m,
@@ -314,22 +310,6 @@ func (s *Service) dropHealthState(streamID domain.StreamCode) {
 	if cb != nil {
 		cb(streamID)
 	}
-}
-
-// SetConfig hot-swaps the cached transcoder config. The native runner
-// reads cfg on every Start, so updates take effect on the next stream
-// (or stop+start cycle for already-running streams).
-func (s *Service) SetConfig(cfg config.TranscoderConfig) {
-	s.mu.Lock()
-	s.cfg = cfg
-	s.mu.Unlock()
-}
-
-// Config returns a snapshot of the currently active transcoder config.
-func (s *Service) Config() config.TranscoderConfig {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.cfg
 }
 
 // Start launches the native transcoder subprocess for a stream and

@@ -91,15 +91,6 @@ type BufferConfig struct {
 	Capacity int `mapstructure:"capacity" json:"capacity" yaml:"capacity"`
 }
 
-// TranscoderConfig controls FFmpeg invocation. There is intentionally no
-// concurrency cap on the worker pool — every rendition spawns its own
-// FFmpeg process and the OS (rlimit / GPU encoder slots) is the natural
-// upper bound. Operators who need a soft cap should provision the host
-// accordingly rather than relying on application-level throttling.
-type TranscoderConfig struct {
-	FFmpegPath string `mapstructure:"ffmpeg_path" json:"ffmpeg_path" yaml:"ffmpeg_path"`
-}
-
 // PublisherConfig controls filesystem-based output delivery (HLS, DASH).
 // Live network listeners (RTSP, RTMP, SRT) are configured in ListenersConfig
 // because the same port serves both ingest and playback.
