@@ -115,7 +115,7 @@ jobs:
 
       - name: Log in to GHCR (pull builder image)
         if: matrix.os == 'linux' && matrix.arch == 'amd64'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
