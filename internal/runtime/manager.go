@@ -347,28 +347,6 @@ func (m *Manager) diff(old, new *domain.GlobalConfig) {
 	}
 }
 
-// restartStream stops the pipeline, reloads the persisted stream from
-// the repo (so any concurrent edit lands), and starts it back up. Skips
-// streams whose pipeline died between the snapshot and the restart, and
-// streams that have been disabled since.
-func (m *Manager) restartStream(ctx context.Context, code domain.StreamCode) {
-	stream, err := m.deps.StreamRepo.FindByCode(ctx, code)
-	if err != nil {
-		slog.Warn("runtime: skip restart, stream lookup failed",
-			"stream_code", code, "err", err)
-		return
-	}
-	if stream.Disabled {
-		slog.Info("runtime: skip restart, stream disabled", "stream_code", code)
-		return
-	}
-	m.deps.Coordinator.Stop(ctx, code)
-	if err := m.deps.Coordinator.Start(ctx, stream); err != nil {
-		slog.Warn("runtime: stream restart failed",
-			"stream_code", code, "err", err)
-	}
-}
-
 // rtmpListenerEnabled reports whether the shared RTMP listener should run.
 func rtmpListenerEnabled(l *config.ListenersConfig) bool {
 	return l != nil && l.RTMP.Enabled && l.RTMP.Port > 0
