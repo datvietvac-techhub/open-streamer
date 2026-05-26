@@ -89,17 +89,23 @@ func pickCUDAPixelFormat(pfs []astiav.PixelFormat) astiav.PixelFormat {
 // changes (input switch → new decoder → new frames ctx), mirroring how
 // Scaler rebuilds its sws context on a source-format change.
 type gpuScaler struct {
-	cuda   *cudaContext
-	dstW   int
-	dstH   int
-	wm     WatermarkConfig // optional overlay folded into the same graph
-	graph  *astiav.FilterGraph
-	src    *astiav.BuffersrcFilterContext
-	sink   *astiav.BuffersinkFilterContext
-	out    *astiav.Frame
-	srcW   int
-	srcH   int
-	closed bool
+	cuda  *cudaContext
+	dstW  int
+	dstH  int
+	wm    WatermarkConfig // optional overlay folded into the same graph
+	graph *astiav.FilterGraph
+	src   *astiav.BuffersrcFilterContext
+	sink  *astiav.BuffersinkFilterContext
+	out   *astiav.Frame
+	srcW  int
+	srcH  int
+	// needsRebuild forces the next Scale to rebuild the graph even when the
+	// source dimensions are unchanged. Set on an input switch: the new
+	// decoder allocates a fresh CUDA hw_frames_ctx, and the scale_cuda
+	// buffersrc is bound to one specific frames ctx — feeding it frames from
+	// a different pool (even at the same resolution) fails with EINVAL.
+	needsRebuild bool
+	closed       bool
 }
 
 // newGPUScaler constructs a GPU scaler targeting dstW x dstH. The filter
@@ -174,11 +180,13 @@ func (g *gpuScaler) Scale(in *astiav.Frame) (*astiav.Frame, error) {
 	return clone, nil
 }
 
-// ensureGraph (re)builds the scale_cuda graph when the source dims change
-// (or on first use). The source frame carries its hw_frames_ctx from the
-// decoder; we attach it to the buffersrc so scale_cuda runs on the GPU.
+// ensureGraph (re)builds the scale_cuda graph on first use, when the source
+// dims change, or when MarkSourceChanged flagged an input switch (the new
+// decoder's hw_frames_ctx must be rebound to the buffersrc). The source frame
+// carries its hw_frames_ctx from the decoder; we attach it to the buffersrc
+// so scale_cuda runs on the GPU.
 func (g *gpuScaler) ensureGraph(in *astiav.Frame) error {
-	if g.graph != nil && in.Width() == g.srcW && in.Height() == g.srcH {
+	if g.graph != nil && !g.needsRebuild && in.Width() == g.srcW && in.Height() == g.srcH {
 		return nil
 	}
 	g.freeGraph()
@@ -254,7 +262,17 @@ func (g *gpuScaler) ensureGraph(in *astiav.Frame) error {
 	g.sink = sink
 	g.srcW = in.Width()
 	g.srcH = in.Height()
+	g.needsRebuild = false
 	return nil
+}
+
+// MarkSourceChanged forces the next Scale to rebuild the filter graph even if
+// the source dimensions are unchanged. The pipeline calls this on an input
+// switch: the new decoder allocates a fresh CUDA hw_frames_ctx, and the
+// scale_cuda buffersrc must rebind to it — a same-resolution switch would
+// otherwise keep the old pool's ctx and fail with "GetFrame: Invalid argument".
+func (g *gpuScaler) MarkSourceChanged() {
+	g.needsRebuild = true
 }
 
 func (g *gpuScaler) freeGraph() {

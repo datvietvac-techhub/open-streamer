@@ -736,6 +736,16 @@ func (p *StreamPipeline) switchInputGPU() ([]OutputFrame, error) {
 		p.pendingSessionStart = true
 	}
 
+	// The new decoder allocates a fresh CUDA frames pool, so each rendition's
+	// scale_cuda graph must rebind to it on the next frame — even when the new
+	// source is the same resolution. A same-res switch otherwise keeps the old
+	// pool's hw_frames_ctx and crashes with "gpu scale GetFrame: Invalid argument".
+	for _, gs := range p.gpuScalers {
+		if gs != nil {
+			gs.MarkSourceChanged()
+		}
+	}
+
 	cfg := p.cfg.Decoder
 	cfg.cuda = p.cuda // new decoder must emit CUDA frames (auto-pool, new source dims)
 
