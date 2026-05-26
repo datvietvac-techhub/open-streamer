@@ -190,6 +190,10 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: dist
+          # Only the platform archives — exclude the *.dockerbuild provenance
+          # artifact that docker/build-push-action uploads from the transcoder
+          # build (download-artifact can't fetch it; it fails the whole step).
+          pattern: open-streamer-*
           merge-multiple: true
 
       - name: Generate SHA256 checksums
