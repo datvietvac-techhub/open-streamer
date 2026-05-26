@@ -10,55 +10,33 @@ import (
 	"github.com/ntt0601zcoder/open-streamer/internal/domain"
 )
 
-// markProfileUnhealthy must return true exactly once per stream — the
-// edge from "no failing profile" to "at least one failing profile". A
-// second profile failing on the same stream returns false so the
-// coordinator only sees the transition (no duplicate StatusDegraded
-// fire on every per-profile crash).
-func TestMarkProfileUnhealthy_OnlyFiresOnEdge(t *testing.T) {
+// markUnhealthy returns true exactly once per stream — the edge from healthy to
+// unhealthy. A repeat on the same stream returns false so the coordinator only
+// sees the transition (no duplicate StatusDegraded fire per crash).
+func TestMarkUnhealthy_OnlyFiresOnEdge(t *testing.T) {
 	t.Parallel()
 	s := newHealthService()
 
-	assert.True(t, s.markProfileUnhealthy("s1", 0),
-		"first failing profile must report transition")
-	assert.False(t, s.markProfileUnhealthy("s1", 0),
-		"same profile failing again must not re-fire")
-	assert.False(t, s.markProfileUnhealthy("s1", 1),
-		"second profile on already-unhealthy stream must not re-fire")
+	assert.True(t, s.markUnhealthy("s1"), "first unhealthy must report the transition")
+	assert.False(t, s.markUnhealthy("s1"), "already-unhealthy stream must not re-fire")
 
 	// Different stream → its own edge.
-	assert.True(t, s.markProfileUnhealthy("s2", 0),
-		"different stream must fire its own first transition")
+	assert.True(t, s.markUnhealthy("s2"), "different stream fires its own first transition")
 }
 
-// markProfileHealthy must return true exactly once per stream — the
-// edge from "at least one failing profile" to "all healthy". Caller
-// fires onHealthy only on this edge.
-func TestMarkProfileHealthy_OnlyFiresOnAllClear(t *testing.T) {
+// markHealthy returns true exactly once per stream — the edge from unhealthy
+// back to healthy. A mark on an already-healthy stream is a no-op.
+func TestMarkHealthy_OnlyFiresOnEdge(t *testing.T) {
 	t.Parallel()
 	s := newHealthService()
 
-	// Two profiles failing.
-	s.markProfileUnhealthy("s1", 0)
-	s.markProfileUnhealthy("s1", 1)
-
-	// First recovery — stream still has profile 1 failing → no edge.
-	assert.False(t, s.markProfileHealthy("s1", 0),
-		"recovery while another profile still failing must not fire")
-	// Second recovery — set is now empty → fire the all-clear edge.
-	assert.True(t, s.markProfileHealthy("s1", 1),
-		"recovery of last failing profile must fire all-clear edge")
-
-	// After full recovery, marking healthy on a profile that wasn't
-	// failing must be a no-op.
-	assert.False(t, s.markProfileHealthy("s1", 0),
-		"healthy mark on already-healthy profile must not fire")
+	s.markUnhealthy("s1")
+	assert.True(t, s.markHealthy("s1"), "recovery must fire the all-clear edge")
+	assert.False(t, s.markHealthy("s1"), "healthy mark on already-healthy stream must not fire")
 }
 
-// fire helpers must invoke the registered callback EXACTLY on the
-// transition edge — not on every crash. End-to-end check that
-// SetUnhealthyCallback / SetHealthyCallback see a single call per
-// degrade / recover cycle even when many crashes happen in between.
+// fire helpers invoke the callback EXACTLY on the transition edge — not on
+// every crash. Many crashes between degrade and recover collapse to one call.
 func TestFireUnhealthy_CoalesceMultipleCrashes(t *testing.T) {
 	t.Parallel()
 	s := newHealthService()
@@ -81,9 +59,9 @@ func TestFireUnhealthy_CoalesceMultipleCrashes(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// 5 consecutive crashes on profile 0 → callback fires ONCE.
+	// 5 consecutive crashes → callback fires ONCE.
 	for i := 0; i < 5; i++ {
-		s.fireUnhealthyIfTransitioned("s1", 0, "crash msg")
+		s.fireUnhealthyIfTransitioned("s1", "crash msg")
 	}
 	mu.Lock()
 	assert.Equal(t, 1, unhealthyCalls)
@@ -91,74 +69,60 @@ func TestFireUnhealthy_CoalesceMultipleCrashes(t *testing.T) {
 	mu.Unlock()
 
 	// Recovery fires healthy ONCE.
-	s.fireHealthyIfTransitioned("s1", 0)
-	s.fireHealthyIfTransitioned("s1", 0)
+	s.fireHealthyIfTransitioned("s1")
+	s.fireHealthyIfTransitioned("s1")
 	mu.Lock()
 	assert.Equal(t, 1, healthyCalls)
 	mu.Unlock()
 }
 
-// dropHealthState must fire onHealthy when the stream had unhealthy
-// entries at drop time. Hot restart (Update → Stop → Start to swap
-// transcoder config) relies on this — without the callback the
-// coordinator's mirrored transcoderUnhealthy flag stays true forever
-// because the new transcoder process starts clean and has nothing to
-// "recover" from.
-//
-// Regression: changing bframes from 10000 (crashes) → 0 (valid) used
-// to leave status stuck at Degraded even though the new FFmpeg ran
-// healthy.
+// dropHealthState fires onHealthy when the stream was unhealthy at drop time.
+// Hot restart (Update → Stop → Start to swap transcoder config) relies on this:
+// without the callback the coordinator's mirrored transcoderUnhealthy flag
+// would stay true forever, since the fresh subprocess starts clean.
 func TestDropHealthState_FiresHealthyWhenEntriesExist(t *testing.T) {
 	t.Parallel()
 	s := newHealthService()
 	healthyCalls := 0
 	s.SetHealthyCallback(func(_ domain.StreamCode) { healthyCalls++ })
 
-	s.markProfileUnhealthy("s1", 0)
+	s.markUnhealthy("s1")
 	s.dropHealthState("s1")
 
 	assert.Equal(t, 1, healthyCalls,
 		"dropHealthState must fire onHealthy so coordinator clears its mirrored flag")
-	// Subsequent unhealthy mark must fire as a fresh edge (state was
-	// fully wiped, not just transitioned).
-	assert.True(t, s.markProfileUnhealthy("s1", 0),
+	assert.True(t, s.markUnhealthy("s1"),
 		"after dropHealthState the stream is back to baseline; new failure is a fresh edge")
 }
 
-// dropHealthState on a healthy stream (no entries) must NOT fire
-// onHealthy — would be a synthetic recovery event with no semantic
-// meaning. Stop on healthy streams is common (graceful shutdown) so
-// suppressing the callback keeps the coordinator's event log clean.
+// dropHealthState on a healthy stream must NOT fire onHealthy — graceful Stop
+// on a healthy stream is common; a synthetic recovery event would be noise.
 func TestDropHealthState_NoFireOnHealthyStream(t *testing.T) {
 	t.Parallel()
 	s := newHealthService()
 	healthyCalls := 0
 	s.SetHealthyCallback(func(_ domain.StreamCode) { healthyCalls++ })
 
-	// No prior markProfileUnhealthy → no entries.
 	s.dropHealthState("s1")
 
 	assert.Equal(t, 0, healthyCalls,
 		"dropHealthState on a stream that was never unhealthy must not fire")
 }
 
-// nil callbacks must be safe — Service operates without coordinator
-// wiring (e.g. unit tests, embedded uses).
+// nil callbacks must be safe — Service operates without coordinator wiring.
 func TestFireWithoutCallbacks_NoPanic(t *testing.T) {
 	t.Parallel()
 	s := newHealthService()
-	// No SetUnhealthyCallback / SetHealthyCallback called.
 	require.NotPanics(t, func() {
-		s.fireUnhealthyIfTransitioned("s1", 0, "x")
-		s.fireHealthyIfTransitioned("s1", 0)
+		s.fireUnhealthyIfTransitioned("s1", "x")
+		s.fireHealthyIfTransitioned("s1")
 	})
 }
 
-// newHealthService builds a Service with only the fields the health
-// helpers touch — avoids spinning up buffer/bus/metrics for state
-// tests.
+// newHealthService builds a Service with only the fields the health helpers
+// touch — no buffer/bus/metrics needed for state tests.
 func newHealthService() *Service {
 	return &Service{
-		unhealthyProfiles: make(map[domain.StreamCode]map[int]struct{}),
+		unhealthy: make(map[domain.StreamCode]struct{}),
 	}
 }

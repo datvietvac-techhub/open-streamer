@@ -15,7 +15,6 @@ sequenceDiagram
     participant Main as cmd/server/main.go
     participant Store as Storage backend
     participant DI as do.Injector
-    participant FFmpeg
     participant RTM as RuntimeManager
     participant Coord as Coordinator
 
@@ -24,13 +23,6 @@ sequenceDiagram
     Main->>Store: Load GlobalConfig
     Note over Main,Store: Empty? Start unconfigured.
     Main->>DI: Provide sub-configs
-    Main->>FFmpeg: Probe (version + encoders + muxers)
-    alt REQUIRED encoder missing
-        FFmpeg-->>Main: error
-        Main-->>Main: os.Exit(1)
-    else OK
-        FFmpeg-->>Main: ProbeResult.OK
-    end
     Main->>DI: Wire all services
     Main->>RTM: New(deps) + register health callbacks
     Main->>RTM: BootstrapWith(gcfg)
@@ -61,10 +53,9 @@ sequenceDiagram
 
 5.  Init slog from GlobalConfig.Log
 
-6.  ► Probe FFmpeg (transcoder.Probe)
-    ├── runs `ffmpeg -version`, `-encoders`, `-muxers`
-    ├── REQUIRED missing → fmt.Errorf → os.Exit(1) — fail fast
-    └── OPTIONAL missing → slog.Warn per encoder, continue
+6.  No boot encoder probe — the open-streamer-transcoder binary's
+    encoders are fixed when it is built; the /config/transcoder/probe
+    endpoint is a no-op.
 
 7.  Wire all services (publisher, ingestor, transcoder, manager,
     coordinator, hooks, dvr, api)
@@ -272,14 +263,9 @@ Routing:
 
 6.  if shouldRunTranscoder(stream):
         transcoder.Start(ctx, code, rawIngestID, tc, targets)
-        ├── if cfg.MultiOutput:
-        │   └── spawnMultiOutput(stream, sw, targets)
-        │       └── one FFmpeg, N output pipes
-        │       └── shadow profile workers for indices 1..N-1
-        └── else:
-            for each target:
-                spawnProfile(stream, sw, idx, target)
-                └── one FFmpeg per profile
+        └── spawns one open-streamer-transcoder subprocess for the stream
+            ├── in-process libavcodec; one decode → N renditions
+            └── profileWorker per rendition for RuntimeStatus (index 0 live)
 
 7.  if stream.dvr.enabled:
         dvr.StartRecording(ctx, code, mediaBuf, dvrCfg)
@@ -395,15 +381,15 @@ recover the moment the upstream returns, regardless of probe cadence.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Worker as runProfileEncoder
-    participant FFmpeg
+    participant Worker as supervisor.Run
+    participant Sub as transcoder subprocess
     participant Tx as transcoder.Service
     participant Coord as Coordinator
     participant Bus as EventBus
 
     loop until ctx cancelled
-        Worker->>FFmpeg: spawn via runOnce
-        FFmpeg-->>Worker: exit — crashed plus runDur
+        Worker->>Sub: spawn via runOnce
+        Sub-->>Worker: exit — crashed plus runDur
 
         alt runDur >= 30s
             Worker->>Tx: fireHealthyIfTransitioned
@@ -490,7 +476,7 @@ crash), so degradation transitions are clean.
 
 ---
 
-## 6. Hot config update — transcoder.multi_output toggle
+## 6. Hot config update (POST /config)
 
 ```mermaid
 sequenceDiagram
@@ -498,37 +484,22 @@ sequenceDiagram
     participant Client
     participant API as ConfigHandler
     participant RTM as RuntimeManager
-    participant Tx as Transcoder
-    participant Coord as Coordinator
+    participant Svc as Target service
 
-    Client->>API: POST /config { transcoder.multi_output: true }
+    Client->>API: POST /config { sessions.idle_timeout_sec: 30 }
     API->>API: deep-copy current + merge body
-    opt FFmpeg path changed
-        API->>Tx: Probe(newPath)
-    end
     API->>RTM: Apply(merged)
     RTM->>RTM: persist + diff(old, new)
-    RTM->>Tx: SetConfig(new) (hot-swap cache)
-
-    alt requires restart — multi_output or ffmpeg_path changed
-        RTM->>Coord: RunningStreams returns codes
-        loop each running stream
-            RTM->>Coord: Stop code
-            RTM->>Coord: Start code with stream
-        end
-    end
-
+    RTM->>Svc: hot-apply each changed section (SetConfig / atomic swap)
     API-->>Client: 200 OK (new config)
 ```
 
 ```text
-1.  POST /api/v1/config { "transcoder": { "multi_output": true } }
+1.  POST /api/v1/config { "sessions": { "idle_timeout_sec": 30 } }
 
 2.  ConfigHandler.UpdateConfig:
     ├── deep-copy current GlobalConfig
     ├── json.Decode body onto copy → merged
-    ├── if transcoderPathChanged(current, merged):
-    │   └── validateTranscoderPath (probe binary)
     └── rtm.Apply(ctx, merged)
 
 3.  RuntimeManager.Apply:
@@ -536,25 +507,15 @@ sequenceDiagram
     ├── update m.current = merged
     └── m.diff(old, new)
 
-4.  RuntimeManager.diff:
-    ├── (other services diff first)
-    └── if transcoder config changed:
-        └── applyTranscoderChange(old, new)
-
-5.  applyTranscoderChange:
-    ├── transcoder.SetConfig(new)              (hot-swap cached cfg)
-    ├── if transcoderRequiresRestart(old, new):
-    │   ├── codes := coordinator.RunningStreams()
-    │   └── for each code: m.restartStream(code)
-    │       ├── repo.FindByCode(code)
-    │       ├── if disabled → skip
-    │       ├── coordinator.Stop(code)
-    │       └── coordinator.Start(code, stream)
-    └── else: log "no restart required"
+4.  RuntimeManager.diff: for each changed section, hot-apply via the
+    service — Sessions swaps an atomic.Pointer, the manager's packet-timeout
+    is an atomic, hooks rebuild their delivery workers. None of these bounce
+    running stream pipelines.
 ```
 
-Restart per stream takes ~2-3s (Stop teardown + Start fresh). Multiple
-streams restart in parallel (one goroutine each).
+Per-stream pipeline changes go through `PUT /streams/{code}` (§5), not the
+global config — that path's diff engine restarts only the components that
+actually changed.
 
 ---
 
@@ -562,7 +523,7 @@ streams restart in parallel (one goroutine each).
 
 Stream config references an uploaded watermark by `asset_id`. The
 coordinator translates the reference into an absolute on-disk path
-**before** calling `transcoder.Start`, so the FFmpeg layer never sees
+**before** calling `transcoder.Start`, so the transcoder never sees
 the asset id and stays library-agnostic.
 
 ```mermaid
@@ -571,7 +532,7 @@ sequenceDiagram
     participant Coord as Coordinator
     participant WM    as watermarks.Service
     participant TC    as transcoder.Service
-    participant FF    as FFmpeg
+    participant FF    as transcoder subprocess
 
     API->>Coord: stream.Watermark = { asset_id: "8a3f…" }
     Coord->>Coord: transcoderConfigWithWatermark(stream)
@@ -580,8 +541,8 @@ sequenceDiagram
     WM-->>Coord: "/var/lib/open-streamer/watermarks/8a3f….png"
     Note over Coord: 3) clone.Watermark.ImagePath = resolved path<br/>4) clone.Watermark.AssetID = "" (cleared)
     Coord->>TC: Start(ctx, code, rawID, &clone, targets)
-    TC->>TC: buildVideoFilter → applyWatermark
-    TC->>FF: ffmpeg -vf '...,movie=(resolved path) (wm) ; (mid) (wm) overlay=...'
+    TC->>TC: BuildWatermarkFilter (libavfilter graph)
+    TC->>FF: libavfilter graph '...,movie=(resolved path) (wm)' then '(mid) (wm) overlay=...'
 ```
 
 Failure modes the coordinator handles inline:
@@ -832,9 +793,9 @@ Published by transcoder service + worker loops.
 
 | Type | When | Payload |
 |---|---|---|
-| `transcoder.started` | All FFmpeg workers launched for a stream | `profiles` (int), `raw_ingest_id`, `mode` (`per_profile` / `multi_output`) |
-| `transcoder.stopped` | All FFmpeg processes for a stream exited | — |
-| `transcoder.error` | Single FFmpeg process exited non-zero outside controlled shutdown | `profile` (e.g. `track_1`), `attempt`, `restart_in_sec`, `error` (with stderr-tail) |
+| `transcoder.started` | Transcoder subprocess launched for a stream | `profiles` (int), `raw_ingest_id`, `backend` |
+| `transcoder.stopped` | The stream's transcoder subprocess exited | — |
+| `transcoder.error` | Transcoder subprocess exited non-zero outside controlled shutdown | `profile` (e.g. `track_1`), `attempt`, `restart_in_sec`, `error` |
 
 `transcoder.error` does NOT stop the stream — other profile encoders
 keep running. After 3 consecutive fast crashes the coordinator marks

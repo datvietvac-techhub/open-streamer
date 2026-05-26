@@ -1,0 +1,88 @@
+# Dockerfile.transcoder — cross-build the per-stream transcoder
+# subprocess for linux/amd64 from any Docker host using the pinned
+# open-streamer-builder image.
+#
+# Pre-requisite: builder image must exist locally (or be pullable):
+#   make builder-image
+#
+# Build the transcoder:
+#   make build-transcoder-linux
+#
+# Output: dist/transcoder-linux-amd64/
+#   ├── open-streamer-transcoder    (the binary)
+#   └── lib/libav*.so*              (libavcodec, libavfilter, ...
+#                                    every shared object the binary
+#                                    dlopens at runtime — bundled so
+#                                    target hosts on FFmpeg 6/7 can
+#                                    run it without apt changes)
+#
+# Caller deploys both: scp the directory tree to the target, then
+# launch with LD_LIBRARY_PATH=<install-dir>/lib so the loader finds
+# the bundled .so files instead of the system's older libav.
+
+ARG BUILDER_IMAGE=open-streamer-builder:v1
+FROM ${BUILDER_IMAGE} AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/go/pkg/mod \
+    go mod download
+COPY . .
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/root/go/pkg/mod \
+    CGO_ENABLED=1 go build \
+      -ldflags="-s -w \
+        -X github.com/ntt0601zcoder/open-streamer/pkg/version.Version=${VERSION} \
+        -X github.com/ntt0601zcoder/open-streamer/pkg/version.Commit=${COMMIT}" \
+      -o /out/open-streamer-transcoder ./cmd/open-streamer-transcoder
+
+# Bundle stage — walk ldd transitively and collect EVERY shared object
+# the binary plus all its libav deps need, EXCEPT glibc / ld-linux /
+# libpthread / libm / libdl / librt (system-provided ABI-stable bits
+# that we must NOT bundle because they'd clash with the host's
+# kernel-tied loader). go-astiav v0.41 unconditionally links
+# libavdevice, which drags in 20+ device-IO libs (libraw1394, libjack,
+# libxcb, libdrm, libopenal, libcdio_paranoia, ...) — without all of
+# them present at runtime, the loader refuses to start the binary
+# even before main() runs.
+#
+# AppImage-style filter: skip /lib/ld* /usr/lib/.*/libc.so*
+# /usr/lib/.*/libm.so* etc, copy everything else.
+FROM build AS bundle
+RUN set -eux && \
+    mkdir -p /out/lib && \
+    # Filter regex: paths to SKIP (system core libs the host owns).
+    # Keep this conservative — too narrow risks runtime ABI breakage,
+    # too wide risks missing a transitive dep.
+    SKIP_RE='/(ld-linux[^ ]*|libc\.so\.[0-9]+|libm\.so\.[0-9]+|libdl\.so\.[0-9]+|libpthread\.so\.[0-9]+|librt\.so\.[0-9]+|libresolv\.so\.[0-9]+|libnsl\.so\.[0-9]+|libutil\.so\.[0-9]+)$' && \
+    walk_one() { \
+      ldd "$1" 2>/dev/null | awk '/=>/ {print $3}' | grep -v '^$' | grep -Ev "$SKIP_RE" || true; \
+    } && \
+    queue=$(walk_one /out/open-streamer-transcoder) && \
+    iterations=0 && \
+    while [ -n "$queue" ] && [ $iterations -lt 10 ]; do \
+      iterations=$((iterations + 1)); \
+      next_queue="" && \
+      for so in $queue; do \
+        bn=$(basename "$so") && \
+        if [ ! -f "/out/lib/$bn" ]; then \
+          cp -L "$so" /out/lib/; \
+          deps=$(walk_one "$so") && \
+          for d in $deps; do \
+            db=$(basename "$d"); \
+            [ -f "/out/lib/$db" ] || next_queue="$next_queue $d"; \
+          done; \
+        fi; \
+      done && \
+      queue=$(echo "$next_queue" | tr ' ' '\n' | sort -u | tr '\n' ' '); \
+    done && \
+    echo "→ bundled $(ls /out/lib/ | wc -l) shared libs in $iterations passes" && \
+    ls /out/lib/ | head -40
+
+FROM scratch AS export
+COPY --from=bundle /out/open-streamer-transcoder /
+COPY --from=bundle /out/lib/ /lib/

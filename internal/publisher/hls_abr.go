@@ -106,7 +106,7 @@ func (m *hlsABRMaster) onShardUpdated(slug string, bwBps, width, height int, has
 // SetRepOverride updates the stored metadata for one ABR rendition and immediately
 // triggers a debounced master playlist rewrite. Future onShardUpdated calls for the
 // same slug will continue using these values, keeping the master playlist accurate
-// even before the first new segment arrives from the updated FFmpeg process.
+// even before the first new segment arrives from the updated transcoder subprocess.
 func (m *hlsABRMaster) SetRepOverride(slug string, bwBps, width, height int, hasAudio bool) {
 	ov := &hlsABRRep{slug: slug, bwBps: bwBps, width: width, height: height, hasAudio: hasAudio}
 	m.overrides.Store(slug, ov)

@@ -56,7 +56,6 @@ global_config:
   publisher: ...     # HLS / DASH directories + segment params
   listeners: ...     # Network listeners (RTMP / RTSP / SRT)
   ingestor: ...      # Server-wide ingest settings
-  transcoder: ...    # FFmpeg path + multi-output toggle
   hooks: ...         # Worker pool
   sessions: ...      # Play-sessions tracker (HLS/DASH/RTMP/SRT/RTSP viewers)
   watermarks: ...    # Watermark asset library directory
@@ -154,17 +153,10 @@ Server-wide. Per-input HLS playlist / segment timeouts derive from `inputs[].net
 
 ### 2.7 transcoder
 
-```yaml
-transcoder:
-  ffmpeg_path:  ""           # "" = lookup "ffmpeg" via $PATH. Or absolute path.
-  multi_output: false        # See below.
-```
-
-`multi_output=true` flips the encoder topology:
-- **false (default)**: 1 FFmpeg process per profile (legacy). 2 profiles → 2 processes. One profile crash → just that rung restarts.
-- **true**: 1 FFmpeg process per stream, emitting N rendition pipes. Saves ~50% NVDEC + ~40% RAM per ABR stream. Trade-off: 1 input glitch brings down all profiles together (~2-3s).
-
-Toggling this hot-restarts every running stream's transcoder (~2-3s downtime per stream).
+There is no global `transcoder:` config section — transcoder settings are
+per-stream (`Stream.Transcoder`: ladder, codec, HW backend, GOP, watermark).
+The transcoder runs in-process via libavcodec in a per-stream
+`open-streamer-transcoder` subprocess (one decode → N renditions).
 
 ### 2.8 hooks
 
@@ -288,7 +280,7 @@ transcoder:                      # null = no transcoding (passthrough).
     gop:       0                 # 0 = derive from KeyframeInterval × fps. Else explicit GOP frames.
     deviceid:  0                 # CUDA device index when HW=nvenc on multi-GPU host.
   decoder:
-    name:      ""                # FFmpeg decoder name. "" = let FFmpeg auto-pick.
+    name:      ""                # libavcodec decoder name. "" = auto-pick.
   audio:
     copy:        false           # true = passthrough audio (no re-encode).
     codec:       "aac"           # aac | mp3 | opus | ac3 | copy
@@ -317,7 +309,6 @@ transcoder:                      # null = no transcoding (passthrough).
         refs:              null  # null = encoder default. Higher = better compression, more CPU.
         sar:               ""    # "" = inherit. "N:M" = explicit Sample Aspect Ratio.
         resize_mode:       "pad" # pad | crop | stretch | fit. Default: pad.
-  extra_args: []                 # Raw FFmpeg args appended; use with care.
 
 protocols:                       # Each true → publisher starts that output.
   hls:  true
@@ -345,10 +336,10 @@ watermark:                       # Optional text or image overlay applied before
   enabled: true
   type:    "text"                # text | image
   # --- text ---
-  text:       "LIVE %{localtime\\:%H\\:%M}"   # strftime supported (escape FFmpeg delimiters)
-  font_file:  ""                              # absolute path to .ttf/.otf, or "" for FFmpeg default
+  text:       "LIVE %{localtime\\:%H\\:%M}"   # strftime supported (escape libavfilter delimiters)
+  font_file:  ""                              # absolute path to .ttf/.otf, or "" for the libavfilter default
   font_size:  24                              # px. 0 → 24
-  font_color: "white"                         # FFmpeg color syntax
+  font_color: "white"                         # libavfilter color syntax
   # --- image ---
   asset_id:   ""                              # references /watermarks library (resolved by coordinator)
   image_path: ""                              # absolute path; mutually exclusive with asset_id
@@ -357,7 +348,7 @@ watermark:                       # Optional text or image overlay applied before
   position:   "bottom_right"                  # top_left|top_right|bottom_left|bottom_right|center|custom
   offset_x:   10                              # padding from anchor edge (presets only)
   offset_y:   10
-  x:          ""                              # raw FFmpeg expression — only used when position=custom
+  x:          ""                              # raw libavfilter expression — only used when position=custom
   y:          ""                              # e.g. "main_w-overlay_w-50", "if(gt(t,5),10,-100)"
 
 thumbnail: null                  # Schema only — not applied yet.
@@ -423,7 +414,7 @@ bottom_right → x=W-w-offset_x,        y=H-h-offset_y
 center       → x=(W-w)/2,             y=(H-h)/2
 ```
 
-**Custom position** (`position=custom`) hands raw FFmpeg expressions
+**Custom position** (`position=custom`) hands raw libavfilter expressions
 to drawtext / overlay — full power, no preset clipping:
 
 ```yaml
@@ -432,29 +423,27 @@ x: "main_w-overlay_w-50"      # 50 px in from right
 y: "if(gt(t,5),10,-100)"      # off-screen for first 5s, then 10px from top
 ```
 
-Variables exposed (per FFmpeg docs):
+Variables exposed (per libavfilter docs):
 
 - drawtext (text): `w`/`h` = frame size, `tw`/`th` = rendered text size, `t` = clock time
 - overlay (image): `W`/`H` = main video size, `w`/`h` = overlay image size, `t` = clock time
 
 **Opacity** is folded into the filter:
 
-- text → `fontcolor=<color>@<opacity>` (FFmpeg native)
+- text → `fontcolor=<color>@<opacity>` (libavfilter native)
 - image → `colorchannelmixer=aa=<opacity>` after the `movie=` source
 
 **GPU pipeline** (NVENC) automatically wraps the watermark with
 `hwdownload,format=nv12` ↔ `hwupload_cuda` because `drawtext` is
 CPU-only and `overlay_cuda` requires `--enable-cuda-nvcc` (Ubuntu apt
-ffmpeg skips it). Cost: ~5% of one CPU core per FFmpeg process at
-1080p25. Multi-output mode applies the same chain per `-vf:v:0`.
+ffmpeg skips it). Cost: ~5% of one CPU core per rendition at 1080p25.
 
 **Hot-reload behaviour**: editing any watermark field on a running
 stream forces a transcoder topology reload (~2-3s downtime per stream)
-because the FFmpeg `-vf` chain is baked into the encoder argv at spawn
-time. The diff engine routes any `Stream.Watermark` change through
-`reloadTranscoderFull` so the new filter graph applies cleanly across
-both legacy and multi-output modes. Watermark on a passthrough stream
-(no transcoder) is silently inert — no FFmpeg ever runs.
+because the libavfilter graph is fixed when the encoder is built. The diff
+engine routes any `Stream.Watermark` change through `reloadTranscoderFull`
+so the new filter graph applies cleanly. Watermark on a passthrough stream
+(no transcoder) is silently inert — no transcoder runs.
 
 ### 3.4 Preset translation
 
@@ -592,8 +581,6 @@ Single source of truth: [internal/domain/defaults.go](../internal/domain/default
 | `timeline.Normaliser.MaxAheadMs` (server-internal) | 0 | **0 = drop semantics disabled.** Setting >0 makes the Normaliser drop incoming AV packets whose proposed output PTS sits more than `N` ms ahead of `now − wallOrigin`. Disabled by default because the drop has a stuck-state pathology when sustained drift exceeds the cap (drift never decreases for real-time input → every subsequent packet drops). DASH packager's `behindPrevSegEnd` pacing gate compensates downstream instead |
 | `timeline.Normaliser.MaxBehindMs` (server-internal) | 3000 | Hard-re-anchor a track when the proposed output sits more than `N` ms behind wallclock. Enabled by default at 3 s — re-anchoring jumps the track FORWARD onto wallclock so there is no stuck-state pathology (unlike MaxAheadMs). Catches the long-runtime A/V split when one track seeds late or pauses while the other keeps flowing (e.g. RTSP relays whose audio appeared minutes after stream start). Set to 0 to disable |
 | `timeline.Normaliser.CrossTrackSnapMs` (server-internal) | 1000 | When a track seeds and the OTHER track has already moved more than this many ms of output PTS, snap this track's `outputAnchor` onto the other's `lastOutputDts` so V and A start in lockstep |
-| `transcoder.ffmpeg_path` | "ffmpeg" | $PATH lookup |
-| `transcoder.multi_output` | false | — |
 | `transcoder.video.bitrate_k` | 2500 | — |
 | `transcoder.video.resize_mode` | "pad" | — |
 | `transcoder.audio.codec` | "aac" | — |
@@ -711,11 +698,11 @@ protocols: { dash: true }
 `news_dash` shares `news_master`'s ABR ladder via in-process buffer
 subscription — zero extra encode cost.
 
-### Hot-add a profile without disrupting other rungs
+### Add a profile to the ladder
 
 ```bash
 # Original config: 1080p + 720p
-# Operator wants to add 480p without restarting 1080p / 720p FFmpeg.
+# Add 480p to the ladder.
 
 curl -XPOST /api/v1/streams/news -d '{
   "transcoder": {
@@ -730,8 +717,9 @@ curl -XPOST /api/v1/streams/news -d '{
 }'
 ```
 
-The diff engine identifies "added profile" → spawns one new FFmpeg
-worker for 480p → leaves 1080p + 720p untouched. HLS master playlist
+The diff engine identifies the ladder change → restarts the stream's
+transcoder subprocess (the renditions share one decode), leaving other
+streams and protocols untouched. HLS master playlist
 updates with the new variant within ~50ms. DASH ABR MPD includes the
 new track on next segment flush.
 

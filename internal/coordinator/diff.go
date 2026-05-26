@@ -103,14 +103,13 @@ func diffInputs(old, new *domain.Stream, d *StreamDiff) {
 // diffTranscoder compares transcoder configs with two granularity levels:
 //  1. Topology change (buffer layout changes OR watermark filter graph change)
 //     → full restart needed
-//  2. Per-profile diff (only specific FFmpeg processes need restart).
+//  2. Per-profile diff (only specific renditions need restart).
 //
 // Watermark belongs in this function because the filter graph it produces
-// lives in `-vf` baked into the FFmpeg argv — there's no way to swap it
+// lives in the encoder's libavfilter chain — there's no way to swap it
 // without restarting the encoder. Coordinator's `transcoderConfigWithWatermark`
 // rebuilds the runtime config on each `tc.Start`, so a topology reload is
-// the cheapest reliable path that picks up the new watermark across both
-// legacy and multi-output modes.
+// the cheapest reliable path that picks up the new watermark.
 func diffTranscoder(old, new *domain.Stream, d *StreamDiff) {
 	transcoderEq := reflect.DeepEqual(old.Transcoder, new.Transcoder)
 	watermarkEq := reflect.DeepEqual(old.Watermark, new.Watermark)
@@ -152,17 +151,12 @@ func diffTranscoder(old, new *domain.Stream, d *StreamDiff) {
 		return
 	}
 
-	// Mode change (multi ↔ legacy) flips the FFmpeg process topology, so
-	// the running pipeline must be torn down and rebuilt — no in-flight
-	// way to repipe stdout pipes between the two layouts. IsMultiOutput
-	// normalises empty Mode → multi so a config that just dropped the
-	// field doesn't trip a phantom restart.
-	if ot.IsMultiOutput() != nt.IsMultiOutput() {
-		d.TranscoderTopologyChanged = true
-		return
-	}
+	// Mode-change branch removed alongside TranscoderConfig.Mode in the
+	// native-transcoder migration (see internal/transcoder/native).
+	// The native pipeline has one topology — nothing left to switch
+	// between, so no phantom restart can be triggered here.
 
-	// If neither config needs FFmpeg, there are no profiles to diff.
+	// If neither config needs the transcoder, there are no profiles to diff.
 	if !needsFFmpeg(nt) {
 		return
 	}
@@ -175,11 +169,11 @@ func diffTranscoder(old, new *domain.Stream, d *StreamDiff) {
 		return
 	}
 
-	// Global, audio, decoder, or extra_args change → all profiles must restart.
+	// Global, audio, decoder change → all profiles must restart.
+	// ExtraArgs check dropped with the rest of FFmpeg-CLI plumbing.
 	globalChanged := ot.Global != nt.Global ||
 		!reflect.DeepEqual(ot.Audio, nt.Audio) ||
-		ot.Decoder != nt.Decoder ||
-		!reflect.DeepEqual(ot.ExtraArgs, nt.ExtraArgs)
+		ot.Decoder != nt.Decoder
 
 	pd := diffProfiles(ot.Video.Profiles, nt.Video.Profiles, globalChanged)
 	d.ProfilesDiff = pd
@@ -217,8 +211,10 @@ func diffProfiles(oldProfiles, newProfiles []domain.VideoProfile, allChanged boo
 	return pd
 }
 
-// needsFFmpeg reports whether the transcoder config requires spawning an FFmpeg process.
-// Both video and audio copy means raw MPEG-TS can pass through without re-encoding.
+// needsFFmpeg reports whether the transcoder config requires running the
+// native pipeline. Name kept for grep continuity across the FFmpeg →
+// native migration; semantics unchanged (both video and audio copy means
+// raw MPEG-TS can pass through without re-encoding).
 func needsFFmpeg(tc *domain.TranscoderConfig) bool {
 	if tc == nil {
 		return false

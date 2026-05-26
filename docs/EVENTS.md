@@ -63,9 +63,9 @@ from the operator-configured per-hook fields — useful for routing keys.
 
 | Type | Emitter | Triggers when | Payload |
 |---|---|---|---|
-| `transcoder.started` | Transcoder ([service.go:394](../internal/transcoder/service.go)) | FFmpeg worker spawn succeeds | _empty_ |
-| `transcoder.stopped` | Transcoder ([service.go:513](../internal/transcoder/service.go)) | All workers for the stream have exited cleanly | _empty_ |
-| `transcoder.error` | Transcoder ([worker_run.go:146](../internal/transcoder/worker_run.go), [multi_output_run.go:154](../internal/transcoder/multi_output_run.go)) + Coordinator ([coordinator.go:756](../internal/coordinator/coordinator.go)) | FFmpeg crash / non-zero exit | `profile: string`, `err: string` |
+| `transcoder.started` | Transcoder ([service.go:408](../internal/transcoder/service.go)) | Transcoder subprocess spawned for the stream | _empty_ |
+| `transcoder.stopped` | Transcoder ([service.go:494](../internal/transcoder/service.go)) | The stream's transcoder subprocess has exited cleanly | _empty_ |
+| `transcoder.error` | Transcoder ([supervisor.go](../internal/transcoder/supervisor.go)) + Coordinator ([coordinator.go](../internal/coordinator/coordinator.go)) | Transcoder subprocess crash / non-zero exit | `profile: string`, `err: string` |
 
 ### 2.4 DVR / Recordings
 

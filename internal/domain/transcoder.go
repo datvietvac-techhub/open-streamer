@@ -1,7 +1,5 @@
 package domain
 
-import "fmt"
-
 // HWAccel selects the hardware acceleration backend for encoding/decoding.
 type HWAccel string
 
@@ -166,7 +164,7 @@ type VideoTranscodeConfig struct {
 	Copy bool `json:"copy" yaml:"copy"`
 
 	// Interlace selects the deinterlace pre-filter applied before scaling.
-	// Applies once per FFmpeg subprocess (i.e. per profile in the ABR ladder).
+	// Applies in the transcoder's video pipeline, before scaling.
 	// "" disables the filter; use ResizeModeProgressive to assert progressive source.
 	Interlace InterlaceMode `json:"interlace,omitempty" yaml:"interlace,omitempty"`
 
@@ -197,73 +195,22 @@ type AudioTranscodeConfig struct {
 	Normalize bool `json:"normalize" yaml:"normalize"`
 }
 
-// TranscoderMode picks the FFmpeg process topology for a stream.
-//
-// Per-stream so operators can mix policies on the same server — e.g. a flaky
-// SRT source on legacy mode for per-rendition isolation, while stable studio
-// feeds run multi to halve decode work.
-type TranscoderMode string
-
-// TranscoderMode values.
-const (
-	// TranscoderModeMulti runs ONE FFmpeg per stream that decodes the input
-	// once and emits every rendition through its own output pipe. Default
-	// when Mode is empty. Saves ~40% RAM and ~50% NVDEC sessions on ABR
-	// streams; trade-off is that any FFmpeg-fatal input glitch (corrupt
-	// frame, source restart) takes down all renditions together for the
-	// 2–3 s it takes to respawn.
-	TranscoderModeMulti TranscoderMode = "multi"
-
-	// TranscoderModePerProfile runs ONE FFmpeg per rendition. Higher RAM /
-	// decode cost in exchange for per-rendition crash isolation: a single
-	// rendition's encoder failing doesn't disrupt the others. Recommended
-	// for upstreams known to deliver bursts of malformed packets.
-	TranscoderModePerProfile TranscoderMode = "per_profile"
-)
-
 // TranscoderConfig is the complete transcoding configuration for a stream.
+//
+// The Mode + ExtraArgs fields were removed in the native-transcoder
+// migration (see internal/transcoder/native). The native pipeline has a
+// single process topology — decoder ephemeral per input, encoder long-
+// lived per stream — so there is nothing for Mode to select. ExtraArgs
+// was FFmpeg-CLI-specific and has no equivalent under in-process libav.
 type TranscoderConfig struct {
-	// Mode selects the FFmpeg process topology. Empty = TranscoderModeMulti.
-	Mode TranscoderMode `json:"mode,omitempty" yaml:"mode,omitempty"`
-
 	Video   VideoTranscodeConfig   `json:"video" yaml:"video"`
 	Audio   AudioTranscodeConfig   `json:"audio" yaml:"audio"`
 	Decoder DecoderConfig          `json:"decoder" yaml:"decoder"`
 	Global  TranscoderGlobalConfig `json:"global" yaml:"global"`
-
-	// ExtraArgs are raw FFmpeg arguments appended after the generated command.
-	// Use with caution — may conflict with generated arguments.
-	ExtraArgs []string `json:"extra_args,omitempty" yaml:"extra_args,omitempty"`
 
 	// Watermark is a runtime-only field populated by the coordinator from
 	// Stream.Watermark before each transcoder.Start. Not persisted on the
 	// transcoder section (json/yaml "-") so the API surface keeps
 	// Stream.Watermark as the single source of truth.
 	Watermark *WatermarkConfig `json:"-" yaml:"-"`
-}
-
-// IsMultiOutput reports whether the resolved transcoder mode is multi-output.
-// Treats empty Mode as the default (multi). Hot path so callers don't have
-// to repeat the empty-string fallback.
-func (t *TranscoderConfig) IsMultiOutput() bool {
-	if t == nil {
-		return true
-	}
-	return t.Mode == "" || t.Mode == TranscoderModeMulti
-}
-
-// ValidateMode rejects unknown TranscoderMode values at save time so a
-// typo can't silently pin the stream into legacy / multi without operator
-// awareness. Empty Mode is allowed and routes to multi via IsMultiOutput.
-func (t *TranscoderConfig) ValidateMode() error {
-	if t == nil {
-		return nil
-	}
-	switch t.Mode {
-	case "", TranscoderModeMulti, TranscoderModePerProfile:
-		return nil
-	default:
-		return fmt.Errorf("transcoder: unknown mode %q (want %q or %q)",
-			t.Mode, TranscoderModeMulti, TranscoderModePerProfile)
-	}
 }

@@ -78,7 +78,6 @@ func NewFullStream(code domain.StreamCode) *domain.Stream {
 				GOP:      60,
 				DeviceID: 0,
 			},
-			ExtraArgs: []string{"-threads", "4"},
 		},
 		Protocols: &domain.OutputProtocols{
 			HLS:  true,

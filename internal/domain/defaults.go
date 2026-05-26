@@ -138,11 +138,6 @@ const (
 	// reference for low-latency contribution links.
 	DefaultSRTLatencyMS = 120
 
-	// DefaultFFmpegPath is the executable name resolved against $PATH when
-	// TranscoderConfig.FFmpegPath is empty. Operators on bespoke layouts
-	// (e.g. /opt/ffmpeg/bin/ffmpeg) must set the full path explicitly.
-	DefaultFFmpegPath = "ffmpeg"
-
 	// DefaultListenHost is the bind address used for RTMP / RTSP / SRT
 	// listeners when ListenHost is empty. "0.0.0.0" listens on all
 	// interfaces — the standard server behaviour.

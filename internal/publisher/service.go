@@ -95,7 +95,6 @@ type Service struct {
 	bus          events.Bus
 	tracker      sessions.Tracker
 	m            *metrics.Metrics
-	ffmpegPath   string
 
 	mu      sync.Mutex
 	streams map[domain.StreamCode]*streamState
@@ -131,7 +130,6 @@ type Service struct {
 func New(i do.Injector) (*Service, error) {
 	pub := do.MustInvoke[config.PublisherConfig](i)
 	listeners := do.MustInvoke[config.ListenersConfig](i)
-	tc := do.MustInvoke[config.TranscoderConfig](i)
 	buf := do.MustInvoke[*buffer.Service](i)
 	bus := do.MustInvoke[events.Bus](i)
 
@@ -149,18 +147,12 @@ func New(i do.Injector) (*Service, error) {
 		m = mm
 	}
 
-	ffmpegPath := tc.FFmpegPath
-	if ffmpegPath == "" {
-		ffmpegPath = domain.DefaultFFmpegPath
-	}
-
 	svc := &Service{
 		cfg:          pub,
 		buf:          buf,
 		bus:          bus,
 		tracker:      tracker,
 		m:            m,
-		ffmpegPath:   ffmpegPath,
 		streams:      make(map[domain.StreamCode]*streamState),
 		mediaBuffer:  make(map[domain.StreamCode]domain.StreamCode),
 		rtspMounts:   make(map[string]*gortsplib.ServerStream),
@@ -183,7 +175,6 @@ func NewServiceForTesting(cfg config.PublisherConfig, buf *buffer.Service, bus e
 		cfg:          cfg,
 		buf:          buf,
 		bus:          bus,
-		ffmpegPath:   "ffmpeg",
 		streams:      make(map[domain.StreamCode]*streamState),
 		mediaBuffer:  make(map[domain.StreamCode]domain.StreamCode),
 		rtspMounts:   make(map[string]*gortsplib.ServerStream),

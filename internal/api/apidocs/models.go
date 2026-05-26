@@ -23,7 +23,7 @@ type ErrorBody struct {
 //   - runtime.status            — coordinator-resolved lifecycle state
 //   - runtime.pipeline_active   — true when the manager has registered a pipeline
 //   - runtime.inputs[]          — per-input health + last 5 degradation errors
-//   - runtime.transcoder        — per-profile FFmpeg state: restart count + last 5 crash errors
+//   - runtime.transcoder        — transcoder subprocess state: status, restart count, last 5 crash errors, rendition list
 //
 // `runtime` is always present (never null), even when the pipeline is not
 // running — clients can rely on it as a single root for all live data.

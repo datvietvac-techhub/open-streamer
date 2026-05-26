@@ -11,6 +11,15 @@ BIN_DIR     := bin
 BIN_NAME    := open-streamer
 INSTALL_SH  := build/install.sh
 
+# Per-stream transcoder subprocess (in-process libavcodec pipeline).
+# Built as a separate binary so the supervisor in internal/transcoder/
+# service.go can crash-recover one stream without taking down the whole
+# server. The native package needs cgo + libav-dev headers — install:
+#   apt install libavcodec-dev libavfilter-dev libavformat-dev \
+#               libswscale-dev libavutil-dev pkg-config
+TRANSCODER_PKG  := ./cmd/open-streamer-transcoder
+TRANSCODER_NAME := open-streamer-transcoder
+
 # --- go ---
 GO          ?= go
 GOFLAGS     ?=
@@ -45,6 +54,41 @@ LDFLAGS     ?= -s -w \
 build: ## Compile server binary to $(BIN_DIR)/$(BIN_NAME) with version stamping
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/$(BIN_NAME) $(MAIN_PKG)
+
+.PHONY: build-transcoder
+build-transcoder: ## Compile per-stream transcoder subprocess (cgo + libav-dev required)
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/$(TRANSCODER_NAME) $(TRANSCODER_PKG)
+
+.PHONY: build-all
+build-all: build build-transcoder ## Build both server + transcoder binaries
+
+BUILDER_IMAGE_TAG ?= open-streamer-builder:v1
+
+.PHONY: builder-image
+builder-image: ## Build the reproducible cgo + libav 8 builder image (run once; rebuild when go.mod toolchain bumps or libav major version changes)
+	docker buildx build -f Dockerfile.builder \
+		--platform linux/amd64 \
+		--load \
+		-t $(BUILDER_IMAGE_TAG) .
+
+.PHONY: build-transcoder-linux
+build-transcoder-linux: ## Cross-build transcoder for linux/amd64 + bundle libav .so files. Requires builder-image first.
+	@docker image inspect $(BUILDER_IMAGE_TAG) >/dev/null 2>&1 || \
+		(echo "→ builder image missing; running `make builder-image` first..."; $(MAKE) builder-image)
+	@mkdir -p dist/transcoder-linux-amd64
+	docker buildx build -f Dockerfile.transcoder \
+		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE_TAG) \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		--platform linux/amd64 \
+		-o type=local,dest=./dist/transcoder-linux-amd64 .
+	@echo ""
+	@echo "→ binary: dist/transcoder-linux-amd64/open-streamer-transcoder"
+	@echo "→ libs:   dist/transcoder-linux-amd64/lib/ ($$(ls dist/transcoder-linux-amd64/lib/ 2>/dev/null | wc -l | tr -d ' ') files)"
+	@echo ""
+	@echo "deploy: scp -r dist/transcoder-linux-amd64/* target:/opt/native-test/"
+	@echo "run:    LD_LIBRARY_PATH=/opt/native-test/lib /opt/native-test/open-streamer-transcoder --socket /tmp/test.sock"
 
 .PHONY: run
 run: ## Run server without building a persistent binary

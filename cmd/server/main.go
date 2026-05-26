@@ -25,7 +25,6 @@ import (
 	"github.com/ntt0601zcoder/open-streamer/internal/dvr"
 	"github.com/ntt0601zcoder/open-streamer/internal/events"
 	"github.com/ntt0601zcoder/open-streamer/internal/hooks"
-	"github.com/ntt0601zcoder/open-streamer/internal/hwdetect"
 	"github.com/ntt0601zcoder/open-streamer/internal/ingestor"
 	"github.com/ntt0601zcoder/open-streamer/internal/manager"
 	"github.com/ntt0601zcoder/open-streamer/internal/metrics"
@@ -76,39 +75,12 @@ func run() error {
 	// 4. Provide individual sub-configs to DI so services can read them at construction time.
 	provideSubConfigs(injector, gcfg)
 
-	// 4b. Probe FFmpeg before any service starts. A missing required encoder
-	// (libx264 / aac / mpegts) means transcoding will crash on every stream
-	// — fail fast with a clear error instead of accepting traffic and
-	// erroring per-stream later. Path defaults to "ffmpeg" via $PATH when
-	// gcfg.Transcoder.FFmpegPath is empty (matches publisher.NewService).
-	ffmpegPath := ""
-	if gcfg.Transcoder != nil {
-		ffmpegPath = gcfg.Transcoder.FFmpegPath
-	}
-	// Auto-detect host hardware backends — probe warnings only cover
-	// what's actually installed (no NVENC noise on a CPU-only host).
-	probeRes, probeErr := transcoder.Probe(ctx, ffmpegPath, hwdetect.Available())
-	if probeErr != nil {
-		return fmt.Errorf("ffmpeg probe: %w", probeErr)
-	}
-	if !probeRes.OK {
-		return fmt.Errorf("ffmpeg %q at %s is incompatible: %s",
-			probeRes.Version, probeRes.Path, strings.Join(probeRes.Errors, "; "))
-	}
-	slog.Info("ffmpeg probe ok",
-		"path", probeRes.Path,
-		"version", probeRes.Version,
-		"warnings", len(probeRes.Warnings),
-	)
-	for _, w := range probeRes.Warnings {
-		slog.Warn("ffmpeg capability missing", "msg", w)
-	}
-	// Make the probe result available to services via DI so they can
-	// adapt their arg-building strategy to the binary's optional-feature
-	// set (e.g. transcoder.Service reads ProbeResult.BSFs to pick the
-	// bsf:v fast path vs the legacy setsar filter for SAR). Services
-	// that don't need it simply skip do.Invoke[*transcoder.ProbeResult].
-	do.ProvideValue(injector, probeRes)
+	// 4b. FFmpeg capability probe REMOVED in native-transcoder migration
+	// P0 (see internal/transcoder/native). The native pipeline detects
+	// available encoders by querying libavcodec directly at Service.New;
+	// no subprocess to probe at boot. Transcoded streams that hit the
+	// (still-stubbed) Service.Start will fail with ErrNotImplemented
+	// until P1 wires the runner — passthrough streams are unaffected.
 
 	// Init logger from store config.
 	// Apply installs both slog and nazalog (LAL) levels from the same cfg
@@ -214,7 +186,6 @@ func provideSubConfigs(i *do.RootScope, gcfg *domain.GlobalConfig) {
 	do.ProvideValue(i, deref(gcfg.Listeners))
 	do.ProvideValue(i, deref(gcfg.Ingestor))
 	do.ProvideValue(i, deref(gcfg.Buffer))
-	do.ProvideValue(i, deref(gcfg.Transcoder))
 	do.ProvideValue(i, deref(gcfg.Publisher))
 	do.ProvideValue(i, deref(gcfg.Manager))
 	do.ProvideValue(i, deref(gcfg.Hooks))

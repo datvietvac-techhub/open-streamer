@@ -61,7 +61,7 @@ func TestResolveStream_InheritsPointerFieldsWhenNil(t *testing.T) {
 	code := TemplateCode("profile-a")
 	tpl := &Template{
 		Code:       "profile-a",
-		Transcoder: &TranscoderConfig{Mode: TranscoderModeMulti},
+		Transcoder: &TranscoderConfig{Global: TranscoderGlobalConfig{HW: HWAccelNVENC}},
 		DVR:        &StreamDVRConfig{},
 		Watermark:  &WatermarkConfig{},
 		Thumbnail:  &ThumbnailConfig{},
@@ -83,8 +83,8 @@ func TestResolveStream_InheritsPointerFieldsWhenNil(t *testing.T) {
 func TestResolveStream_StreamPointerOverridesTemplate(t *testing.T) {
 	t.Parallel()
 	code := TemplateCode("profile-a")
-	tplTc := &TranscoderConfig{Mode: TranscoderModeMulti}
-	streamTc := &TranscoderConfig{Mode: TranscoderModePerProfile}
+	tplTc := &TranscoderConfig{Global: TranscoderGlobalConfig{HW: HWAccelNVENC}}
+	streamTc := &TranscoderConfig{Global: TranscoderGlobalConfig{HW: HWAccelNone}}
 	tpl := &Template{
 		Code:       "profile-a",
 		Transcoder: tplTc,

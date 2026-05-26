@@ -471,5 +471,5 @@ Add only when a concrete use case lands. The current set covers DVB IPTV
 | TS muxing (AV → wire) | [internal/tsmux/fromav.go](../internal/tsmux/fromav.go) |
 | RTMP message → AVPacket (pull side, codec-config invariant) | [internal/ingestor/pull/rtmp_msg_converter.go](../internal/ingestor/pull/rtmp_msg_converter.go) |
 | RTMP play out (slice-only video, ADTS-bundle-split audio) | [internal/ingestor/push/rtmp_writer.go](../internal/ingestor/push/rtmp_writer.go) |
-| FFmpeg capability probe | [internal/transcoder/probe.go](../internal/transcoder/probe.go) |
+| Transcoder capability probe (no-op stub) | [internal/api/handler/config_probe.go](../internal/api/handler/config_probe.go) |
 | Per-codec runtime track stats | [internal/manager/tracks.go](../internal/manager/tracks.go) |

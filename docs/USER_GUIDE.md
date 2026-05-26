@@ -34,7 +34,7 @@ make build          # → bin/open-streamer
 make run            # run without persisting binary
 ```
 
-Requires Go 1.25.9+. FFmpeg is required for transcoding (see § 2).
+Requires Go 1.25.x+. Transcoding is built on libavcodec (see § 2).
 
 ### Docker
 
@@ -45,22 +45,22 @@ make compose-up     # docker compose up
 
 ---
 
-## 2. FFmpeg
+## 2. Transcoding
 
-Open Streamer spawns FFmpeg only for transcoding (ingest is pure Go). At
-boot the server probes `transcoder.ffmpeg_path` (or `ffmpeg` from
-`$PATH`) and fails fast on missing required encoders:
+Open Streamer transcodes in-process via libavcodec — a per-stream
+`open-streamer-transcoder` subprocess driven over gRPC; ingest is pure Go.
+There is no FFmpeg CLI in the media path.
 
-- **Required**: `libx264`, `aac`, muxer `mpegts`
-- **Optional warnings**: `h264_nvenc`, `hevc_nvenc` (NVENC), `libx265`,
-  `libvpx-vp9`, `libsvtav1`, `libopus`, `libmp3lame`, `ac3`, muxers
-  `hls` / `dash`
+The encoders the transcoder can use are fixed when the
+`open-streamer-transcoder` binary is built against libav. The release
+bundles and the builder image (`Dockerfile.builder`) ship:
 
-Probe an arbitrary binary live via `POST /api/v1/config/transcoder/probe`
-or the UI's "Test FFmpeg" button before saving the path.
+- **Always**: `libx264` (H.264 CPU), `aac`, MPEG-TS
+- **GPU / extra**: `h264_nvenc` / `hevc_nvenc` (NVENC), `libx265`,
+  `libsvtav1`, `libopus`, `libmp3lame`, `ac3`, HLS / DASH muxers
 
-Recommended: ffmpeg ≥ 5.1 with `--enable-libx264 --enable-libx265
---enable-nvenc` (or your HW backend).
+The `POST /api/v1/config/transcoder/probe` endpoint (UI "Test" button) is a
+no-op that always reports ok.
 
 ---
 
@@ -155,7 +155,7 @@ curl -XPOST http://localhost:8080/api/v1/streams/news -d '{
 
 Stream Manager monitors the active input. On failure (configurable via
 `manager.input_packet_timeout_sec`, default 30s) it switches to the
-next-priority input within ~150ms — **without restarting FFmpeg**. The
+next-priority input within ~150ms — **without restarting the transcoder**. The
 switch is recorded in `runtime.switches[]`.
 
 When the higher-priority input recovers (background probe succeeds), the
@@ -185,22 +185,10 @@ curl -XPOST http://localhost:8080/api/v1/streams/news -d '{
 }'
 ```
 
-Each profile becomes one FFmpeg process emitting an MPEG-TS stream into
-its own buffer. HLS master playlist auto-aggregates them at
-`/news/index.m3u8`. DASH MPD at `/news/index.mpd`.
-
-**Multi-output mode** (single FFmpeg, N output pipes) cuts NVDEC + RAM
-~50% per stream — toggle server-wide:
-
-```bash
-curl -XPOST http://localhost:8080/api/v1/config -d '{
-  "transcoder": { "multi_output": true }
-}'
-```
-
-Restart of running streams is automatic. Trade-off: 1 input glitch
-brings down all profiles together (~2-3s) instead of just one
-rendition.
+The transcoder subprocess decodes the source once and fans out to every
+profile (one encoder per rendition), writing each into its own buffer. The
+HLS master playlist auto-aggregates them at `/news/index.m3u8`. DASH MPD at
+`/news/index.mpd`.
 
 ### Push to platforms
 
@@ -447,7 +435,7 @@ come from the template.
 `PUT /streams/{code}` (or repeat `POST`) merges only the changed fields:
 
 ```bash
-# Add 360p rung — only ONE new FFmpeg process spawns; existing rungs untouched.
+# Add 360p rung — restarts the stream's transcoder subprocess (renditions share one decode).
 curl -XPOST http://localhost:8080/api/v1/streams/news -d '{
   "transcoder": {
     "video": {
@@ -678,7 +666,7 @@ curl -XPOST http://localhost:8080/api/v1/streams/news -d '{
 }'
 ```
 
-**Custom position** (raw FFmpeg expression — full power):
+**Custom position** (raw libavfilter expression — full power):
 
 ```bash
 curl -XPOST http://localhost:8080/api/v1/streams/news -d '{
@@ -708,15 +696,14 @@ seconds — useful for animated brand intros without an external editor.
 | `custom` | wherever your `x` / `y` expression evaluates | offsets ignored |
 
 GPU pipelines (NVENC) automatically round-trip via CPU for the
-watermark filter — costs ~5% CPU per FFmpeg process; no operator
-action needed. Multi-output mode applies the watermark per rendition
-independently.
+watermark filter — costs ~5% CPU per rendition; no operator action
+needed. The filter graph is built per rendition so every variant draws
+the watermark independently.
 
 ### 8.4 Updating watermark on a running stream
 
 Changing any watermark field on a stream that is currently transcoding
-**restarts the transcoder pipeline** (~2-3s downtime per stream — same
-shape as toggling `transcoder.multi_output`):
+**restarts the transcoder pipeline** (~2-3s downtime per stream):
 
 - Buffer hub keeps running; rendition buffers are recreated on the new
   start path
@@ -724,15 +711,13 @@ shape as toggling `transcoder.multi_output`):
   `#EXT-X-DISCONTINUITY` (HLS) or equivalent gap, then resume
 - DVR pauses for the gap and adds a `DVRGap` entry
 
-This is necessary because the FFmpeg `-vf` filter chain is baked into
-the encoder's argv at spawn time — there's no way to live-swap it
-without restarting the process. The diff engine routes any
-watermark-related field change through the topology-reload path so
-both legacy and multi-output modes pick up the new filter graph
-uniformly.
+This is necessary because the libavfilter graph is fixed when the
+encoder is built — there's no way to live-swap it without restarting the
+subprocess. The diff engine routes any watermark-related field change
+through the topology-reload path so the new filter graph applies.
 
 **Watermark on a passthrough stream** (no transcoder) is silently
-ignored — no FFmpeg is running so the filter graph never exists.
+ignored — no transcoder is running so the filter graph never exists.
 Enable transcoding to get a server-side watermark; otherwise overlay
 client-side in your player.
 
@@ -846,7 +831,7 @@ term persistence is the hook's responsibility.
 Prometheus scrape endpoint at `GET /metrics`:
 
 - `manager_failovers_total{stream_code}` — rate of input switches
-- `transcoder_restarts_total{stream_code}` — FFmpeg crash count
+- `transcoder_restarts_total{stream_code}` — transcoder subprocess crash count
 - `transcoder_workers_active{stream_code}` — running profile count
 - `manager_input_health{stream_code, input_priority}` — 1 healthy, 0 degraded
 - Buffer depth, bytes/packets per stream
@@ -869,8 +854,8 @@ Returns:
 
 A stream is `degraded` when EITHER:
 - All inputs exhausted (manager: no failover candidate), OR
-- Transcoder is in a crash loop (3 consecutive FFmpeg crashes < 30s
-  apart). Recovers automatically when a process runs > 30s sustained.
+- Transcoder is in a crash loop (3 consecutive subprocess crashes < 30s
+  apart). Recovers automatically when it runs > 30s sustained.
 
 ### YAML editor (entire system state)
 
@@ -901,12 +886,12 @@ journalctl -u open-streamer | grep -E '(failover|crashed|degraded)'
 | Symptom | Likely cause | Where to look |
 |---|---|---|
 | Status `degraded` while inputs healthy | Transcoder is in a crash loop on at least one rung | `runtime.transcoder.profiles[].errors[]` (UI or `/streams/{code}`) |
-| FFmpeg rejects an encoder option | Codec/preset typo, or option unsupported by the resolved encoder build | Stream config + Settings → Probe FFmpeg checklist |
+| Encoder rejects an option | Codec/preset typo, or option unsupported by the resolved encoder | Stream config + `runtime.transcoder.profiles[].errors[]` |
 | Stream up but HLS 404 | `publisher.hls.dir` is empty, or transcoder not producing output | Server logs (`publisher: HLS disabled — …` etc.) |
 | Push stuck in `reconnecting` | Destination reject, auth fail, or network loss | `runtime.publisher.pushes[].errors[]` |
-| GPU encoder near 100% saturation | NVENC chip overloaded — reduce profile count / framerate, set `bframes=0`, or enable `transcoder.multi_output` | `nvidia-smi` or Grafana GPU dashboard |
+| GPU encoder near 100% saturation | NVENC chip overloaded — reduce profile count / framerate, or set `bframes=0` | `nvidia-smi` or Grafana GPU dashboard |
 | `copy://X` save rejected | `X` doesn't exist, OR cycle detected, OR shape constraint violated | API error message details which check failed |
-| Boot fails with "ffmpeg incompatible" | A required encoder/muxer is missing from the FFmpeg build | Probe response under `errors[]`; rebuild ffmpeg with `--enable-libx264` etc. |
+| Encoder unavailable at transcode start | The `open-streamer-transcoder` binary lacks that encoder (fixed at build time) | Server logs / `runtime.transcoder.profiles[].errors[]`; rebuild against a libav with the encoder (see `Dockerfile.builder`) |
 | `/sessions` returns empty after enabling | Tracker config not persisted (UI didn't save) OR sub-section absent before restart | `curl /api/v1/config \| jq .sessions` to verify; restart once after first enabling |
 | Watermark POST returns `INVALID_WATERMARK` | `image_path` and `asset_id` both set, OR custom position with empty x/y, OR opacity outside [0,1] | API error message names the rule; fix the config JSON |
 | Watermark image not appearing on output | Asset deleted while stream running, OR `image_path` not absolute / unreadable by the open-streamer user | Server logs (`coordinator: watermark asset resolve failed`); chown the asset / re-upload |
@@ -919,7 +904,7 @@ in the runtime snapshot means.
 
 ## 13. Production checklist
 
-- [ ] FFmpeg installed with required encoders (boot probe will catch this)
+- [ ] `open-streamer-transcoder` binary built with the required encoders (see `Dockerfile.builder`)
 - [ ] HLS + DASH dirs are different (when both enabled)
 - [ ] HTTP server bind address chosen — reverse proxy in front for TLS
 - [ ] Storage backend chosen (`json` flat-file or `yaml` single-doc)

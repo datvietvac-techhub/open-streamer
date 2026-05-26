@@ -13,7 +13,6 @@ type GlobalConfig struct {
 	Listeners  *config.ListenersConfig  `json:"listeners,omitempty" yaml:"listeners,omitempty"`
 	Ingestor   *config.IngestorConfig   `json:"ingestor,omitempty" yaml:"ingestor,omitempty"`
 	Buffer     *config.BufferConfig     `json:"buffer,omitempty" yaml:"buffer,omitempty"`
-	Transcoder *config.TranscoderConfig `json:"transcoder,omitempty" yaml:"transcoder,omitempty"`
 	Publisher  *config.PublisherConfig  `json:"publisher,omitempty" yaml:"publisher,omitempty"`
 	Manager    *config.ManagerConfig    `json:"manager,omitempty" yaml:"manager,omitempty"`
 	Hooks      *config.HooksConfig      `json:"hooks,omitempty" yaml:"hooks,omitempty"`
