@@ -111,7 +111,7 @@ jobs:
       # binary itself still ships for every matrix platform.
       - name: Set up Buildx (transcoder build)
         if: matrix.os == 'linux' && matrix.arch == 'amd64'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR (pull builder image)
         if: matrix.os == 'linux' && matrix.arch == 'amd64'
