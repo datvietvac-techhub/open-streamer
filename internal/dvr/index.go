@@ -140,9 +140,11 @@ func parsePlaylist(segDir string) ([]segmentMeta, error) {
 				pendingDisc = false
 				continue
 			}
-			// Try to get file size from disk.
+			// Try to get file size from disk. line comes from the playlist
+			// file's contents, so Base() it to keep the lookup confined to
+			// segDir even if the playlist were tampered with.
 			var size int64
-			if fi, err := os.Stat(filepath.Join(segDir, line)); err == nil {
+			if fi, err := os.Stat(filepath.Join(segDir, filepath.Base(line))); err == nil {
 				size = fi.Size()
 			}
 			segments = append(segments, segmentMeta{
