@@ -36,8 +36,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/root/go/pkg/mod \
     CGO_ENABLED=1 go build \
       -ldflags="-s -w \
-        -X github.com/ntt0601zcoder/open-streamer/pkg/version.Version=${VERSION} \
-        -X github.com/ntt0601zcoder/open-streamer/pkg/version.Commit=${COMMIT}" \
+        -X github.com/datvietvac-techhub/open-streamer/pkg/version.Version=${VERSION} \
+        -X github.com/datvietvac-techhub/open-streamer/pkg/version.Commit=${COMMIT}" \
       -o /out/open-streamer-transcoder ./cmd/open-streamer-transcoder
 
 # Bundle stage — walk ldd transitively and collect EVERY shared object

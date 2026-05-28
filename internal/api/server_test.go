@@ -10,7 +10,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/config"
 )
 
 func TestHealthzReturnsOK(t *testing.T) {

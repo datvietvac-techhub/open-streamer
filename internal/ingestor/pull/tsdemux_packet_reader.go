@@ -31,8 +31,8 @@ import (
 
 	gocodec "github.com/yapingcat/gomedia/go-codec"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsdemux"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsdemux"
 )
 
 const (

@@ -18,9 +18,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	pb "github.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	pb "github.com/datvietvac-techhub/open-streamer/internal/transcoder/native/proto"
 )
 
 const (

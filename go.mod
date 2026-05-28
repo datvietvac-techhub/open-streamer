@@ -1,4 +1,4 @@
-module github.com/ntt0601zcoder/open-streamer
+module github.com/datvietvac-techhub/open-streamer
 
 go 1.25.10
 

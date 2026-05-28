@@ -7,7 +7,7 @@ import (
 	"github.com/q191201771/lal/pkg/base"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // Minimal valid H.264 NAL unit bytes for tests. The first byte encodes

@@ -7,10 +7,10 @@ import (
 
 	gompeg2 "github.com/yapingcat/gomedia/go-mpeg2"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/ingestor/tsnorm"
-	"github.com/ntt0601zcoder/open-streamer/internal/timeline"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsmux"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/ingestor/tsnorm"
+	"github.com/datvietvac-techhub/open-streamer/internal/timeline"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
 )
 
 // TestProcess_EmptyChunkReturnsEmpty — defensive zero-input case.

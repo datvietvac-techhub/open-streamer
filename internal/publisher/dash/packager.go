@@ -15,10 +15,10 @@ import (
 	"github.com/Eyevinn/mp4ff/avc"
 	"github.com/Eyevinn/mp4ff/hevc"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsdemux"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsmux"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsdemux"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
 )
 
 // packager.go — public Packager + Run loop.

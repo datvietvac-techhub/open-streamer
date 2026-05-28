@@ -30,11 +30,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/ingestor/pull"
-	"github.com/ntt0601zcoder/open-streamer/internal/manager"
-	"github.com/ntt0601zcoder/open-streamer/internal/timeline"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/ingestor/pull"
+	"github.com/datvietvac-techhub/open-streamer/internal/manager"
+	"github.com/datvietvac-techhub/open-streamer/internal/timeline"
 )
 
 // abrMixerEntry holds the runtime handles needed to tear down an ABR-mixer

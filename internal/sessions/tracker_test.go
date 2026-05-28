@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 func newTestService(t *testing.T) *service {

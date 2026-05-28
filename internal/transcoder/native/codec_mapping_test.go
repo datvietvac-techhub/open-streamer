@@ -3,7 +3,7 @@ package native
 import (
 	"testing"
 
-	pb "github.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto"
+	pb "github.com/datvietvac-techhub/open-streamer/internal/transcoder/native/proto"
 )
 
 // TestProtoCodec_MapsEveryESCodec locks the wire-enum mapping for the

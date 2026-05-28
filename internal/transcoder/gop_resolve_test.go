@@ -3,7 +3,7 @@ package transcoder
 import (
 	"testing"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // TestResolveGopFrames_Precedence locks the resolver's documented

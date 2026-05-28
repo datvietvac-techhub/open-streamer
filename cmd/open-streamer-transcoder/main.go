@@ -28,9 +28,9 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/transcoder/native"
-	pb "github.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto"
-	"github.com/ntt0601zcoder/open-streamer/pkg/version"
+	"github.com/datvietvac-techhub/open-streamer/internal/transcoder/native"
+	pb "github.com/datvietvac-techhub/open-streamer/internal/transcoder/native/proto"
+	"github.com/datvietvac-techhub/open-streamer/pkg/version"
 )
 
 func main() {

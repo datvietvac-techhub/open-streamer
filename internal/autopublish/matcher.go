@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // matcher snapshots the prefix → template-code map at one point in time.

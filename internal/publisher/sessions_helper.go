@@ -10,8 +10,8 @@ import (
 
 	srt "github.com/datarhei/gosrt"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/sessions"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/sessions"
 )
 
 // touchThrottle caps how often the per-frame data-write path bumps the

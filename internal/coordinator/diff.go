@@ -3,7 +3,7 @@ package coordinator
 import (
 	"reflect"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // StreamDiff describes what changed between two versions of a stream configuration.

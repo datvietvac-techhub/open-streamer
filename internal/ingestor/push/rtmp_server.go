@@ -44,10 +44,10 @@ import (
 	"github.com/q191201771/lal/pkg/base"
 	"github.com/q191201771/lal/pkg/rtmp"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/ingestor/pull"
-	"github.com/ntt0601zcoder/open-streamer/internal/timeline"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/ingestor/pull"
+	"github.com/datvietvac-techhub/open-streamer/internal/timeline"
 )
 
 // rtmpRouteKey reconstructs the routing key from an RTMP session's app +

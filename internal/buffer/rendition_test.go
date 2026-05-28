@@ -3,7 +3,7 @@ package buffer
 import (
 	"testing"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 func TestVideoTrackSlug(t *testing.T) {

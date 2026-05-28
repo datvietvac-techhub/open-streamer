@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/ingestor/tsnorm"
-	"github.com/ntt0601zcoder/open-streamer/internal/timeline"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/ingestor/tsnorm"
+	"github.com/datvietvac-techhub/open-streamer/internal/timeline"
 )
 
 // disabledNormaliser is the no-op Normaliser used by readLoop tests that

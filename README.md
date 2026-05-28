@@ -1,9 +1,9 @@
 # Open Streamer
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/ntt0601zcoder/open-streamer.svg)](https://pkg.go.dev/github.com/ntt0601zcoder/open-streamer)
+[![Go Reference](https://pkg.go.dev/badge/github.com/datvietvac-techhub/open-streamer.svg)](https://pkg.go.dev/github.com/datvietvac-techhub/open-streamer)
 [![CI](https://github.com/datvietvac-techhub/open-streamer/actions/workflows/ci.yml/badge.svg)](https://github.com/datvietvac-techhub/open-streamer/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/ntt0601zcoder/open-streamer)](https://goreportcard.com/report/github.com/ntt0601zcoder/open-streamer)
-[![Coverage](https://codecov.io/gh/ntt0601zcoder/open-streamer/branch/main/graph/badge.svg)](https://codecov.io/gh/ntt0601zcoder/open-streamer)
+[![Go Report Card](https://goreportcard.com/badge/github.com/datvietvac-techhub/open-streamer)](https://goreportcard.com/report/github.com/datvietvac-techhub/open-streamer)
+[![Coverage](https://codecov.io/gh/datvietvac-techhub/open-streamer/branch/main/graph/badge.svg)](https://codecov.io/gh/datvietvac-techhub/open-streamer)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A high-availability live media server in Go. Ingests from any
@@ -79,10 +79,10 @@ flowchart LR
 
 ```bash
 # 1. Install via the systemd installer (Linux)
-sudo bash <(curl -sL https://raw.githubusercontent.com/ntt0601zcoder/open-streamer/main/build/reinstall.sh) v1.0.0
+sudo bash <(curl -sL https://raw.githubusercontent.com/datvietvac-techhub/open-streamer/main/build/reinstall.sh) v1.0.0
 
 # 2. Or build from source
-git clone https://github.com/ntt0601zcoder/open-streamer.git
+git clone https://github.com/datvietvac-techhub/open-streamer.git
 cd open-streamer
 make build && ./bin/open-streamer
 

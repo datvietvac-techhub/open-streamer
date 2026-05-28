@@ -56,10 +56,10 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtpmpeg4audio"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsdemux"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsmux"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsdemux"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
 )
 
 // maxRTSPPendingFrames is the maximum number of video frames buffered while

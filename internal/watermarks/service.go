@@ -37,8 +37,8 @@ import (
 
 	"github.com/samber/do/v2"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // Errors returned by the service. Mapped to HTTP status codes by the

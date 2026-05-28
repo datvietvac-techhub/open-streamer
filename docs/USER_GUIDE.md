@@ -18,7 +18,7 @@ Latest release ships pre-built archives + Linux installer:
 ```bash
 # Linux/systemd installer — downloads + verifies + installs as a service.
 # Idempotent: re-running with a new tag uninstalls cleanly first.
-sudo bash <(curl -sL https://raw.githubusercontent.com/ntt0601zcoder/open-streamer/main/build/reinstall.sh) v1.0.0
+sudo bash <(curl -sL https://raw.githubusercontent.com/datvietvac-techhub/open-streamer/main/build/reinstall.sh) v1.0.0
 ```
 
 This installs the binary to `/usr/local/bin/open-streamer`, a systemd unit
@@ -28,7 +28,7 @@ at `/var/lib/open-streamer` (preserved across version upgrades).
 ### From source
 
 ```bash
-git clone https://github.com/ntt0601zcoder/open-streamer.git
+git clone https://github.com/datvietvac-techhub/open-streamer.git
 cd open-streamer
 make build          # → bin/open-streamer
 make run            # run without persisting binary

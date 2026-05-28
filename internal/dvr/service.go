@@ -32,13 +32,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/events"
-	"github.com/ntt0601zcoder/open-streamer/internal/metrics"
-	"github.com/ntt0601zcoder/open-streamer/internal/store"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsmux"
-	"github.com/ntt0601zcoder/open-streamer/pkg/logger"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
+	"github.com/datvietvac-techhub/open-streamer/internal/store"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
+	"github.com/datvietvac-techhub/open-streamer/pkg/logger"
 	"github.com/samber/do/v2"
 )
 

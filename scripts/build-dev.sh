@@ -59,7 +59,7 @@ fi
 
 COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-VPKG="github.com/ntt0601zcoder/open-streamer/pkg/version"
+VPKG="github.com/datvietvac-techhub/open-streamer/pkg/version"
 
 # Mark dirty trees so a binary built with uncommitted changes is identifiable.
 if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then

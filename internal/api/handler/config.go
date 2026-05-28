@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/autopublish"
-	"github.com/ntt0601zcoder/open-streamer/internal/coordinator"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/events"
-	"github.com/ntt0601zcoder/open-streamer/internal/hwdetect"
-	"github.com/ntt0601zcoder/open-streamer/internal/store"
-	"github.com/ntt0601zcoder/open-streamer/internal/vod"
-	"github.com/ntt0601zcoder/open-streamer/pkg/version"
+	"github.com/datvietvac-techhub/open-streamer/internal/autopublish"
+	"github.com/datvietvac-techhub/open-streamer/internal/coordinator"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/internal/hwdetect"
+	"github.com/datvietvac-techhub/open-streamer/internal/store"
+	"github.com/datvietvac-techhub/open-streamer/internal/vod"
+	"github.com/datvietvac-techhub/open-streamer/pkg/version"
 	"github.com/samber/do/v2"
 )
 

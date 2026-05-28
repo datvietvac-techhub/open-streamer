@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 func waitFor(t *testing.T, cond func() bool, timeout time.Duration) {

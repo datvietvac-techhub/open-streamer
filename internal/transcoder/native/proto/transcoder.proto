@@ -18,7 +18,7 @@ syntax = "proto3";
 
 package transcoder.v1;
 
-option go_package = "github.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto;transcoderpb";
+option go_package = "github.com/datvietvac-techhub/open-streamer/internal/transcoder/native/proto;transcoderpb";
 
 service Transcoder {
   // Run is the per-stream bidi stream. The supervisor sends ConfigureRequest

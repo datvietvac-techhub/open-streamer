@@ -35,7 +35,7 @@ package pull
 import (
 	"sync"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // streamTypeCodec maps a TS PMT stream_type value to the matching AVCodec.

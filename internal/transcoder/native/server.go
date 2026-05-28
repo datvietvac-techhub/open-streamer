@@ -6,7 +6,7 @@ import (
 	"io"
 	"log/slog"
 
-	pb "github.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto"
+	pb "github.com/datvietvac-techhub/open-streamer/internal/transcoder/native/proto"
 )
 
 // Server is the gRPC service handler that the per-stream transcoder

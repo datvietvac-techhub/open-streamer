@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/config"
 )
 
 // pngBytes is a minimal valid 1×1 PNG so http.DetectContentType returns

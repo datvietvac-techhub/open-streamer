@@ -7,7 +7,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // ErrNotFound is returned by lookups when the entity does not exist.
