@@ -79,7 +79,7 @@ flowchart LR
 
 ```bash
 # 1. Install via the systemd installer (Linux)
-sudo bash <(curl -sL https://raw.githubusercontent.com/datvietvac-techhub/open-streamer/main/build/reinstall.sh) v1.0.0
+sudo bash <(curl -sL https://raw.githubusercontent.com/datvietvac-techhub/open-streamer/main/build/install.sh) v4.0.0
 
 # 2. Or build from source
 git clone https://github.com/datvietvac-techhub/open-streamer.git
