@@ -13,15 +13,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 	_ "github.com/datvietvac-techhub/open-streamer/api/docs" // swag Register(SwaggerInfo)
 	"github.com/datvietvac-techhub/open-streamer/config"
 	"github.com/datvietvac-techhub/open-streamer/internal/api/handler"
 	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
 	"github.com/datvietvac-techhub/open-streamer/internal/publisher"
 	"github.com/datvietvac-techhub/open-streamer/internal/sessions"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/samber/do/v2"
 )

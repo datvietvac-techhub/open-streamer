@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/datvietvac-techhub/open-streamer/internal/autopublish"
 	"github.com/datvietvac-techhub/open-streamer/internal/coordinator"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
@@ -18,6 +17,7 @@ import (
 	"github.com/datvietvac-techhub/open-streamer/internal/publisher"
 	"github.com/datvietvac-techhub/open-streamer/internal/store"
 	"github.com/datvietvac-techhub/open-streamer/internal/transcoder"
+	"github.com/go-chi/chi/v5"
 	"github.com/samber/do/v2"
 )
 
