@@ -14,8 +14,6 @@ fixed and verified.
 - **realip-chi-deprecation-migration** — migrate off deprecated
   `middleware.RealIP` (chi v5.3) to `ClientIPFrom*` + `GetClientIP`; currently
   `//nolint`-suppressed. `internal/api`, `internal/publisher`.
-- **codeql-ruby-language-misconfig** — CodeQL default setup analyses Ruby on a
-  Ruby-free repo → the Ruby job fails on every run. repo Settings / `.github`.
 - **av-drift-timeline-fix-finalize** — (in progress) validate the A/V-drift
   Normaliser fix past the ~26.5 h PTS-wrap boundary, then merge the branch and
   cut a release (currently an uncommitted test build). `internal/timeline`.
