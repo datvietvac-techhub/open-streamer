@@ -522,3 +522,40 @@ func TestStreamPipeline_SwitchInputPreservesAllRenditions(t *testing.T) {
 			"SwitchInput reallocated rendition %d scaler", i)
 	}
 }
+
+// TestRebaseVideoPTS_StalledSourcePacesAtFrameRate reproduces the
+// "buffer grows, won't play after input switch" failure. When the active
+// decoder mishandles a source's timestamps (e.g. an HLS-pull input whose
+// pkt_timebase the NVDEC binding can't set) it emits frames with stalled
+// / non-monotonic PTS. The legacy monotonic guard advanced the output by
+// +1 ms per frame, collapsing the timeline (~1 ms/frame) so the publisher
+// never reached segDur in PTS and force-flushed off-IDR every wallclock
+// max_dur. The output must instead advance by one nominal frame interval.
+func TestRebaseVideoPTS_StalledSourcePacesAtFrameRate(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true} // 25 fps
+
+	const stuck = 90_000 // a decoder emitting the SAME source PTS every frame
+	got := make([]int64, 0, 5)
+	for range 5 {
+		got = append(got, p.rebaseVideoPTS(stuck))
+	}
+
+	// First frame anchors the output clock to 1 ms; every subsequent frame
+	// advances by the 40 ms frame interval — NOT the legacy +1 ms.
+	assert.Equal(t, []int64{1, 41, 81, 121, 161}, got)
+}
+
+// TestRebaseVideoPTS_MonotonicSourceTracksSource confirms the fix is inert
+// on healthy input: a source PTS advancing normally is passed through
+// (offset-rebased) without the frame-interval pacing kicking in. The
+// source steps by 50 ms (≠ the 40 ms frame interval) so the assertion
+// proves the output follows the SOURCE, not the pacing fallback.
+func TestRebaseVideoPTS_MonotonicSourceTracksSource(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true}
+
+	got := make([]int64, 0, 4)
+	for _, s := range []int64{1000, 1050, 1100, 1150} {
+		got = append(got, p.rebaseVideoPTS(s))
+	}
+	assert.Equal(t, []int64{1, 51, 101, 151}, got)
+}

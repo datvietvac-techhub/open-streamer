@@ -172,7 +172,7 @@ type StreamPipeline struct {
 	// timeline that players can't assemble even with an
 	// EXT-X-DISCONTINUITY tag — the live edge stalls. Rebasing onto a
 	// single continuous clock is what makes switching actually work
-	// (the design Flussonic-style servers rely on).
+	// (the standard design for seamless live input switching).
 	//
 	// ptsOffset is added to every source PTS; recomputed on the first
 	// frame after each switch so the new input continues right after
@@ -186,6 +186,18 @@ type StreamPipeline struct {
 	lastVideoOut  int64
 	lastAudioOut  int64
 	pendingRebase bool
+
+	// videoFrameDurMs is the nominal inter-frame interval (1000/framerate
+	// ms) used to pace the video output clock when a source's decoded PTS
+	// stalls or regresses — e.g. an HLS-pull input whose timestamps the
+	// NVDEC decoder mishandles (the linked go-astiav binding exposes no
+	// pkt_timebase setter) emits frames with clustered / non-monotonic
+	// PTS. Advancing the output by one frame interval there — instead of
+	// the legacy +1 ms — keeps the emitted timeline tracking real time, so
+	// segment-duration math stays correct and the publisher cuts at the
+	// encoder's IDRs instead of force-flushing on its wallclock safety net
+	// (the "buffer grows, won't play after input switch" failure).
+	videoFrameDurMs int64
 
 	// audioReenc is non-nil when Audio.Copy is false — AAC frames are
 	// decoded → resampled → re-encoded instead of passed through. nil
@@ -292,16 +304,17 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 	}
 
 	return &StreamPipeline{
-		cfg:           cfg,
-		encoders:      encoders,
-		scalers:       scalers,
-		gpuScalers:    gpuScalers,
-		watermarkers:  watermarkers,
-		useGPU:        useGPU,
-		cuda:          cuda,
-		decoder:       dec,
-		pendingRebase: true, // first-ever frame anchors the output clock
-		audioReenc:    audioReenc,
+		cfg:             cfg,
+		encoders:        encoders,
+		scalers:         scalers,
+		gpuScalers:      gpuScalers,
+		watermarkers:    watermarkers,
+		useGPU:          useGPU,
+		cuda:            cuda,
+		decoder:         dec,
+		pendingRebase:   true, // first-ever frame anchors the output clock
+		videoFrameDurMs: videoFrameDurationMs(cfg.Renditions[0].Encoder.Framerate),
+		audioReenc:      audioReenc,
 	}, nil
 }
 
@@ -381,7 +394,14 @@ func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 	p.anchorRebase(srcPTS)
 	out := srcPTS + p.ptsOffset
 	if out <= p.lastVideoOut {
-		out = p.lastVideoOut + 1
+		// Source PTS stalled or regressed. A decoder mishandling the
+		// input timebase emits clustered / non-monotonic PTS on some
+		// sources (notably HLS-pull) — advancing by one nominal frame
+		// interval keeps the output clock tracking real time. The legacy
+		// +1 ms collapses the timeline (~1 ms/frame), so the publisher
+		// never reaches segDur in PTS and force-flushes off-IDR every
+		// wallclock max_dur, which stalls playback after an input switch.
+		out = p.lastVideoOut + p.videoFrameDurMs
 	}
 	p.lastVideoOut = out
 	return out
@@ -413,6 +433,20 @@ func (p *StreamPipeline) anchorRebase(srcPTS int64) {
 	}
 	// base==0 on the first-ever frame → output starts at 1 ms.
 	p.ptsOffset = base + 1 - srcPTS
+}
+
+// videoFrameDurationMs is the nominal inter-frame interval in
+// milliseconds for the configured output framerate. rebaseVideoPTS uses
+// it to pace the output clock when a source's decoded PTS stalls.
+// Defaults to 40 ms (25 fps) when the framerate is unknown.
+func videoFrameDurationMs(framerate int) int64 {
+	if framerate <= 0 {
+		return 40
+	}
+	if d := int64(1000 / framerate); d >= 1 {
+		return d
+	}
+	return 1
 }
 
 // buildRendition allocates one rendition's encoder + scaler +
