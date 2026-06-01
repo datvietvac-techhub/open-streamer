@@ -559,3 +559,53 @@ func TestRebaseVideoPTS_MonotonicSourceTracksSource(t *testing.T) {
 	}
 	assert.Equal(t, []int64{1, 51, 101, 151}, got)
 }
+
+// TestReleaseAudio_HoldsAudioLeadingVideo is the core of the A/V-sync gate:
+// audio whose output PTS leads the video clock by more than audioLeadCapMs is
+// held, then released as video catches up. This is what stops the cheap audio
+// passthrough from outrunning the heavy video encode on a bursty input and
+// baking a permanent lip-sync offset into the output (the HLS-switch desync).
+func TestReleaseAudio_HoldsAudioLeadingVideo(t *testing.T) {
+	p := &StreamPipeline{lastVideoOut: 1000} // cap=500 → limit=1500
+	p.pendingAudio = []OutputFrame{{PTS: 1200}, {PTS: 1400}, {PTS: 1600}}
+
+	out := p.releaseAudio()
+	require.Len(t, out, 2) // 1200,1400 ≤ 1500 released; 1600 leads → held
+	assert.Equal(t, int64(1200), out[0].PTS)
+	assert.Equal(t, int64(1400), out[1].PTS)
+	require.Len(t, p.pendingAudio, 1)
+	assert.Equal(t, int64(1600), p.pendingAudio[0].PTS)
+
+	p.lastVideoOut = 1200 // video advances → limit=1700, held frame releases
+	out = p.releaseAudio()
+	require.Len(t, out, 1)
+	assert.Equal(t, int64(1600), out[0].PTS)
+	assert.Empty(t, p.pendingAudio)
+}
+
+// TestReleaseAudio_PassesAudioWithinCap confirms normal operation is untouched:
+// audio leading video by less than the cap (intrinsic source A/V offset) flows
+// straight through, so a real-time input (UDP) is never throttled.
+func TestReleaseAudio_PassesAudioWithinCap(t *testing.T) {
+	p := &StreamPipeline{lastVideoOut: 10_000}
+	p.pendingAudio = []OutputFrame{{PTS: 10_300}, {PTS: 10_350}} // +0.30, +0.35 < 0.5
+
+	out := p.releaseAudio()
+	require.Len(t, out, 2)
+	assert.Empty(t, p.pendingAudio)
+}
+
+// TestReleaseAudio_SafetyValveWhenVideoStalled verifies the audioHoldMaxMs
+// valve: if video stalls, the oldest held audio is released anyway so the
+// track never goes silent.
+func TestReleaseAudio_SafetyValveWhenVideoStalled(t *testing.T) {
+	p := &StreamPipeline{lastVideoOut: 0} // limit=500, nothing within cap
+	for ts := int64(1000); ts <= 7000; ts += 1000 {
+		p.pendingAudio = append(p.pendingAudio, OutputFrame{PTS: ts})
+	}
+	// newest=7000; release oldest while 7000−PTS > 5000 (PTS<2000): only 1000.
+	out := p.releaseAudio()
+	require.Len(t, out, 1)
+	assert.Equal(t, int64(1000), out[0].PTS)
+	require.Len(t, p.pendingAudio, 6)
+}
