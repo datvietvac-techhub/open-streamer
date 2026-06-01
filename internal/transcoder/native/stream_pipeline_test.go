@@ -609,3 +609,24 @@ func TestReleaseAudio_SafetyValveWhenVideoStalled(t *testing.T) {
 	assert.Equal(t, int64(1000), out[0].PTS)
 	require.Len(t, p.pendingAudio, 6)
 }
+
+// TestRebaseVideoPTS_ClampPacesAtSourceRateNotConfigFps is the file/fps-drift
+// regression: when the monotonic guard engages, it must advance by the
+// OBSERVED source frame interval (33 ms for a 30 fps source), not the static
+// videoFrameDurMs (40 ms = 25 fps). With the static value the guard
+// over-advances every frame, never releases, and re-times video to 25 fps —
+// running it ~20 % fast and drifting it off the audio clock.
+func TestRebaseVideoPTS_ClampPacesAtSourceRateNotConfigFps(t *testing.T) {
+	// lastVideoOut seeded ahead so out = src+offset stays below it → the guard
+	// fires every frame, exactly the self-perpetuating state observed live.
+	p := &StreamPipeline{videoFrameDurMs: 40, lastVideoOut: 10_000}
+	src := int64(5000) // 30 fps source: 33 ms steps, all below lastVideoOut
+	got := make([]int64, 0, 5)
+	for range 5 {
+		got = append(got, p.rebaseVideoPTS(src))
+		src += 33
+	}
+	// Frame 0: no interval learned yet → fallback 40 → 10040.
+	// Frames 1..4: observed 33 ms interval → +33 each (NOT +40).
+	assert.Equal(t, []int64{10040, 10073, 10106, 10139, 10172}, got)
+}

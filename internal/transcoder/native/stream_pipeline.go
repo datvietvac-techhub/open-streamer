@@ -199,6 +199,18 @@ type StreamPipeline struct {
 	// (the "buffer grows, won't play after input switch" failure).
 	videoFrameDurMs int64
 
+	// videoSrcIntervalMs is the last OBSERVED source frame interval (src PTS
+	// delta between consecutive video frames). rebaseVideoPTS paces its
+	// monotonic-guard advance by this, not the static videoFrameDurMs: a
+	// configured-fps interval that exceeds the real source interval (e.g.
+	// 40 ms/25 fps applied to a 30 fps / 33 ms source) makes the guard
+	// over-advance every frame and self-perpetuate, re-timing video to the
+	// configured fps and drifting it ~(1 − srcFps/cfgFps) off the audio clock.
+	// Relearned per source; falls back to videoFrameDurMs until first observed.
+	videoSrcIntervalMs int64
+	lastVideoSrc       int64 // previous video source PTS (for the interval)
+	hasVideoSrc        bool
+
 	// audioReenc is non-nil when Audio.Copy is false — AAC frames are
 	// decoded → resampled → re-encoded instead of passed through. nil
 	// keeps the cheap passthrough path.
@@ -229,6 +241,12 @@ const (
 	// track never goes silent (A/V desync returns until video recovers, which
 	// is preferable to dead audio).
 	audioHoldMaxMs int64 = 5000
+
+	// maxSaneFrameIntervalMs caps what rebaseVideoPTS will accept as an
+	// observed source frame interval (≈ down to 5 fps). Anything larger is a
+	// switch/loop jump or a stall, not a real inter-frame gap, so it must not
+	// be learned as the pacing step.
+	maxSaneFrameIntervalMs int64 = 200
 )
 
 // NewStreamPipeline constructs the decoder + every rendition's
@@ -460,16 +478,32 @@ func (p *StreamPipeline) releaseAudio() []OutputFrame {
 // audio ordering.
 func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 	p.anchorRebase(srcPTS)
+	// Learn the source's real frame interval from forward PTS deltas so the
+	// monotonic guard below paces at the SOURCE rate, not a static configured
+	// fps. A sane positive delta (a real inter-frame gap, not a switch jump)
+	// updates it; jumps and regressions are ignored.
+	if p.hasVideoSrc {
+		if d := srcPTS - p.lastVideoSrc; d > 0 && d <= maxSaneFrameIntervalMs {
+			p.videoSrcIntervalMs = d
+		}
+	}
+	p.lastVideoSrc, p.hasVideoSrc = srcPTS, true
+
 	out := srcPTS + p.ptsOffset
 	if out <= p.lastVideoOut {
-		// Source PTS stalled or regressed. A decoder mishandling the
-		// input timebase emits clustered / non-monotonic PTS on some
-		// sources (notably HLS-pull) — advancing by one nominal frame
-		// interval keeps the output clock tracking real time. The legacy
-		// +1 ms collapses the timeline (~1 ms/frame), so the publisher
-		// never reaches segDur in PTS and force-flushes off-IDR every
-		// wallclock max_dur, which stalls playback after an input switch.
-		out = p.lastVideoOut + p.videoFrameDurMs
+		// Source PTS stalled or regressed. Advance by the OBSERVED source
+		// frame interval so the output clock tracks real time. Using the
+		// static videoFrameDurMs here is wrong when it exceeds the real
+		// interval (e.g. 40 ms/25 fps vs a 30 fps / 33 ms source): the guard
+		// over-advances every frame, never releases, and re-times video to
+		// the configured fps — drifting it off the audio clock. The static
+		// value is only a fallback until the first interval is observed (and
+		// for a genuine stall where no forward delta exists yet).
+		step := p.videoSrcIntervalMs
+		if step <= 0 {
+			step = p.videoFrameDurMs
+		}
+		out = p.lastVideoOut + step
 	}
 	p.lastVideoOut = out
 	return out
@@ -757,7 +791,8 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 	p.sawKeyframe = false
 	p.pendingForceKeyframe = true
 	p.pendingRebase = true
-	p.pendingAudio = nil // drop the old input's held audio; new input re-anchors
+	p.pendingAudio = nil                           // drop the old input's held audio; new input re-anchors
+	p.hasVideoSrc, p.videoSrcIntervalMs = false, 0 // relearn the new source's frame interval
 	// EXT-X-DISCONTINUITY is only needed when the OUTPUT stream's shape
 	// can change across the switch. With audio re-encode the output is
 	// fully continuous — same encoder (identical SPS/PPS), continuous
@@ -833,7 +868,8 @@ func (p *StreamPipeline) switchInputGPU() ([]OutputFrame, error) {
 	p.sawKeyframe = false
 	p.pendingForceKeyframe = true
 	p.pendingRebase = true
-	p.pendingAudio = nil // drop the old input's held audio; new input re-anchors
+	p.pendingAudio = nil                           // drop the old input's held audio; new input re-anchors
+	p.hasVideoSrc, p.videoSrcIntervalMs = false, 0 // relearn the new source's frame interval
 	if p.audioReenc != nil {
 		p.audioReenc.SwitchInput()
 	} else {
