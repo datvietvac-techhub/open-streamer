@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // MPEG audio frame header layer-detection table. Reference vectors from the

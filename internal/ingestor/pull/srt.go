@@ -32,7 +32,7 @@ import (
 
 	srt "github.com/datarhei/gosrt"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // srtReadChunk matches the SRT live-streaming convention: one datagram carries

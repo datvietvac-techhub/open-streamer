@@ -20,7 +20,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // ErrMountNotFound is returned when a URL references a mount that has not been registered.

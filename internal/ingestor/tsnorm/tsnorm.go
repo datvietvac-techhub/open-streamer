@@ -84,8 +84,8 @@ import (
 	"github.com/asticode/go-astits"
 	gocodec "github.com/yapingcat/gomedia/go-codec"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/timeline"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/timeline"
 )
 
 // Output PID convention. Matches tsmux.FromAV so diagnostic tools see

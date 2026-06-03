@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/tsdemux"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsdemux"
 )
 
 // demux.go — raw-TS chunk → AV frame demuxer.

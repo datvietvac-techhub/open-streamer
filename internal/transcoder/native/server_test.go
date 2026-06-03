@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
-	pb "github.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto"
+	pb "github.com/datvietvac-techhub/open-streamer/internal/transcoder/native/proto"
 )
 
 // dialBufconn wires an in-process gRPC server and returns a connected

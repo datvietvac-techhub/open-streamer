@@ -12,7 +12,7 @@ import (
 
 	"github.com/q191201771/naza/pkg/nazalog"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/config"
 )
 
 // LevelTrace is a custom slog level below Debug for very high-frequency

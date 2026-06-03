@@ -33,8 +33,8 @@ import (
 	goflv "github.com/yapingcat/gomedia/go-flv"
 	gomp4 "github.com/yapingcat/gomedia/go-mp4"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsmux"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
 )
 
 const (

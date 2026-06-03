@@ -11,10 +11,10 @@ import (
 
 	"github.com/samber/do/v2"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/events"
-	"github.com/ntt0601zcoder/open-streamer/internal/store"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/internal/store"
 )
 
 // IdleTimeout is how long a runtime stream may go without a packet

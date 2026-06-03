@@ -14,9 +14,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/events"
 )
 
 // Tracker is the public contract that publisher / api layers use to record

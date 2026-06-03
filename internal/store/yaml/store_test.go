@@ -7,11 +7,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/store"
-	"github.com/ntt0601zcoder/open-streamer/internal/store/storetest"
-	yamlstore "github.com/ntt0601zcoder/open-streamer/internal/store/yaml"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/store"
+	"github.com/datvietvac-techhub/open-streamer/internal/store/storetest"
+	yamlstore "github.com/datvietvac-techhub/open-streamer/internal/store/yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

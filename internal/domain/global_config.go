@@ -1,6 +1,6 @@
 package domain
 
-import "github.com/ntt0601zcoder/open-streamer/config"
+import "github.com/datvietvac-techhub/open-streamer/config"
 
 // GlobalConfig holds all runtime configuration that is persisted in the store
 // (as opposed to config.StorageConfig which is bootstrap-only from config.yaml/env).

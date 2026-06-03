@@ -7,8 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // TestSetConfigSwapsThreshold pins the user-facing contract: the next

@@ -12,9 +12,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/do/v2"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/metrics"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
 )
 
 // Subscriber is a read cursor into a stream's ring buffer.

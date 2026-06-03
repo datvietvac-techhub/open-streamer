@@ -1378,7 +1378,7 @@ const file_transcoder_proto_rawDesc = "" +
 	"\tCODEC_AAC\x10\x032E\n" +
 	"\n" +
 	"Transcoder\x127\n" +
-	"\x03Run\x12\x16.transcoder.v1.Request\x1a\x14.transcoder.v1.Event(\x010\x01BVZTgithub.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto;transcoderpbb\x06proto3"
+	"\x03Run\x12\x16.transcoder.v1.Request\x1a\x14.transcoder.v1.Event(\x010\x01B[ZYgithub.com/datvietvac-techhub/open-streamer/internal/transcoder/native/proto;transcoderpbb\x06proto3"
 
 var (
 	file_transcoder_proto_rawDescOnce sync.Once

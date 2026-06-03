@@ -3,8 +3,8 @@ package transcoder
 import (
 	"testing"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	pb "github.com/ntt0601zcoder/open-streamer/internal/transcoder/native/proto"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	pb "github.com/datvietvac-techhub/open-streamer/internal/transcoder/native/proto"
 )
 
 // TestAVCodecFromProto_MapsKnownCodecs ensures every wire codec the

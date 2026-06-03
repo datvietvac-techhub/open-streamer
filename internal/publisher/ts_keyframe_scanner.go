@@ -27,7 +27,7 @@ package publisher
 //     start codes.
 
 import (
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // tsPacketSize is the fixed MPEG-TS packet length.

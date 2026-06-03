@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ntt0601zcoder/open-streamer/pkg/protocol"
+	"github.com/datvietvac-techhub/open-streamer/pkg/protocol"
 )
 
 // IsCopyInput reports whether the given Input is a `copy://` reference.

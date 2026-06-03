@@ -7,10 +7,10 @@ package coordinator
 import (
 	"context"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/manager"
-	"github.com/ntt0601zcoder/open-streamer/internal/publisher"
-	"github.com/ntt0601zcoder/open-streamer/internal/transcoder"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/manager"
+	"github.com/datvietvac-techhub/open-streamer/internal/publisher"
+	"github.com/datvietvac-techhub/open-streamer/internal/transcoder"
 )
 
 // mgrDep is the subset of manager.Service the coordinator needs.

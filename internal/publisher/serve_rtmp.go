@@ -26,11 +26,11 @@ import (
 
 	"github.com/q191201771/lal/pkg/rtmp"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/ingestor/push"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsdemux"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsmux"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/ingestor/push"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsdemux"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
 )
 
 // HandleRTMPPlay is the play handler registered with the ingestor's RTMP server.

@@ -1,6 +1,6 @@
 package buffer
 
-import "github.com/ntt0601zcoder/open-streamer/internal/domain"
+import "github.com/datvietvac-techhub/open-streamer/internal/domain"
 
 // Packet is the Buffer Hub wire format. Exactly one of TS or AV should be set per write:
 //   - TS: raw MPEG-TS chunk (transcoder output, push ingest, or legacy passthrough).

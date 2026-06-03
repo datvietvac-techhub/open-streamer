@@ -41,7 +41,7 @@ all: tidy vet build test ## tidy, vet, build, test (race)
 # Injected into pkg/version at build time. CI workflows can override
 # VERSION (e.g. VERSION=v0.0.7 make build) to stamp release tags;
 # local builds default to `git describe` + short SHA fallback.
-VERSION_PKG := github.com/ntt0601zcoder/open-streamer/pkg/version
+VERSION_PKG := github.com/datvietvac-techhub/open-streamer/pkg/version
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILT_AT    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)

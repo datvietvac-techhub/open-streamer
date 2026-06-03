@@ -33,13 +33,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/events"
-	"github.com/ntt0601zcoder/open-streamer/internal/ingestor"
-	"github.com/ntt0601zcoder/open-streamer/internal/metrics"
-	"github.com/ntt0601zcoder/open-streamer/internal/publisher"
-	"github.com/ntt0601zcoder/open-streamer/internal/transcoder"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/internal/ingestor"
+	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
+	"github.com/datvietvac-techhub/open-streamer/internal/publisher"
+	"github.com/datvietvac-techhub/open-streamer/internal/transcoder"
 	"github.com/samber/do/v2"
 )
 

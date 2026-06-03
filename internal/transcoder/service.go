@@ -25,10 +25,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/events"
-	"github.com/ntt0601zcoder/open-streamer/internal/metrics"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
 	"github.com/samber/do/v2"
 )
 

@@ -6,7 +6,7 @@ import (
 
 	gocodec "github.com/yapingcat/gomedia/go-codec"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/tsdemux"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsdemux"
 )
 
 // tsInput adapts raw MPEG-TS chunks (the format the buffer hub stores

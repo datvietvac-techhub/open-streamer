@@ -2,10 +2,10 @@
 package apidocs
 
 import (
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/manager"
-	"github.com/ntt0601zcoder/open-streamer/internal/vod"
-	"github.com/ntt0601zcoder/open-streamer/pkg/version"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/manager"
+	"github.com/datvietvac-techhub/open-streamer/internal/vod"
+	"github.com/datvietvac-techhub/open-streamer/pkg/version"
 )
 
 // ErrorBody matches handler writeError JSON shape.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/store"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/store"
 )
 
 type globalConfigRepo struct{ s *Store }

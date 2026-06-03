@@ -37,7 +37,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // batchMetrics holds the pre-bound Prometheus instruments for one batcher.

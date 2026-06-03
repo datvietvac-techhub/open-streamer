@@ -29,10 +29,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/tsmux"
-	"github.com/ntt0601zcoder/open-streamer/pkg/logger"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
+	"github.com/datvietvac-techhub/open-streamer/pkg/logger"
 )
 
 // hlsRunOpts carries per-rendition metadata for ABR HLS; nil → single-rendition mode.

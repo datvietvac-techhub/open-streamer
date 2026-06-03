@@ -31,7 +31,7 @@ package pull
 //	Close()               → stops the goroutine, drains remaining chunks
 
 import (
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // statsChunkBuffer is the chunks-channel depth between Feed() and the

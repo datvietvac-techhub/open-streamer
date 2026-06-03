@@ -3,8 +3,8 @@ package push
 import (
 	"errors"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // ErrStreamAlreadyActive is returned by Registry.Acquire when another pusher

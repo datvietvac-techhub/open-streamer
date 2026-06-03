@@ -14,9 +14,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/samber/do/v2"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/store"
-	"github.com/ntt0601zcoder/open-streamer/internal/vod"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/store"
+	"github.com/datvietvac-techhub/open-streamer/internal/vod"
 )
 
 // uploadMaxBytes caps a single VOD upload. Hard-coded for now; if operators

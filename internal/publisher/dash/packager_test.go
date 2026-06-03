@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // Real-world H.264 1080p Main@4.0 SPS/PPS so mp4ff.ParseSPSNALUnit

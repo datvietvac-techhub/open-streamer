@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // Available returns the list of HWAccel backends that appear to be present on

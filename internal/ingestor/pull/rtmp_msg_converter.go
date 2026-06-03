@@ -39,7 +39,7 @@ import (
 	"github.com/q191201771/lal/pkg/base"
 	"github.com/q191201771/lal/pkg/hevc"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // RTMPMsgConverter holds the per-stream codec configuration state and

@@ -4,7 +4,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 func TestAvailableAlwaysIncludesNone(t *testing.T) {

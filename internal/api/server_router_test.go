@@ -16,9 +16,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/api/handler"
-	"github.com/ntt0601zcoder/open-streamer/internal/metrics"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/api/handler"
+	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
 )
 
 // newRouterTestServer assembles a Server with bare-bones handlers — enough

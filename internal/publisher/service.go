@@ -21,12 +21,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/do/v2"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/events"
-	"github.com/ntt0601zcoder/open-streamer/internal/metrics"
-	"github.com/ntt0601zcoder/open-streamer/internal/sessions"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
+	"github.com/datvietvac-techhub/open-streamer/internal/sessions"
 )
 
 // Compile-time assertion: rtspHandler implements the ServerHandler interfaces it claims.

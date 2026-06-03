@@ -20,7 +20,7 @@ import (
 	"github.com/asticode/go-astits"
 	gocodec "github.com/yapingcat/gomedia/go-codec"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // PID convention. astits requires explicit elementary stream PIDs

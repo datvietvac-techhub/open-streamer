@@ -3,7 +3,7 @@ package native
 import (
 	"context"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // Config is the per-stream pipeline configuration handed from the parent

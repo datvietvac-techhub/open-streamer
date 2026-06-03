@@ -29,11 +29,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/buffer"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/ingestor/pull"
-	"github.com/ntt0601zcoder/open-streamer/pkg/protocol"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/ingestor/pull"
+	"github.com/datvietvac-techhub/open-streamer/pkg/protocol"
 )
 
 // VODResolver resolves a file:// URL referencing a registered VOD mount to an

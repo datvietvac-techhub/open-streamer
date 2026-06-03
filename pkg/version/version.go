@@ -3,9 +3,9 @@
 // Variables are populated via -ldflags at build time:
 //
 //	go build -ldflags="\
-//	    -X github.com/ntt0601zcoder/open-streamer/pkg/version.Version=v0.0.7 \
-//	    -X github.com/ntt0601zcoder/open-streamer/pkg/version.Commit=abc1234 \
-//	    -X github.com/ntt0601zcoder/open-streamer/pkg/version.BuiltAt=2026-04-23T15:00:00Z"
+//	    -X github.com/datvietvac-techhub/open-streamer/pkg/version.Version=v0.0.7 \
+//	    -X github.com/datvietvac-techhub/open-streamer/pkg/version.Commit=abc1234 \
+//	    -X github.com/datvietvac-techhub/open-streamer/pkg/version.BuiltAt=2026-04-23T15:00:00Z"
 //
 // Defaults below ("dev"/"unknown"/"") apply when running via `go run` or for
 // unstamped local builds. The Makefile `build` target wires all three.

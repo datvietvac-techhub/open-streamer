@@ -22,8 +22,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/store"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/store"
 )
 
 // dbFile is the name of the single data file inside the configured directory.

@@ -4,7 +4,7 @@ package storetest
 import (
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // NewFullStream returns a Stream with every field populated.

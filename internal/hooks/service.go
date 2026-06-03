@@ -29,11 +29,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/samber/do/v2"
 
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
-	"github.com/ntt0601zcoder/open-streamer/internal/events"
-	"github.com/ntt0601zcoder/open-streamer/internal/metrics"
-	"github.com/ntt0601zcoder/open-streamer/internal/store"
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
+	"github.com/datvietvac-techhub/open-streamer/internal/store"
 )
 
 // metricsHooks abstracts the Prometheus surface the dispatcher writes to.

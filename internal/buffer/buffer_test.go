@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 const testStream domain.StreamCode = "test"

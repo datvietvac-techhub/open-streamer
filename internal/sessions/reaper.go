@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // runReaper closes sessions whose UpdatedAt is older than idleDur. For

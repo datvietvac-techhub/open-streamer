@@ -13,15 +13,15 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/datvietvac-techhub/open-streamer/api/docs" // swag Register(SwaggerInfo)
+	"github.com/datvietvac-techhub/open-streamer/config"
+	"github.com/datvietvac-techhub/open-streamer/internal/api/handler"
+	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
+	"github.com/datvietvac-techhub/open-streamer/internal/publisher"
+	"github.com/datvietvac-techhub/open-streamer/internal/sessions"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
-	_ "github.com/ntt0601zcoder/open-streamer/api/docs" // swag Register(SwaggerInfo)
-	"github.com/ntt0601zcoder/open-streamer/config"
-	"github.com/ntt0601zcoder/open-streamer/internal/api/handler"
-	"github.com/ntt0601zcoder/open-streamer/internal/metrics"
-	"github.com/ntt0601zcoder/open-streamer/internal/publisher"
-	"github.com/ntt0601zcoder/open-streamer/internal/sessions"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/samber/do/v2"
 )
@@ -143,7 +143,12 @@ func (s *Server) buildRouter(serverCfg *config.ServerConfig) *chi.Mux {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// middleware.RealIP is deprecated in chi v5.3 (vulnerable to X-Forwarded-For
+	// spoofing — it mutates r.RemoteAddr from untrusted headers). Kept for now
+	// because this deployment runs behind a trusted reverse proxy that sets the
+	// forwarded headers. The safe migration to middleware.ClientIPFrom* +
+	// GetClientIP (which never mutate r.RemoteAddr) is tracked in docs/todo.
+	r.Use(middleware.RealIP) //nolint:staticcheck // trusted-proxy deploy; migration tracked in docs/todo
 	if serverCfg.CORS.Enabled {
 		r.Use(cors.Handler(corsOptions(serverCfg.CORS)))
 	}

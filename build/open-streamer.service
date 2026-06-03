@@ -1,6 +1,6 @@
 [Unit]
 Description=Open Streamer — live video media server
-Documentation=https://github.com/ntt0601zcoder/open-streamer
+Documentation=https://github.com/datvietvac-techhub/open-streamer
 After=network-online.target
 Wants=network-online.target
 

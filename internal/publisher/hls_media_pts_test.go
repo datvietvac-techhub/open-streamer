@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ntt0601zcoder/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // TestHLSSegmenter_MediaPTSCutCadence locks in the P8.1 fix: the cut
