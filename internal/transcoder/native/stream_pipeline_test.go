@@ -610,23 +610,51 @@ func TestReleaseAudio_SafetyValveWhenVideoStalled(t *testing.T) {
 	require.Len(t, p.pendingAudio, 6)
 }
 
-// TestRebaseVideoPTS_ClampPacesAtSourceRateNotConfigFps is the file/fps-drift
-// regression: when the monotonic guard engages, it must advance by the
-// OBSERVED source frame interval (33 ms for a 30 fps source), not the static
-// videoFrameDurMs (40 ms = 25 fps). With the static value the guard
-// over-advances every frame, never releases, and re-times video to 25 fps —
-// running it ~20 % fast and drifting it off the audio clock.
-func TestRebaseVideoPTS_ClampPacesAtSourceRateNotConfigFps(t *testing.T) {
-	// lastVideoOut seeded ahead so out = src+offset stays below it → the guard
-	// fires every frame, exactly the self-perpetuating state observed live.
-	p := &StreamPipeline{videoFrameDurMs: 40, lastVideoOut: 10_000}
-	src := int64(5000) // 30 fps source: 33 ms steps, all below lastVideoOut
+// TestRebaseVideoPTS_AdvancingSourceReturnsToSourceLine is the slow-drift
+// (ratchet-leak) regression. When an ADVANCING source's rebased value dips
+// to/under the last output (sub-frame jitter / ms truncation), the guard must
+// apply a strict-monotonic +1 tie-break ONLY and then RETURN to the true
+// source line on the next forward frame — never advance by a full frame
+// interval and ratchet lastVideoOut forward (which leaked (step − trueDelta)
+// ms/frame and drifted video off the audio clock ~0.05 s/h).
+func TestRebaseVideoPTS_AdvancingSourceReturnsToSourceLine(t *testing.T) {
+	// Pre-seed an advancing source whose first rebased value lands just under
+	// lastVideoOut (one collision), then keeps advancing past it.
+	p := &StreamPipeline{lastVideoOut: 5050, lastVideoSrc: 5000, hasVideoSrc: true, videoSrcIntervalMs: 33}
 	got := make([]int64, 0, 5)
-	for range 5 {
+	for _, src := range []int64{5033, 5066, 5099, 5132, 5165} { // ptsOffset 0
 		got = append(got, p.rebaseVideoPTS(src))
-		src += 33
 	}
-	// Frame 0: no interval learned yet → fallback 40 → 10040.
-	// Frames 1..4: observed 33 ms interval → +33 each (NOT +40).
-	assert.Equal(t, []int64{10040, 10073, 10106, 10139, 10172}, got)
+	// 5033 ≤ 5050 → +1 tie-break = 5051; 5066 > 5051 → returns to source line;
+	// thereafter == src. The single collision does NOT perpetuate.
+	assert.Equal(t, []int64{5051, 5066, 5099, 5132, 5165}, got)
+}
+
+// TestRebaseVideoPTS_ExactTick25fps_BitIdentical is the no-op invariant that
+// protects currently-flat streams: an exact-40 ms (25 fps) source must pass
+// through unchanged (out == src + offset every frame, the guard never fires).
+func TestRebaseVideoPTS_ExactTick25fps_BitIdentical(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true}
+	got := make([]int64, 0, 6)
+	for _, src := range []int64{1000, 1040, 1080, 1120, 1160, 1200} {
+		got = append(got, p.rebaseVideoPTS(src))
+	}
+	// First frame anchors to 1 ms; each later frame advances exactly 40 ms,
+	// tracking the source line with no guard intervention.
+	assert.Equal(t, []int64{1, 41, 81, 121, 161, 201}, got)
+}
+
+// TestRebaseVideoPTS_StallThenRecovery: a genuine stall (frozen source PTS)
+// paces by the observed interval (keeps the segmenter alive), and on resume
+// the output snaps straight back to the source line — no +1 ms crawl.
+func TestRebaseVideoPTS_StallThenRecovery(t *testing.T) {
+	p := &StreamPipeline{lastVideoOut: 1000, lastVideoSrc: 1000, hasVideoSrc: true, videoSrcIntervalMs: 40}
+	got := make([]int64, 0, 5)
+	// frozen source for 3 frames → +40 pacing each; then resume advancing.
+	for _, src := range []int64{1000, 1000, 1000, 1160, 1200} { // ptsOffset 0
+		got = append(got, p.rebaseVideoPTS(src))
+	}
+	// 1000(stall)→1040, 1040, 1080; then 1160 > 1080 → returns to source line
+	// (1160) in ONE frame, not a +1 ms crawl; 1200 → 1200.
+	assert.Equal(t, []int64{1040, 1080, 1120, 1160, 1200}, got)
 }

@@ -478,12 +478,16 @@ func (p *StreamPipeline) releaseAudio() []OutputFrame {
 // audio ordering.
 func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 	p.anchorRebase(srcPTS)
-	// Learn the source's real frame interval from forward PTS deltas so the
-	// monotonic guard below paces at the SOURCE rate, not a static configured
-	// fps. A sane positive delta (a real inter-frame gap, not a switch jump)
-	// updates it; jumps and regressions are ignored.
-	if p.hasVideoSrc {
-		if d := srcPTS - p.lastVideoSrc; d > 0 && d <= maxSaneFrameIntervalMs {
+	// Whether the SOURCE advanced since the previous frame — captured BEFORE
+	// updating lastVideoSrc. <= 0 means a genuine stall/regress (decoder
+	// repeating or rewinding PTS); > 0 means the source is moving forward and
+	// any dip of the rebased value to/under the last output is mere sub-frame
+	// jitter / ms-truncation, not a stall.
+	advancing := p.hasVideoSrc && srcPTS > p.lastVideoSrc
+	if advancing {
+		// Learn the real frame interval from forward deltas (paces the stall
+		// fallback at the source rate, not a static configured fps).
+		if d := srcPTS - p.lastVideoSrc; d <= maxSaneFrameIntervalMs {
 			p.videoSrcIntervalMs = d
 		}
 	}
@@ -491,19 +495,27 @@ func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 
 	out := srcPTS + p.ptsOffset
 	if out <= p.lastVideoOut {
-		// Source PTS stalled or regressed. Advance by the OBSERVED source
-		// frame interval so the output clock tracks real time. Using the
-		// static videoFrameDurMs here is wrong when it exceeds the real
-		// interval (e.g. 40 ms/25 fps vs a 30 fps / 33 ms source): the guard
-		// over-advances every frame, never releases, and re-times video to
-		// the configured fps — drifting it off the audio clock. The static
-		// value is only a fallback until the first interval is observed (and
-		// for a genuine stall where no forward delta exists yet).
-		step := p.videoSrcIntervalMs
-		if step <= 0 {
-			step = p.videoFrameDurMs
+		if advancing {
+			// Advancing source whose rebased value merely landed at/under the
+			// last output: strict-monotonic tie-break ONLY (+1). The next
+			// forward frame whose src+offset clears lastVideoOut returns the
+			// output to the true source line, so a single collision cannot
+			// self-perpetuate. The previous code added a full frame interval
+			// here and then ratcheted lastVideoOut forward unconditionally —
+			// once tripped it leaked (step − trueDelta) ms/frame, re-timing
+			// video off the audio clock (~0.05 s/h slow A/V drift).
+			out = p.lastVideoOut + 1
+		} else {
+			// Genuine stall (source PTS not advancing — clustered / repeated
+			// PTS from a decoder that mishandles timestamps). Pace by the
+			// observed frame interval so the output framerate doesn't collapse
+			// to ~1 ms steps and stall the segmenter (the 98cbcbc case).
+			step := p.videoSrcIntervalMs
+			if step <= 0 {
+				step = p.videoFrameDurMs
+			}
+			out = p.lastVideoOut + step
 		}
-		out = p.lastVideoOut + step
 	}
 	p.lastVideoOut = out
 	return out
