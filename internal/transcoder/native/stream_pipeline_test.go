@@ -522,3 +522,139 @@ func TestStreamPipeline_SwitchInputPreservesAllRenditions(t *testing.T) {
 			"SwitchInput reallocated rendition %d scaler", i)
 	}
 }
+
+// TestRebaseVideoPTS_StalledSourcePacesAtFrameRate reproduces the
+// "buffer grows, won't play after input switch" failure. When the active
+// decoder mishandles a source's timestamps (e.g. an HLS-pull input whose
+// pkt_timebase the NVDEC binding can't set) it emits frames with stalled
+// / non-monotonic PTS. The legacy monotonic guard advanced the output by
+// +1 ms per frame, collapsing the timeline (~1 ms/frame) so the publisher
+// never reached segDur in PTS and force-flushed off-IDR every wallclock
+// max_dur. The output must instead advance by one nominal frame interval.
+func TestRebaseVideoPTS_StalledSourcePacesAtFrameRate(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true} // 25 fps
+
+	const stuck = 90_000 // a decoder emitting the SAME source PTS every frame
+	got := make([]int64, 0, 5)
+	for range 5 {
+		got = append(got, p.rebaseVideoPTS(stuck))
+	}
+
+	// First frame anchors the output clock to 1 ms; every subsequent frame
+	// advances by the 40 ms frame interval — NOT the legacy +1 ms.
+	assert.Equal(t, []int64{1, 41, 81, 121, 161}, got)
+}
+
+// TestRebaseVideoPTS_MonotonicSourceTracksSource confirms the fix is inert
+// on healthy input: a source PTS advancing normally is passed through
+// (offset-rebased) without the frame-interval pacing kicking in. The
+// source steps by 50 ms (≠ the 40 ms frame interval) so the assertion
+// proves the output follows the SOURCE, not the pacing fallback.
+func TestRebaseVideoPTS_MonotonicSourceTracksSource(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true}
+
+	got := make([]int64, 0, 4)
+	for _, s := range []int64{1000, 1050, 1100, 1150} {
+		got = append(got, p.rebaseVideoPTS(s))
+	}
+	assert.Equal(t, []int64{1, 51, 101, 151}, got)
+}
+
+// TestReleaseAudio_HoldsAudioLeadingVideo is the core of the A/V-sync gate:
+// audio whose output PTS leads the video clock by more than audioLeadCapMs is
+// held, then released as video catches up. This is what stops the cheap audio
+// passthrough from outrunning the heavy video encode on a bursty input and
+// baking a permanent lip-sync offset into the output (the HLS-switch desync).
+func TestReleaseAudio_HoldsAudioLeadingVideo(t *testing.T) {
+	p := &StreamPipeline{lastVideoOut: 1000} // cap=500 → limit=1500
+	p.pendingAudio = []OutputFrame{{PTS: 1200}, {PTS: 1400}, {PTS: 1600}}
+
+	out := p.releaseAudio()
+	require.Len(t, out, 2) // 1200,1400 ≤ 1500 released; 1600 leads → held
+	assert.Equal(t, int64(1200), out[0].PTS)
+	assert.Equal(t, int64(1400), out[1].PTS)
+	require.Len(t, p.pendingAudio, 1)
+	assert.Equal(t, int64(1600), p.pendingAudio[0].PTS)
+
+	p.lastVideoOut = 1200 // video advances → limit=1700, held frame releases
+	out = p.releaseAudio()
+	require.Len(t, out, 1)
+	assert.Equal(t, int64(1600), out[0].PTS)
+	assert.Empty(t, p.pendingAudio)
+}
+
+// TestReleaseAudio_PassesAudioWithinCap confirms normal operation is untouched:
+// audio leading video by less than the cap (intrinsic source A/V offset) flows
+// straight through, so a real-time input (UDP) is never throttled.
+func TestReleaseAudio_PassesAudioWithinCap(t *testing.T) {
+	p := &StreamPipeline{lastVideoOut: 10_000}
+	p.pendingAudio = []OutputFrame{{PTS: 10_300}, {PTS: 10_350}} // +0.30, +0.35 < 0.5
+
+	out := p.releaseAudio()
+	require.Len(t, out, 2)
+	assert.Empty(t, p.pendingAudio)
+}
+
+// TestReleaseAudio_SafetyValveWhenVideoStalled verifies the audioHoldMaxMs
+// valve: if video stalls, the oldest held audio is released anyway so the
+// track never goes silent.
+func TestReleaseAudio_SafetyValveWhenVideoStalled(t *testing.T) {
+	p := &StreamPipeline{lastVideoOut: 0} // limit=500, nothing within cap
+	for ts := int64(1000); ts <= 7000; ts += 1000 {
+		p.pendingAudio = append(p.pendingAudio, OutputFrame{PTS: ts})
+	}
+	// newest=7000; release oldest while 7000−PTS > 5000 (PTS<2000): only 1000.
+	out := p.releaseAudio()
+	require.Len(t, out, 1)
+	assert.Equal(t, int64(1000), out[0].PTS)
+	require.Len(t, p.pendingAudio, 6)
+}
+
+// TestRebaseVideoPTS_AdvancingSourceReturnsToSourceLine is the slow-drift
+// (ratchet-leak) regression. When an ADVANCING source's rebased value dips
+// to/under the last output (sub-frame jitter / ms truncation), the guard must
+// apply a strict-monotonic +1 tie-break ONLY and then RETURN to the true
+// source line on the next forward frame — never advance by a full frame
+// interval and ratchet lastVideoOut forward (which leaked (step − trueDelta)
+// ms/frame and drifted video off the audio clock ~0.05 s/h).
+func TestRebaseVideoPTS_AdvancingSourceReturnsToSourceLine(t *testing.T) {
+	// Pre-seed an advancing source whose first rebased value lands just under
+	// lastVideoOut (one collision), then keeps advancing past it.
+	p := &StreamPipeline{lastVideoOut: 5050, lastVideoSrc: 5000, hasVideoSrc: true, videoSrcIntervalMs: 33}
+	got := make([]int64, 0, 5)
+	for _, src := range []int64{5033, 5066, 5099, 5132, 5165} { // ptsOffset 0
+		got = append(got, p.rebaseVideoPTS(src))
+	}
+	// 5033 ≤ 5050 → +1 tie-break = 5051; 5066 > 5051 → returns to source line;
+	// thereafter == src. The single collision does NOT perpetuate.
+	assert.Equal(t, []int64{5051, 5066, 5099, 5132, 5165}, got)
+}
+
+// TestRebaseVideoPTS_ExactTick25fps_BitIdentical is the no-op invariant that
+// protects currently-flat streams: an exact-40 ms (25 fps) source must pass
+// through unchanged (out == src + offset every frame, the guard never fires).
+func TestRebaseVideoPTS_ExactTick25fps_BitIdentical(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true}
+	got := make([]int64, 0, 6)
+	for _, src := range []int64{1000, 1040, 1080, 1120, 1160, 1200} {
+		got = append(got, p.rebaseVideoPTS(src))
+	}
+	// First frame anchors to 1 ms; each later frame advances exactly 40 ms,
+	// tracking the source line with no guard intervention.
+	assert.Equal(t, []int64{1, 41, 81, 121, 161, 201}, got)
+}
+
+// TestRebaseVideoPTS_StallThenRecovery: a genuine stall (frozen source PTS)
+// paces by the observed interval (keeps the segmenter alive), and on resume
+// the output snaps straight back to the source line — no +1 ms crawl.
+func TestRebaseVideoPTS_StallThenRecovery(t *testing.T) {
+	p := &StreamPipeline{lastVideoOut: 1000, lastVideoSrc: 1000, hasVideoSrc: true, videoSrcIntervalMs: 40}
+	got := make([]int64, 0, 5)
+	// frozen source for 3 frames → +40 pacing each; then resume advancing.
+	for _, src := range []int64{1000, 1000, 1000, 1160, 1200} { // ptsOffset 0
+		got = append(got, p.rebaseVideoPTS(src))
+	}
+	// 1000(stall)→1040, 1040, 1080; then 1160 > 1080 → returns to source line
+	// (1160) in ONE frame, not a +1 ms crawl; 1200 → 1200.
+	assert.Equal(t, []int64{1040, 1080, 1120, 1160, 1200}, got)
+}

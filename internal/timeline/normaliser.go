@@ -177,7 +177,24 @@ type trackState struct {
 	inputOrigin   int64
 	outputAnchor  int64
 	lastOutputDts int64
+
+	// lastInputDts is the last UNWRAPPED input DTS seen on this track; it is
+	// the reference for detecting a 33-bit PTS/DTS counter wrap. wrapOffset is
+	// the running sum of full wrap periods added to the raw input DTS so the
+	// input timeline stays continuous across wraps (see ptsWrapMs).
+	lastInputDts int64
+	wrapOffset   int64
 }
+
+// ptsWrapMs is the period of the 33-bit, 90 kHz MPEG-TS PTS/DTS counter in
+// milliseconds: 2^33 ticks / 90 ticks-per-ms ≈ 95,443,717 ms (~26.5 h). When a
+// seeded track's input DTS jumps backward by more than half this period we
+// treat it as a counter wrap and add a full period, keeping the input timeline
+// monotonic. Without this the wrap looks like a regression and each track
+// re-anchors to wallclock INDEPENDENTLY — landing on different targets because
+// V and A cross the boundary at different moments — which permanently desyncs
+// A/V until restart (see TestPTSWrapPreservesAVSync).
+const ptsWrapMs int64 = (1 << 33) / 90
 
 // Normaliser is the per-stream timeline anchor. One instance per
 // `buffer.StreamCode`. Safe for concurrent Apply / OnSession calls; the
@@ -402,6 +419,7 @@ func (n *Normaliser) applyOneLocked(
 	otherTrack := &n.tracks[numTracks-1-tk]
 
 	if track.seeded {
+		inDts = n.unwrapInputLocked(track, inDts)
 		return n.applySeededLocked(p, tk, track, inDts, cto, actualNowMs)
 	}
 
@@ -432,6 +450,23 @@ func (n *Normaliser) applyOneLocked(
 		SessionID: n.sessionID,
 	}
 	return []*domain.AVPacket{p}
+}
+
+// unwrapInputLocked compensates a 33-bit PTS/DTS counter wrap on a seeded
+// track. A wrap shows up as the raw input DTS jumping backward by ~ptsWrapMs;
+// adding a full period keeps the input timeline monotonic so the wrap is NOT
+// mistaken for a regression. Because both tracks accumulate the SAME period
+// when each crosses the boundary, their relative (A/V) offset is preserved —
+// unlike the per-track wallclock re-anchor the regression path would trigger.
+// Returns the unwrapped input DTS and records it as the new reference.
+func (n *Normaliser) unwrapInputLocked(track *trackState, rawInDts int64) int64 {
+	in := rawInDts + track.wrapOffset
+	if in < track.lastInputDts-ptsWrapMs/2 {
+		track.wrapOffset += ptsWrapMs
+		in += ptsWrapMs
+	}
+	track.lastInputDts = in
+	return in
 }
 
 // applySeededLocked is the post-seed Apply path: drift cap, jump
@@ -530,6 +565,22 @@ func (n *Normaliser) hardReanchorLocked(in reanchorContext) {
 	in.track.inputOrigin = in.inDts
 	in.track.outputAnchor = target
 	in.track.lastOutputDts = target
+
+	// Forward re-anchor (jump to wallclock on drift/stall): shift the PARTNER
+	// track by the same delta so the V/A relationship survives. Without this,
+	// a per-track forward jump leaves the partner behind — and because V and A
+	// cross the threshold at slightly different moments, the residual is
+	// permanent (the secondary lip-sync drift mechanism). Only forward jumps
+	// are mirrored; a clamped re-anchor (delta <= 0) doesn't move output, so
+	// there is nothing to propagate. The shift recomputes the partner's drift
+	// to ~0, so it will not itself re-anchor on its next packet.
+	if delta := target - in.expectedDts; delta > 0 {
+		if partner := &n.tracks[numTracks-1-in.tk]; partner.seeded {
+			partner.outputAnchor += delta
+			partner.lastOutputDts += delta
+		}
+	}
+
 	assignTimes(in.pkt, target, in.cto)
 	n.totalReanch++
 	if n.totalReanch == 1 || n.totalReanch%50 == 0 {
@@ -619,12 +670,14 @@ func (n *Normaliser) completeJointSeedLocked(
 	pendingTrack.inputOrigin = pendingFirst.inDts
 	pendingTrack.outputAnchor = pendingAnchor
 	pendingTrack.lastOutputDts = pendingAnchor
+	pendingTrack.lastInputDts = pendingFirst.inDts
 
 	currentTrack := &n.tracks[tk]
 	currentTrack.seeded = true
 	currentTrack.inputOrigin = inDts
 	currentTrack.outputAnchor = currentAnchor
 	currentTrack.lastOutputDts = currentAnchor
+	currentTrack.lastInputDts = inDts
 
 	drained := make([]*domain.AVPacket, len(n.pending))
 	for i := range n.pending {
@@ -691,6 +744,7 @@ func (n *Normaliser) timeoutDrainPendingLocked() []*domain.AVPacket {
 	pendingTrack.inputOrigin = pendingFirst.inDts
 	pendingTrack.outputAnchor = 0
 	pendingTrack.lastOutputDts = 0
+	pendingTrack.lastInputDts = pendingFirst.inDts
 
 	drained := make([]*domain.AVPacket, len(n.pending))
 	for i := range n.pending {
@@ -766,6 +820,7 @@ func (n *Normaliser) seedTrackLocked(
 	track.inputOrigin = inDts
 	track.outputAnchor = anchor
 	track.lastOutputDts = anchor
+	track.lastInputDts = inDts
 	assignTimes(p, anchor, cto)
 
 	// Operator-visible seed log so a deploy can be verified by reading

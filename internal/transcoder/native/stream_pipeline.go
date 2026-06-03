@@ -172,7 +172,7 @@ type StreamPipeline struct {
 	// timeline that players can't assemble even with an
 	// EXT-X-DISCONTINUITY tag — the live edge stalls. Rebasing onto a
 	// single continuous clock is what makes switching actually work
-	// (the design Flussonic-style servers rely on).
+	// (the standard design for seamless live input switching).
 	//
 	// ptsOffset is added to every source PTS; recomputed on the first
 	// frame after each switch so the new input continues right after
@@ -187,11 +187,67 @@ type StreamPipeline struct {
 	lastAudioOut  int64
 	pendingRebase bool
 
+	// videoFrameDurMs is the nominal inter-frame interval (1000/framerate
+	// ms) used to pace the video output clock when a source's decoded PTS
+	// stalls or regresses — e.g. an HLS-pull input whose timestamps the
+	// NVDEC decoder mishandles (the linked go-astiav binding exposes no
+	// pkt_timebase setter) emits frames with clustered / non-monotonic
+	// PTS. Advancing the output by one frame interval there — instead of
+	// the legacy +1 ms — keeps the emitted timeline tracking real time, so
+	// segment-duration math stays correct and the publisher cuts at the
+	// encoder's IDRs instead of force-flushing on its wallclock safety net
+	// (the "buffer grows, won't play after input switch" failure).
+	videoFrameDurMs int64
+
+	// videoSrcIntervalMs is the last OBSERVED source frame interval (src PTS
+	// delta between consecutive video frames). rebaseVideoPTS paces its
+	// monotonic-guard advance by this, not the static videoFrameDurMs: a
+	// configured-fps interval that exceeds the real source interval (e.g.
+	// 40 ms/25 fps applied to a 30 fps / 33 ms source) makes the guard
+	// over-advance every frame and self-perpetuate, re-timing video to the
+	// configured fps and drifting it ~(1 − srcFps/cfgFps) off the audio clock.
+	// Relearned per source; falls back to videoFrameDurMs until first observed.
+	videoSrcIntervalMs int64
+	lastVideoSrc       int64 // previous video source PTS (for the interval)
+	hasVideoSrc        bool
+
 	// audioReenc is non-nil when Audio.Copy is false — AAC frames are
 	// decoded → resampled → re-encoded instead of passed through. nil
 	// keeps the cheap passthrough path.
 	audioReenc *audioReencoder
+
+	// pendingAudio holds audio OutputFrames whose output PTS has run ahead
+	// of the video output clock (lastVideoOut) by more than audioLeadCapMs.
+	// They are released as video catches up so downstream segments keep A/V
+	// within ~audioLeadCapMs. Needed because the cheap audio passthrough
+	// emits a whole demuxed chunk instantly while the heavy video encode
+	// (decode + scale + N×NVENC) drains it over real time — on a bursty
+	// input (HLS-pull delivering a full playlist window at a switch) audio
+	// would otherwise outrun video by seconds, baking a permanent lip-sync
+	// offset into the output. PTS-ordered (rebaseAudioPTS is monotonic).
+	pendingAudio []OutputFrame
 }
+
+const (
+	// audioLeadCapMs bounds how far an audio output PTS may lead the video
+	// output clock before the frame is held in pendingAudio. Set above the
+	// largest legitimate intrinsic source A/V offset (~0.4 s observed) so
+	// normal real-time inputs (UDP) are never throttled — only a bursty
+	// input that lets audio outrun video triggers holding.
+	audioLeadCapMs int64 = 500
+
+	// audioHoldMaxMs is a safety valve: if video stalls and held audio spans
+	// more than this, the oldest held frames are released anyway so the audio
+	// track never goes silent (A/V desync returns until video recovers, which
+	// is preferable to dead audio).
+	audioHoldMaxMs int64 = 5000
+
+	// maxSaneFrameIntervalMs caps what rebaseVideoPTS will accept as an
+	// observed source frame interval (≈ down to 5 fps). Anything larger is a
+	// switch/loop jump or a stall, not a real inter-frame gap, so it must not
+	// be learned as the pacing step.
+	maxSaneFrameIntervalMs int64 = 200
+)
 
 // NewStreamPipeline constructs the decoder + every rendition's
 // scaler/encoder pair. On error every partially-allocated stage is
@@ -292,16 +348,17 @@ func NewStreamPipeline(cfg PipelineConfig) (*StreamPipeline, error) {
 	}
 
 	return &StreamPipeline{
-		cfg:           cfg,
-		encoders:      encoders,
-		scalers:       scalers,
-		gpuScalers:    gpuScalers,
-		watermarkers:  watermarkers,
-		useGPU:        useGPU,
-		cuda:          cuda,
-		decoder:       dec,
-		pendingRebase: true, // first-ever frame anchors the output clock
-		audioReenc:    audioReenc,
+		cfg:             cfg,
+		encoders:        encoders,
+		scalers:         scalers,
+		gpuScalers:      gpuScalers,
+		watermarkers:    watermarkers,
+		useGPU:          useGPU,
+		cuda:            cuda,
+		decoder:         dec,
+		pendingRebase:   true, // first-ever frame anchors the output clock
+		videoFrameDurMs: videoFrameDurationMs(cfg.Renditions[0].Encoder.Framerate),
+		audioReenc:      audioReenc,
 	}, nil
 }
 
@@ -349,25 +406,67 @@ func buildAudioReencoder(cfg AudioConfig) (*audioReencoder, error) {
 // IDR makes both tracks start from the same point so they share the
 // offset cleanly.
 func (p *StreamPipeline) handleAudio(frames []esFrame) ([]OutputFrame, error) {
-	if len(frames) == 0 || !p.sawKeyframe {
+	if !p.sawKeyframe {
 		return nil, nil
 	}
-	if p.audioReenc == nil {
-		return p.passthroughAudio(frames), nil
+	if len(frames) > 0 {
+		if err := p.bufferAudio(frames); err != nil {
+			return p.releaseAudio(), err
+		}
 	}
-	var out []OutputFrame
+	return p.releaseAudio(), nil
+}
+
+// bufferAudio rebases the demuxed AAC frames onto the output clock and queues
+// them in pendingAudio (passthrough copies as-is; otherwise re-encodes). The
+// A/V-sync gate in releaseAudio decides when they actually leave the pipeline.
+func (p *StreamPipeline) bufferAudio(frames []esFrame) error {
+	if p.audioReenc == nil {
+		p.pendingAudio = append(p.pendingAudio, p.passthroughAudio(frames)...)
+		return nil
+	}
 	for _, f := range frames {
 		enc, err := p.audioReenc.Process(f.data, f.pts)
 		if err != nil {
-			return out, fmt.Errorf("pipeline: audio reencode: %w", err)
+			return fmt.Errorf("pipeline: audio reencode: %w", err)
 		}
 		for i := range enc {
 			enc[i].PTS = p.rebaseAudioPTS(enc[i].PTS)
 			enc[i].DTS = enc[i].PTS
 		}
-		out = append(out, enc...)
+		p.pendingAudio = append(p.pendingAudio, enc...)
 	}
-	return out, nil
+	return nil
+}
+
+// releaseAudio pops pending audio frames that no longer lead the video output
+// clock by more than audioLeadCapMs, keeping the emitted audio paced with
+// video so downstream segments stay A/V-aligned. pendingAudio is PTS-ordered,
+// so the first frame still leading bounds the release. The audioHoldMaxMs
+// safety valve force-releases the oldest frames when video has stalled, so the
+// audio track never goes silent.
+func (p *StreamPipeline) releaseAudio() []OutputFrame {
+	if len(p.pendingAudio) == 0 {
+		return nil
+	}
+	limit := p.lastVideoOut + audioLeadCapMs
+	n := 0
+	for n < len(p.pendingAudio) && p.pendingAudio[n].PTS <= limit {
+		n++
+	}
+	if n < len(p.pendingAudio) {
+		newest := p.pendingAudio[len(p.pendingAudio)-1].PTS
+		for n < len(p.pendingAudio) && newest-p.pendingAudio[n].PTS > audioHoldMaxMs {
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	out := make([]OutputFrame, n)
+	copy(out, p.pendingAudio[:n])
+	p.pendingAudio = p.pendingAudio[n:]
+	return out
 }
 
 // rebaseVideoPTS / rebaseAudioPTS map a source-stream PTS (ms) onto
@@ -379,9 +478,44 @@ func (p *StreamPipeline) handleAudio(frames []esFrame) ([]OutputFrame, error) {
 // audio ordering.
 func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 	p.anchorRebase(srcPTS)
+	// Whether the SOURCE advanced since the previous frame — captured BEFORE
+	// updating lastVideoSrc. <= 0 means a genuine stall/regress (decoder
+	// repeating or rewinding PTS); > 0 means the source is moving forward and
+	// any dip of the rebased value to/under the last output is mere sub-frame
+	// jitter / ms-truncation, not a stall.
+	advancing := p.hasVideoSrc && srcPTS > p.lastVideoSrc
+	if advancing {
+		// Learn the real frame interval from forward deltas (paces the stall
+		// fallback at the source rate, not a static configured fps).
+		if d := srcPTS - p.lastVideoSrc; d <= maxSaneFrameIntervalMs {
+			p.videoSrcIntervalMs = d
+		}
+	}
+	p.lastVideoSrc, p.hasVideoSrc = srcPTS, true
+
 	out := srcPTS + p.ptsOffset
 	if out <= p.lastVideoOut {
-		out = p.lastVideoOut + 1
+		if advancing {
+			// Advancing source whose rebased value merely landed at/under the
+			// last output: strict-monotonic tie-break ONLY (+1). The next
+			// forward frame whose src+offset clears lastVideoOut returns the
+			// output to the true source line, so a single collision cannot
+			// self-perpetuate. The previous code added a full frame interval
+			// here and then ratcheted lastVideoOut forward unconditionally —
+			// once tripped it leaked (step − trueDelta) ms/frame, re-timing
+			// video off the audio clock (~0.05 s/h slow A/V drift).
+			out = p.lastVideoOut + 1
+		} else {
+			// Genuine stall (source PTS not advancing — clustered / repeated
+			// PTS from a decoder that mishandles timestamps). Pace by the
+			// observed frame interval so the output framerate doesn't collapse
+			// to ~1 ms steps and stall the segmenter (the 98cbcbc case).
+			step := p.videoSrcIntervalMs
+			if step <= 0 {
+				step = p.videoFrameDurMs
+			}
+			out = p.lastVideoOut + step
+		}
 	}
 	p.lastVideoOut = out
 	return out
@@ -413,6 +547,20 @@ func (p *StreamPipeline) anchorRebase(srcPTS int64) {
 	}
 	// base==0 on the first-ever frame → output starts at 1 ms.
 	p.ptsOffset = base + 1 - srcPTS
+}
+
+// videoFrameDurationMs is the nominal inter-frame interval in
+// milliseconds for the configured output framerate. rebaseVideoPTS uses
+// it to pace the output clock when a source's decoded PTS stalls.
+// Defaults to 40 ms (25 fps) when the framerate is unknown.
+func videoFrameDurationMs(framerate int) int64 {
+	if framerate <= 0 {
+		return 40
+	}
+	if d := int64(1000 / framerate); d >= 1 {
+		return d
+	}
+	return 1
 }
 
 // buildRendition allocates one rendition's encoder + scaler +
@@ -655,6 +803,8 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 	p.sawKeyframe = false
 	p.pendingForceKeyframe = true
 	p.pendingRebase = true
+	p.pendingAudio = nil                           // drop the old input's held audio; new input re-anchors
+	p.hasVideoSrc, p.videoSrcIntervalMs = false, 0 // relearn the new source's frame interval
 	// EXT-X-DISCONTINUITY is only needed when the OUTPUT stream's shape
 	// can change across the switch. With audio re-encode the output is
 	// fully continuous — same encoder (identical SPS/PPS), continuous
@@ -730,6 +880,8 @@ func (p *StreamPipeline) switchInputGPU() ([]OutputFrame, error) {
 	p.sawKeyframe = false
 	p.pendingForceKeyframe = true
 	p.pendingRebase = true
+	p.pendingAudio = nil                           // drop the old input's held audio; new input re-anchors
+	p.hasVideoSrc, p.videoSrcIntervalMs = false, 0 // relearn the new source's frame interval
 	if p.audioReenc != nil {
 		p.audioReenc.SwitchInput()
 	} else {
@@ -796,6 +948,12 @@ func (p *StreamPipeline) flushTSDemuxTail() ([]OutputFrame, error) {
 		if err != nil {
 			return head, err
 		}
+	}
+	// Shutdown: force-drain any audio still held by the A/V-sync gate so the
+	// final audio tail isn't lost.
+	if len(p.pendingAudio) > 0 {
+		head = append(head, p.pendingAudio...)
+		p.pendingAudio = nil
 	}
 	return head, nil
 }

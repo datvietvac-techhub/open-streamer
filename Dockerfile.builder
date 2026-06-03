@@ -108,7 +108,7 @@ RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" | t
     cd / && rm -rf /tmp/ffmpeg-${FFMPEG_VERSION} /tmp/ffmpeg-*.log
 
 # 3. Go toolchain matching go.mod.
-ARG GO_VERSION=1.25.10
+ARG GO_VERSION=1.25.11
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
     | tar -C /usr/local -xz
 ENV PATH=/usr/local/go/bin:/root/go/bin:$PATH \

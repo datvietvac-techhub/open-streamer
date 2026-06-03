@@ -583,6 +583,146 @@ func TestJointSeedAudioLeadsVideo(t *testing.T) {
 	}
 }
 
+// TestJointSeedBFramesLargeGap reproduces the production lip-sync report.
+// The affected feeds are H.264 High profile (has_b_frames=2 ⇒ video carries a
+// non-zero CTO = PTS−DTS) delivered over MPEG-TS with a LARGE inter-track
+// delivery gap (~487 ms measured on the affected channels via the joint-seed
+// source_delta; well-behaved channels show ~78 ms). Unlike
+// TestJointSeedAudioLeadsVideo (PTS==DTS, no reorder) this exercises the
+// B-frame path the affected sources actually use.
+//
+// The raw feed is correctly synced — a player fed the multicast directly
+// (Flussonic) shows no skew — i.e. for every presentation moment X the video
+// frame PTS and the audio frame PTS are equal. The Normaliser MUST preserve
+// that: a V frame and an A frame for the same source moment must emit at the
+// same output PTS. If they don't, the Normaliser is baking the delivery gap
+// into the presentation timeline (the bug under investigation).
+func TestJointSeedBFramesLargeGap(t *testing.T) {
+	const cto uint64 = 80  // reorder delay, ms (≈2 frames @ 25 fps; has_b_frames=2)
+	const gap uint64 = 487 // video delivered AHEAD of audio by 487 ms in source DTS
+
+	n := New(jointSeedConfig(1000))
+
+	// First audio packet's source PTS/DTS. The first video packet sits +gap
+	// later in source DTS (video buffer fuller at connect).
+	const audioOrigin uint64 = 1_000_000
+	videoFirstDts := audioOrigin + gap   // 1_000_487
+	videoFirstPts := videoFirstDts + cto // 1_000_567
+
+	// Video arrives first in WALLCLOCK; held during the joint-seed window.
+	v0 := vPkt(videoFirstPts, videoFirstDts)
+	if emits := n.Apply(v0, startWall); len(emits) != 0 {
+		t.Fatalf("first video must be held during joint-seed; got %d emits", len(emits))
+	}
+	// Audio arrives ~80 ms later in wallclock; completes the joint seed.
+	a0 := aPkt(audioOrigin, audioOrigin)
+	if emits := n.Apply(a0, startWall.Add(80*time.Millisecond)); len(emits) != 2 {
+		t.Fatalf("joint-seed completion must emit 2 packets; got %d", len(emits))
+	}
+
+	// Feed a V frame and an A frame for the SAME source presentation moment X.
+	// Synced source ⇒ both carry source PTS == X. Feed each at the wallclock
+	// matching its expected output DTS so no drift re-anchor fires.
+	const X uint64 = 1_001_000 // ~1 s in; both tracks now overlap
+	vX := vPkt(X, X-cto)       // video: PTS=X, DTS=X−cto (reorder)
+	aX := aPkt(X, X)           // audio: PTS=DTS=X
+	emitsV := n.Apply(vX, startWall.Add(920*time.Millisecond))
+	emitsA := n.Apply(aX, startWall.Add(1000*time.Millisecond))
+	if len(emitsV) != 1 || len(emitsA) != 1 {
+		t.Fatalf("post-seed must emit one packet each; got v=%d a=%d", len(emitsV), len(emitsA))
+	}
+
+	if vX.PTSms != aX.PTSms {
+		t.Fatalf("LIP-SYNC BROKEN: same source moment X=%d → video_pts=%d, audio_pts=%d (skew=%+d ms)",
+			X, vX.PTSms, aX.PTSms, int64(vX.PTSms)-int64(aX.PTSms))
+	}
+}
+
+// TestPTSWrapPreservesAVSync reproduces the slow A/V drift confirmed in
+// production. MPEG-TS carries a 33-bit, 90 kHz PTS that wraps every
+// 2^33 / 90000 ≈ 95,443,717 ms (~26.5 h). When the source PTS wraps, each
+// track's input DTS jumps backward by ~that amount; the Normaliser currently
+// treats it as a regression and hard-re-anchors video and audio INDEPENDENTLY
+// to wallclock (observed in the journal: monotonic_regress drift_ms=-95443xxx).
+// Because the two tracks cross the wrap boundary at slightly different moments,
+// the independent re-anchors land on different wallclock targets → a permanent
+// A/V skew that persists until restart (the ~22 h lip-sync drift report).
+//
+// Correct behaviour: the wrap must be UNWRAPPED (treated as +wrap_period) so
+// the timeline stays continuous and both tracks keep their relative offset.
+// A same-source-moment V/A pair AFTER the wrap must emit at equal PTS.
+func TestPTSWrapPreservesAVSync(t *testing.T) {
+	const wrapMs uint64 = (1 << 33) / 90 // 2^33 ticks / 90 kHz, in ms ≈ 95,443,717
+	n := New(jointSeedConfig(1000))
+
+	base := wrapMs - 100 // seed just before the wrap boundary
+
+	// Joint-seed both tracks synced at `base` (source delta 0 → both anchor 0).
+	n.Apply(vPkt(base, base), startWall)                          // held
+	n.Apply(aPkt(base, base), startWall.Add(20*time.Millisecond)) // completes seed
+
+	// Two steady synced frames (output follows source, drift ~0).
+	n.Apply(vPkt(base+40, base+40), startWall.Add(40*time.Millisecond))
+	n.Apply(aPkt(base+40, base+40), startWall.Add(40*time.Millisecond))
+	n.Apply(vPkt(base+80, base+80), startWall.Add(80*time.Millisecond))
+	n.Apply(aPkt(base+80, base+80), startWall.Add(80*time.Millisecond))
+	// Now at base+80 = wrapMs-20; the next frame of each track wraps to ~0.
+
+	// Video wraps at wall=120 ms (its frame crosses the boundary): wrapped → 20.
+	n.Apply(vPkt(20, 20), startWall.Add(120*time.Millisecond))
+	// Audio wraps a beat later at wall=140 ms and at a slightly different value
+	// (denser frames cross the boundary between video frames) → wrapped 10.
+	n.Apply(aPkt(10, 10), startWall.Add(140*time.Millisecond))
+
+	// Post-wrap same-source-moment pair (both at wrapped source DTS = 200).
+	vX := vPkt(200, 200)
+	aX := aPkt(200, 200)
+	n.Apply(vX, startWall.Add(300*time.Millisecond))
+	n.Apply(aX, startWall.Add(300*time.Millisecond))
+
+	if vX.PTSms != aX.PTSms {
+		t.Fatalf("PTS WRAP BROKE A/V SYNC: post-wrap same moment → video_pts=%d audio_pts=%d (skew=%+d ms)",
+			vX.PTSms, aX.PTSms, int64(vX.PTSms)-int64(aX.PTSms))
+	}
+}
+
+// TestReanchorPreservesAVSync covers the secondary desync mechanism: a hard
+// re-anchor (clock drift / source stall past the jump threshold) forward-jumps
+// a track to wallclock. The journal shows these firing per-track
+// (jump_threshold drift_ms≈-2000). When video re-anchors but audio resumes a
+// beat later (or vice versa) the two land on different wallclock targets →
+// A/V skew. A re-anchor must shift the PARTNER track by the same amount so the
+// relative offset survives. Here: a stall, video resumes (re-anchors forward)
+// at wall=5000, audio resumes 100 ms later — a same-source-moment pair after
+// must still emit at equal PTS.
+func TestReanchorPreservesAVSync(t *testing.T) {
+	n := New(jointSeedConfig(1000))
+
+	// Seed both synced at source 0 (joint-seed: video held, audio completes).
+	n.Apply(vPkt(0, 0), startWall)
+	n.Apply(aPkt(0, 0), startWall.Add(10*time.Millisecond))
+	// One steady synced frame.
+	n.Apply(vPkt(40, 40), startWall.Add(40*time.Millisecond))
+	n.Apply(aPkt(40, 40), startWall.Add(40*time.Millisecond))
+
+	// Stall: wallclock advances to ~5 s while source barely moved. Video
+	// resumes first → drift ≪ -jumpThreshold → forward re-anchor to wallclock.
+	n.Apply(vPkt(80, 80), startWall.Add(5000*time.Millisecond))
+	// Audio resumes 100 ms later in wallclock.
+	n.Apply(aPkt(80, 80), startWall.Add(5100*time.Millisecond))
+
+	// Same-source-moment pair afterward (source 120). Must emit at equal PTS.
+	vX := vPkt(120, 120)
+	aX := aPkt(120, 120)
+	n.Apply(vX, startWall.Add(5040*time.Millisecond))
+	n.Apply(aX, startWall.Add(5140*time.Millisecond))
+
+	if vX.PTSms != aX.PTSms {
+		t.Fatalf("RE-ANCHOR BROKE A/V SYNC: same source moment → video_pts=%d audio_pts=%d (skew=%+d ms)",
+			vX.PTSms, aX.PTSms, int64(vX.PTSms)-int64(aX.PTSms))
+	}
+}
+
 // TestJointSeedVideoLeadsAudio — symmetric to TestJointSeedAudioLeadsVideo
 // but with the source emitting video first in source-DTS terms (the
 // normal case). Joint-seed must anchor video at 0 and audio at +delta.
