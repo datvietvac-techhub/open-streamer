@@ -1,6 +1,6 @@
 module github.com/datvietvac-techhub/open-streamer
 
-go 1.25.10
+go 1.25.11
 
 require (
 	github.com/Eyevinn/mp4ff v0.52.0
