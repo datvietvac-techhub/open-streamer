@@ -6,8 +6,8 @@ require (
 	github.com/Eyevinn/mp4ff v0.52.0
 	github.com/asticode/go-astiav v0.41.0
 	github.com/asticode/go-astits v1.15.0
-	github.com/bluenviron/gortsplib/v5 v5.5.3
-	github.com/bluenviron/mediacommon/v2 v2.8.3
+	github.com/bluenviron/gortsplib/v5 v5.5.4
+	github.com/bluenviron/mediacommon/v2 v2.9.0
 	github.com/datarhei/gosrt v0.11.0
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-chi/cors v1.2.2
@@ -87,8 +87,8 @@ require (
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/rtcp v1.2.16 // indirect
 	github.com/pion/sdp/v3 v3.0.18 // indirect
-	github.com/pion/srtp/v3 v3.0.10 // indirect
-	github.com/pion/transport/v4 v4.0.1 // indirect
+	github.com/pion/srtp/v3 v3.0.11 // indirect
+	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
