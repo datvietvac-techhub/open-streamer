@@ -7,7 +7,7 @@ require (
 	github.com/asticode/go-astiav v0.41.0
 	github.com/asticode/go-astits v1.15.0
 	github.com/bluenviron/gortsplib/v5 v5.5.3
-	github.com/bluenviron/mediacommon/v2 v2.8.3
+	github.com/bluenviron/mediacommon/v2 v2.9.0
 	github.com/datarhei/gosrt v0.11.0
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-chi/cors v1.2.2
