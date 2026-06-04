@@ -132,8 +132,10 @@ func parsePlaylist(segDir string) ([]segmentMeta, error) {
 			}
 
 		case hasDur && !strings.HasPrefix(line, "#") && line != "":
-			// This is the segment filename line.
-			base := strings.TrimSuffix(filepath.Base(line), ".ts")
+			// This is the segment filename line. Accept both the dvr_NNNNNN.ts
+			// form and the legacy NNNNNN.ts form (recordings written before the
+			// prefix was introduced) so old playlists still parse.
+			base := strings.TrimPrefix(strings.TrimSuffix(filepath.Base(line), ".ts"), "dvr_")
 			idx, err := strconv.Atoi(base)
 			if err != nil {
 				hasDur = false
