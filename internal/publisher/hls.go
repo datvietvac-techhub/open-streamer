@@ -54,6 +54,9 @@ type hlsRunOpts struct {
 	// segWriteDur observes wall-clock time spent in os.WriteFile per
 	// segment. Pre-bound to {stream_code,format=hls}. Nil-safe.
 	segWriteDur prometheus.Observer
+	// segWriteErr is incremented once per FAILED segment write. Pre-bound
+	// to {stream_code,format=hls,profile}. Nil-safe.
+	segWriteErr prometheus.Counter
 }
 
 // hlsSegEntry holds per-segment metadata kept in the sliding window.
@@ -90,6 +93,7 @@ func (s *Service) serveHLS(ctx context.Context, streamID domain.StreamCode) {
 	opts := &hlsRunOpts{
 		segCount:    s.hlsSegCounter(streamID, "main"),
 		segWriteDur: s.segWriteDurObserver(streamID, "hls"),
+		segWriteErr: s.segWriteErrCounter(streamID, "hls", "main"),
 	}
 	runHLSSegmenter(
 		ctx, streamID, sub, streamDir, manifest,
@@ -141,6 +145,7 @@ func runHLSSegmenter(
 		p.hasAudio = opts.hasAudio
 		p.segCount = opts.segCount
 		p.segWriteDur = opts.segWriteDur
+		p.segWriteErr = opts.segWriteErr
 	}
 
 	p.run(ctx, sub)
@@ -202,6 +207,8 @@ type hlsSegmenter struct {
 	segCount prometheus.Counter
 	// Pre-bound histogram for os.WriteFile latency; nil-safe.
 	segWriteDur prometheus.Observer
+	// Pre-bound counter for FAILED segment writes; nil-safe.
+	segWriteErr prometheus.Counter
 
 	// scanner finds IDR boundaries in raw-TS chunks (UDP/HLS/SRT/File
 	// passthrough sources). Lazily allocated on the first raw-TS packet so
@@ -577,6 +584,9 @@ func (p *hlsSegmenter) flushLocked() {
 	if err := writeFileAtomic(path, data); err != nil {
 		slog.Warn("publisher: HLS write segment failed",
 			"stream_code", p.streamID, "segment", name, "err", err)
+		if p.segWriteErr != nil {
+			p.segWriteErr.Inc()
+		}
 		return
 	}
 	if p.segWriteDur != nil {

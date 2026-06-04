@@ -186,6 +186,11 @@ func (s *Service) recordError(streamID domain.StreamCode, msg string) {
 	if !ok {
 		return
 	}
+	// Count every supervisor respawn. Nil-guard: tests construct &Service{}
+	// without a metrics handle and call recordError directly.
+	if s.m != nil && s.m.TranscoderRestartsTotal != nil {
+		s.m.TranscoderRestartsTotal.WithLabelValues(string(streamID)).Inc()
+	}
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 	sw.restartCount++
@@ -340,7 +345,9 @@ func (s *Service) Start(
 		"read_from", rawIngestID,
 		"backend", string(tc.Global.HW),
 	)
-	s.m.TranscoderWorkersActive.WithLabelValues(string(logStreamCode)).Set(float64(len(targets)))
+	// One subprocess transcodes every rendition, so "workers" is the subprocess
+	// count (1 while up), not the rendition count — that is QualitiesActive.
+	s.m.TranscoderWorkersActive.WithLabelValues(string(logStreamCode)).Set(1)
 	s.m.TranscoderQualitiesActive.WithLabelValues(string(logStreamCode)).Set(float64(len(targets)))
 	//nolint:contextcheck // event bus consumers must outlive baseCtx
 	s.bus.Publish(context.Background(), domain.Event{

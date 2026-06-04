@@ -34,10 +34,11 @@ type SessionCloseReason string
 
 // SessionCloseReason values.
 const (
-	SessionCloseIdle     SessionCloseReason = "idle"        // no activity within the configured idle window
-	SessionCloseClient   SessionCloseReason = "client_gone" // TCP/UDP peer closed (RTMP/SRT/RTSP)
-	SessionCloseShutdown SessionCloseReason = "shutdown"    // server shutting down
-	SessionCloseKicked   SessionCloseReason = "kicked"      // operator force-closed via API
+	SessionCloseIdle        SessionCloseReason = "idle"         // no activity within the configured idle window
+	SessionCloseMaxLifetime SessionCloseReason = "max_lifetime" // total lifetime exceeded the configured cap
+	SessionCloseClient      SessionCloseReason = "client_gone"  // TCP/UDP peer closed (RTMP/SRT/RTSP)
+	SessionCloseShutdown    SessionCloseReason = "shutdown"     // server shutting down
+	SessionCloseKicked      SessionCloseReason = "kicked"       // operator force-closed via API
 )
 
 // PlaySession is the audit record for one client watching a stream.

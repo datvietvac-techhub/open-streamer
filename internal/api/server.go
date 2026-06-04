@@ -124,18 +124,30 @@ func (s *Server) httpDurationMiddleware(next http.Handler) http.Handler {
 		}
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		start := time.Now()
+		// Deferred so the observation is recorded even when the handler
+		// panics: this frame is inner to middleware.Recoverer, so on a panic
+		// it runs during unwind, before Recoverer writes the 500.
+		//nolint:contextcheck // reads r.Context() for the chi route; records a metric, makes no ctx-propagating call
+		defer func() {
+			// chi populates the route ctx during routing; reading here gives
+			// the matched template (or "" for 404).
+			route := chi.RouteContext(r.Context()).RoutePattern()
+			if route == "" {
+				route = "unknown"
+			}
+			// On a panic this runs before Recoverer writes the status, so
+			// ww.Status() is still 0 — attribute it to a 500.
+			status := ww.Status()
+			if status == 0 {
+				status = http.StatusInternalServerError
+			}
+			s.m.HTTPRequestDuration.WithLabelValues(
+				route,
+				r.Method,
+				fmt.Sprintf("%d", status),
+			).Observe(time.Since(start).Seconds())
+		}()
 		next.ServeHTTP(ww, r)
-		// chi populates the route ctx during routing; reading after
-		// ServeHTTP returns gives the matched template (or "" for 404).
-		route := chi.RouteContext(r.Context()).RoutePattern()
-		if route == "" {
-			route = "unknown"
-		}
-		s.m.HTTPRequestDuration.WithLabelValues(
-			route,
-			r.Method,
-			fmt.Sprintf("%d", ww.Status()),
-		).Observe(time.Since(start).Seconds())
 	})
 }
 

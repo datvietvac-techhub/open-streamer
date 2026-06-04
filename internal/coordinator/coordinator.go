@@ -961,18 +961,29 @@ func (c *Coordinator) refreshStatusGauge(streams []*domain.Stream) {
 	if c.m == nil || c.m.StreamsTotal == nil {
 		return
 	}
+	// StreamStatus only ever returns active|degraded|stopped — seed those so a
+	// bucket that drops to zero is still Set (not left stale). Idle is an
+	// input-level state, never a top-level stream status, so it is not seeded.
 	counts := map[domain.StreamStatus]int{
-		domain.StatusIdle:     0,
 		domain.StatusActive:   0,
 		domain.StatusDegraded: 0,
 		domain.StatusStopped:  0,
 	}
+	seen := make(map[domain.StreamCode]struct{})
 	for _, st := range streams {
 		if st == nil {
 			continue
 		}
-		s := c.StreamStatus(st.Code)
-		counts[s]++
+		seen[st.Code] = struct{}{}
+		counts[c.StreamStatus(st.Code)]++
+	}
+	// Include runtime (auto-publish) pipelines, which run without a persisted
+	// record and would otherwise be invisible in the active count.
+	for _, code := range c.RunningStreams() {
+		if _, ok := seen[code]; ok {
+			continue
+		}
+		counts[c.StreamStatus(code)]++
 	}
 	for status, n := range counts {
 		c.m.StreamsTotal.WithLabelValues(string(status)).Set(float64(n))

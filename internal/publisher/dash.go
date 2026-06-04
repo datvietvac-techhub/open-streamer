@@ -40,6 +40,11 @@ func (s *Service) serveDASH(ctx context.Context, streamID domain.StreamCode) {
 		History:      historyOrDefault(cfg.LiveHistory),
 		Ephemeral:    cfg.LiveEphemeral,
 		PackAudio:    true,
+		VideoFrames:  s.dashFrameCounter(streamID, "v0", "video"),
+		AudioFrames:  s.dashFrameCounter(streamID, "v0", "audio"),
+		SegCounter:   s.dashSegCounter(streamID, "main"),
+		SegWriteDur:  s.segWriteDurObserver(streamID, "dash"),
+		SegWriteErr:  s.segWriteErrCounter(streamID, "dash", "main"),
 	})
 	if err != nil {
 		slog.Error("publisher: DASH packager init failed",

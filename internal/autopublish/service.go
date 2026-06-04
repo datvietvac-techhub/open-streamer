@@ -14,6 +14,7 @@ import (
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 	"github.com/datvietvac-techhub/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
 	"github.com/datvietvac-techhub/open-streamer/internal/store"
 )
 
@@ -46,6 +47,7 @@ type Service struct {
 	coord     streamCoordinator
 	buf       *buffer.Service
 	bus       events.Bus
+	m         *metrics.Metrics // optional; nil in tests without DI
 
 	mu      sync.RWMutex
 	entries map[domain.StreamCode]*runtimeEntry
@@ -75,6 +77,9 @@ func New(i do.Injector) (*Service, error) {
 	// via SetCoordinator after the rest of the graph is up.
 	if c, err := do.Invoke[streamCoordinator](i); err == nil {
 		s.coord = c
+	}
+	if m, err := do.Invoke[*metrics.Metrics](i); err == nil {
+		s.m = m
 	}
 	s.cur.Store(newMatcher(nil))
 	return s, nil
@@ -190,6 +195,7 @@ func (s *Service) ResolveOrCreate(ctx context.Context, path string) (domain.Stre
 	s.entries[code] = entry
 	s.mu.Unlock()
 
+	s.metricCreated(tplCode)
 	go s.observeLiveness(obsCtx, entry)
 	s.publishRuntimeEvent(ctx, domain.EventStreamRuntimeCreated, code, tplCode)
 	slog.Info("autopublish: runtime stream materialised",
@@ -263,6 +269,7 @@ func (s *Service) removeOrphanedEntry(ctx context.Context, entry *runtimeEntry, 
 	}
 	delete(s.entries, entry.code)
 	s.mu.Unlock()
+	s.metricReaped(entry.templateCode, reason)
 	s.publishRuntimeEvent(ctx, domain.EventStreamRuntimeExpired, entry.code, entry.templateCode)
 	slog.Info("autopublish: runtime stream cleared (external teardown)",
 		"stream_code", entry.code, "template", entry.templateCode, "reason", reason)
@@ -320,9 +327,30 @@ func (s *Service) stopRuntimeStream(ctx context.Context, code domain.StreamCode,
 	if s.coord != nil {
 		s.coord.Stop(ctx, code)
 	}
+	s.metricReaped(entry.templateCode, reason)
 	s.publishRuntimeEvent(ctx, domain.EventStreamRuntimeExpired, code, entry.templateCode)
 	slog.Info("autopublish: runtime stream expired",
 		"stream_code", code, "template", entry.templateCode, "reason", reason)
+}
+
+// metricCreated records a runtime-stream materialisation (nil-safe).
+func (s *Service) metricCreated(tpl domain.TemplateCode) {
+	if s.m == nil {
+		return
+	}
+	s.m.AutopublishStreamsCreatedTotal.WithLabelValues(string(tpl)).Inc()
+	s.m.AutopublishStreamsActive.WithLabelValues(string(tpl)).Inc()
+}
+
+// metricReaped records a runtime-stream teardown (nil-safe). Called exactly
+// once per entry from whichever teardown path actually removed it, so the
+// active gauge stays balanced against metricCreated.
+func (s *Service) metricReaped(tpl domain.TemplateCode, reason string) {
+	if s.m == nil {
+		return
+	}
+	s.m.AutopublishStreamsReapedTotal.WithLabelValues(string(tpl), reason).Inc()
+	s.m.AutopublishStreamsActive.WithLabelValues(string(tpl)).Dec()
 }
 
 // RuntimeEntry is the API-facing view of one runtime stream. Returned

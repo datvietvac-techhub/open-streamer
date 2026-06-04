@@ -173,10 +173,10 @@ func (b *httpBatcher) run(ctx context.Context) {
 			// the cancelled parent ctx so the final POST gets a fair
 			// chance to land — using ctx here would cancel the in-flight
 			// HTTP request immediately.
-			b.flushOnce(context.Background()) //nolint:contextcheck // see comment above
+			b.drainOnShutdown(context.Background()) //nolint:contextcheck // see comment above
 			return
 		case <-b.done:
-			b.flushOnce(context.Background()) //nolint:contextcheck // graceful drain — see ctx.Done branch
+			b.drainOnShutdown(context.Background()) //nolint:contextcheck // graceful drain — see ctx.Done branch
 			return
 		case <-ticker.C:
 			b.flushOnce(ctx)
@@ -277,6 +277,34 @@ func (b *httpBatcher) flushOnce(ctx context.Context) {
 	}
 	if b.m.observeDelivery != nil {
 		b.m.observeDelivery("success", "ok")
+	}
+}
+
+// drainOnShutdown flushes the whole backlog in maxItems-sized batches, then
+// counts whatever could NOT be shipped (oversized backlog or a persistently
+// failing target) as dropped. A single flushOnce only ships maxItems, so
+// without this loop+count the rest is abandoned silently and invisible to
+// open_streamer_hooks_events_dropped_total.
+func (b *httpBatcher) drainOnShutdown(ctx context.Context) {
+	denom := b.cfg.maxItems
+	if denom <= 0 {
+		denom = 1
+	}
+	// Bound the loop by the initial backlog so a failing target can't spin.
+	for iters := b.queueLen()/denom + 1; iters > 0; iters-- {
+		before := b.queueLen()
+		if before == 0 {
+			return
+		}
+		b.flushOnce(ctx)
+		if b.queueLen() >= before {
+			break // delivery failed + requeued — no progress, give up
+		}
+	}
+	if remaining := b.queueLen(); remaining > 0 && b.m.dropped != nil {
+		b.m.dropped.Add(float64(remaining))
+		slog.Warn("hooks: events abandoned on shutdown drain",
+			"hook_id", b.cfg.hookID, "abandoned", remaining)
 	}
 }
 

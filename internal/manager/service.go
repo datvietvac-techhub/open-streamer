@@ -445,13 +445,23 @@ func (s *Service) Unregister(streamID domain.StreamCode) {
 		return
 	}
 	// Mark dead while holding Service.mu so any goroutine that reads dead under
-	// state.mu (after releasing Service.mu) will see it immediately.
+	// state.mu (after releasing Service.mu) will see it immediately. Snapshot
+	// the input priorities so we can drop their health-gauge series after the
+	// stream is gone (otherwise they report their last value forever).
 	state.mu.Lock()
 	state.dead = true
+	prios := make([]int, 0, len(state.inputs))
+	for p := range state.inputs {
+		prios = append(prios, p)
+	}
 	state.mu.Unlock()
 	state.cancel() // cancels monCtx → stops monitor + aborts in-flight probes
 	delete(s.streams, streamID)
 	s.mu.Unlock()
+
+	for _, p := range prios {
+		s.m.ManagerInputHealth.DeleteLabelValues(string(streamID), strconv.Itoa(p))
+	}
 
 	s.ingestor.Stop(streamID)
 }
@@ -898,6 +908,14 @@ func (s *Service) tryFailover(streamID domain.StreamCode, state *streamState, re
 	}
 
 	commitSwitch(state, prevPriority, bestInput, reason, detail)
+
+	// The previous input is no longer active — clear its health gauge so a
+	// still-delivering backup isn't reported as healthy=1 after we switch away
+	// (it returns to 1 via RecordPacket if it becomes active again). Guard
+	// against same-priority restarts, where the gauge should stay as-is.
+	if prevPriority != bestInput.Priority {
+		s.m.ManagerInputHealth.WithLabelValues(string(streamID), strconv.Itoa(prevPriority)).Set(0)
+	}
 
 	s.m.ManagerFailoversTotal.WithLabelValues(string(streamID)).Inc()
 	s.bus.Publish(ctx, domain.Event{

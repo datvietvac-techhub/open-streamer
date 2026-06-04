@@ -617,13 +617,52 @@ func (s *Service) hlsSegCounter(streamID domain.StreamCode, profile string) prom
 // in os.WriteFile / writeFileAtomic — sustained P99 growth signals disk
 // I/O backpressure before BufferDropsTotal does. Nil-safe.
 //
-// The DASH publisher's segment counter is plumbed inside the dash
-// package; this helper is HLS-only after the DASH rewrite.
+// Used by both the HLS segmenter and the DASH packager (passed in via
+// dash.Config.SegWriteDur), so the two paths report symmetric timing.
 func (s *Service) segWriteDurObserver(streamID domain.StreamCode, format string) prometheus.Observer {
 	if s.m == nil || s.m.PublisherSegmentWriteDuration == nil {
 		return nil
 	}
 	return s.m.PublisherSegmentWriteDuration.WithLabelValues(string(streamID), format)
+}
+
+// dashSegCounter pre-binds the per-(stream, profile) DASH segment counter
+// (format="dash"). The DASH packager increments it on every successful
+// video/audio fragment write. Nil-safe for tests without metrics.
+func (s *Service) dashSegCounter(streamID domain.StreamCode, profile string) prometheus.Counter {
+	if s.m == nil {
+		return nil
+	}
+	return s.m.PublisherSegmentsTotal.WithLabelValues(string(streamID), "dash", profile)
+}
+
+// dashFrameCounter pre-binds the per-(stream, profile, kind) transcoder
+// frame counter observed at the DASH packager's per-frame ingress. Nil-safe.
+func (s *Service) dashFrameCounter(code domain.StreamCode, profile, kind string) prometheus.Counter {
+	if s.m == nil || s.m.TranscoderFramesTotal == nil {
+		return nil
+	}
+	return s.m.TranscoderFramesTotal.WithLabelValues(string(code), profile, kind)
+}
+
+// dashAudioFrameCounter returns the audio frame counter only for the shard
+// that packs audio (exactly one per ABR ladder); nil otherwise so non-audio
+// shards don't expose a permanently-zero audio series.
+func (s *Service) dashAudioFrameCounter(code domain.StreamCode, profile string, packAudio bool) prometheus.Counter {
+	if !packAudio {
+		return nil
+	}
+	return s.dashFrameCounter(code, profile, "audio")
+}
+
+// segWriteErrCounter pre-binds the per-(stream, format, profile) segment
+// write-error counter. Used by both HLS and DASH on a failed segment write.
+// Nil-safe.
+func (s *Service) segWriteErrCounter(streamID domain.StreamCode, format, profile string) prometheus.Counter {
+	if s.m == nil || s.m.PublisherSegmentWriteErrorsTotal == nil {
+		return nil
+	}
+	return s.m.PublisherSegmentWriteErrorsTotal.WithLabelValues(string(streamID), format, profile)
 }
 
 // pushBytesObserver returns a closure that increments the per-(stream,

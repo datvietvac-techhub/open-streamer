@@ -14,6 +14,7 @@ import (
 	"github.com/Eyevinn/mp4ff/aac"
 	"github.com/Eyevinn/mp4ff/avc"
 	"github.com/Eyevinn/mp4ff/hevc"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
@@ -107,6 +108,18 @@ type Config struct {
 	// value emitted in the manifest. Used by ABR ladders to declare
 	// the transcoder's target bitrate rather than a measured one.
 	OverrideBandwidth int
+
+	// Metrics (all optional / nil-safe). Pre-bound by publisher.Service so the
+	// dash package stays agnostic of the Prometheus registry.
+	//   VideoFrames / AudioFrames — open_streamer_transcoder_frames_total per kind.
+	//   SegCounter                — open_streamer_publisher_segments_total{format="dash"}.
+	//   SegWriteDur               — open_streamer_publisher_segment_write_duration_seconds{format="dash"}.
+	//   SegWriteErr               — open_streamer_publisher_segment_write_errors_total{format="dash"}.
+	VideoFrames prometheus.Counter
+	AudioFrames prometheus.Counter
+	SegCounter  prometheus.Counter
+	SegWriteDur prometheus.Observer
+	SegWriteErr prometheus.Counter
 }
 
 // Packager is the per-stream (or per-shard) DASH publisher state.
@@ -358,6 +371,11 @@ func (p *Packager) handleH264(av *domain.AVPacket) {
 		}
 		p.firstIDRSeen = true
 	}
+	// Count accepted video frames at ingress (post IDR-gate) — drives
+	// open_streamer_transcoder_frames_total{kind="video"}.
+	if p.cfg.VideoFrames != nil {
+		p.cfg.VideoFrames.Inc()
+	}
 	p.pushVideoWithDiag(VideoFrame{
 		AnnexB: cloneBytes(av.Data),
 		PTSms:  av.PTSms,
@@ -451,6 +469,10 @@ func (p *Packager) handleAAC(av *domain.AVPacket) {
 // the overflow + OOO diagnostic counters. Extracted from handleAAC so
 // the parent stays under the cognitive-complexity ceiling.
 func (p *Packager) pushAudioWithDiag(f AudioFrame) {
+	// Count each split AAC access unit — open_streamer_transcoder_frames_total{kind="audio"}.
+	if p.cfg.AudioFrames != nil {
+		p.cfg.AudioFrames.Inc()
+	}
 	dropped, ooo := p.queue.PushAudio(f)
 	if dropped > 0 {
 		p.audioOverflowDropCount += dropped
@@ -850,8 +872,11 @@ func (p *Packager) writeVideoSegment(now time.Time, frames []VideoFrame, nextPTS
 		p.vSegN--
 		return false
 	}
-	if err := writeFileAtomic(filepath.Join(p.cfg.StreamDir, name), data); err != nil {
-		slog.Warn("dash: write video segment", "stream_id", p.cfg.StreamID, "err", err)
+	start := time.Now()
+	werr := writeFileAtomic(filepath.Join(p.cfg.StreamDir, name), data)
+	p.recordSegWrite(werr == nil, time.Since(start))
+	if werr != nil {
+		slog.Warn("dash: write video segment", "stream_id", p.cfg.StreamID, "err", werr)
 		p.vSegN--
 		return false
 	}
@@ -877,14 +902,37 @@ func (p *Packager) writeAudioSegment(now time.Time, frames []AudioFrame) bool {
 		p.aSegN--
 		return false
 	}
-	if err := writeFileAtomic(filepath.Join(p.cfg.StreamDir, name), data); err != nil {
-		slog.Warn("dash: write audio segment", "stream_id", p.cfg.StreamID, "err", err)
+	start := time.Now()
+	werr := writeFileAtomic(filepath.Join(p.cfg.StreamDir, name), data)
+	p.recordSegWrite(werr == nil, time.Since(start))
+	if werr != nil {
+		slog.Warn("dash: write audio segment", "stream_id", p.cfg.StreamID, "err", werr)
 		p.aSegN--
 		return false
 	}
 	p.onDiskA = append(p.onDiskA, name)
 	p.aSegEntries = append(p.aSegEntries, SegmentEntry{StartTicks: tfdt, DurTicks: durTicks})
 	return true
+}
+
+// recordSegWrite reports one segment-file write outcome to the (nil-safe)
+// metrics: on success it counts the segment and observes the write latency;
+// on failure it bumps the write-error counter (and does NOT pollute the
+// latency histogram). Shared by the video and audio segment writers so both
+// the HLS and DASH paths report symmetric publisher metrics.
+func (p *Packager) recordSegWrite(ok bool, dur time.Duration) {
+	if !ok {
+		if p.cfg.SegWriteErr != nil {
+			p.cfg.SegWriteErr.Inc()
+		}
+		return
+	}
+	if p.cfg.SegWriteDur != nil {
+		p.cfg.SegWriteDur.Observe(dur.Seconds())
+	}
+	if p.cfg.SegCounter != nil {
+		p.cfg.SegCounter.Inc()
+	}
 }
 
 // behindPrevSegEnd reports whether emitting NOW would create a segment
