@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +16,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/samber/do/v2"
 )
+
+// dvrSegmentName is the strict allow-list for a DVR segment request: exactly
+// `dvr_<6 digits>.ts`. It is the path-injection chokepoint for ServeSegment —
+// a name that matches contains no slash or `.` traversal, so joining it onto
+// the recording's segment dir cannot escape that directory.
+var dvrSegmentName = regexp.MustCompile(`^dvr_\d{6}\.ts$`)
 
 // msgRecordingNoData is the user-facing reason returned whenever a stream
 // has no recording payload yet — either the Recording row exists with an
@@ -181,6 +189,36 @@ func (h *RecordingHandler) ServeTimeshift(w http.ResponseWriter, r *http.Request
 	_, _ = w.Write([]byte(renderTimeshiftPlaylist(window)))
 }
 
+// ServeSegment serves one DVR segment (dvr_NNNNNN.ts) from the recording's
+// segment directory. The media dispatcher routes here for any segment whose
+// name carries the dvr_ prefix, so timeshift playback reads from the DVR store
+// rather than the live-HLS sliding window (where these files never exist → 404).
+func (h *RecordingHandler) ServeSegment(w http.ResponseWriter, r *http.Request) {
+	code := domain.StreamCode(chi.URLParam(r, "code"))
+	if err := domain.ValidateStreamCode(string(code)); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_STREAM_CODE", err.Error())
+		return
+	}
+	// filepath.Base + the strict pattern confine the lookup to one well-formed
+	// segment name inside the recording dir (no traversal).
+	name := filepath.Base(chi.URLParam(r, "file"))
+	if !dvrSegmentName.MatchString(name) {
+		http.NotFound(w, r)
+		return
+	}
+	rec, err := h.recRepo.FindByID(r.Context(), domain.RecordingID(code))
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	if rec.SegmentDir == "" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp2t")
+	http.ServeFile(w, r, filepath.Join(rec.SegmentDir, name))
+}
+
 // parseTimeshiftStart returns the absolute start time selected by the
 // caller's timeshift params. Order: from > delay > ago > recordingStart.
 // Returns ok=false on malformed numbers.
@@ -269,7 +307,7 @@ func renderTimeshiftPlaylist(window []dvr.SegmentMeta) string {
 			needDateTime = false
 		}
 		fmt.Fprintf(&b, "#EXTINF:%.3f,\n", seg.Duration.Seconds())
-		fmt.Fprintf(&b, "%06d.ts\n", seg.Index)
+		fmt.Fprintf(&b, "%s\n", dvr.SegmentFilename(seg.Index))
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
 	return b.String()

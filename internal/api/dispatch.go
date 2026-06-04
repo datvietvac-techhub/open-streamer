@@ -121,8 +121,16 @@ func (s *Server) dispatchMedia() http.HandlerFunc {
 				return
 			}
 		}
+		// DVR timeshift segments carry the dvr_ prefix and live in the
+		// recording store, not the sliding live-HLS window — route them to the
+		// DVR handler so they don't 404 against the live media roots.
+		if strings.HasPrefix(file, "dvr_") {
+			r = setURLParam(r, "file", file)
+			s.recordingH.ServeSegment(w, r)
+			return
+		}
 		// Fall-through: serve the file by extension. index.m3u8 / index.mpd
-		// land here when no DVR query params are present; segments always
+		// land here when no DVR query params are present; live segments always
 		// land here.
 		roots.ServeFile(w, r, code, file)
 	}

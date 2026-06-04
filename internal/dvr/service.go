@@ -485,6 +485,14 @@ func (s *Service) record(
 
 // ---- flush ----
 
+// SegmentFilename is the on-disk (and playlist) name for DVR segment `idx`.
+// The `dvr_` prefix mirrors the live HLS `seg_` convention and lets the media
+// dispatcher route timeshift segment requests to the recording store instead
+// of the sliding live-HLS window (which only holds recent `seg_*.ts`).
+func SegmentFilename(idx int) string {
+	return fmt.Sprintf("dvr_%06d.ts", idx)
+}
+
 func (s *Service) flushSegment(
 	ctx context.Context,
 	sess *recordingSession,
@@ -499,7 +507,7 @@ func (s *Service) flushSegment(
 		return
 	}
 
-	filename := fmt.Sprintf("%06d.ts", segIdx)
+	filename := SegmentFilename(segIdx)
 	absPath := filepath.Join(segDir, filename)
 
 	if err := os.WriteFile(absPath, data, 0o644); err != nil {
@@ -614,7 +622,7 @@ func writePlaylist(segments []segmentMeta, segDir string, ended bool) {
 			needDateTime = false
 		}
 		fmt.Fprintf(&b, "#EXTINF:%.3f,\n", seg.duration.Seconds())
-		fmt.Fprintf(&b, "%06d.ts\n", seg.index)
+		fmt.Fprintf(&b, "%s\n", SegmentFilename(seg.index))
 	}
 
 	if ended {
@@ -656,7 +664,7 @@ func (s *Service) applyRetention(sess *recordingSession, segDir string) {
 			break
 		}
 
-		path := filepath.Join(segDir, fmt.Sprintf("%06d.ts", oldest.index))
+		path := filepath.Join(segDir, SegmentFilename(oldest.index))
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			slog.Warn("dvr: remove old segment failed", "path", path, "err", err)
 		}

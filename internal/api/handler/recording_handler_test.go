@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -347,4 +349,65 @@ func TestServeTimeshift_InvalidStreamCode_400(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeTimeshift(w, recReq(t, http.MethodGet, "/$bad/index.m3u8?delay=10", "$bad"))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// ─── ServeSegment (DVR timeshift segments) ──────────────────────────────────
+
+// segReq builds a DVR segment request with both "code" and "file" chi params,
+// mirroring what dispatchMedia populates in production. code is a parameter for
+// readability/symmetry even though every caller passes the same stream today.
+func segReq(t *testing.T, code, file string) *http.Request { //nolint:unparam // see doc
+	t.Helper()
+	return chiReq(t, http.MethodGet, "/"+code+"/"+file, nil,
+		map[string]string{"code": code, "file": file})
+}
+
+func TestServeSegment_HappyPath(t *testing.T) {
+	t.Parallel()
+	h, repo, _ := newRecHandlerForTest(t)
+	dir := t.TempDir()
+	want := []byte("ts-bytes")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dvr_000007.ts"), want, 0o644))
+	repo.seed(&domain.Recording{ID: "live", StreamCode: "live", SegmentDir: dir})
+
+	w := httptest.NewRecorder()
+	h.ServeSegment(w, segReq(t, "live", "dvr_000007.ts"))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, want, w.Body.Bytes())
+	assert.Equal(t, "video/mp2t", w.Header().Get("Content-Type"))
+}
+
+func TestServeSegment_RejectsMalformedNames(t *testing.T) {
+	t.Parallel()
+	h, repo, _ := newRecHandlerForTest(t)
+	dir := t.TempDir()
+	repo.seed(&domain.Recording{ID: "live", StreamCode: "live", SegmentDir: dir})
+
+	// Live-style name, wrong digit count, traversal, non-dvr — all 404, none
+	// reach the filesystem join with attacker-controlled path components.
+	for _, bad := range []string{"seg_000007.ts", "000007.ts", "dvr_7.ts", "dvr_000007.m4s", "dvr_../x.ts"} {
+		w := httptest.NewRecorder()
+		h.ServeSegment(w, segReq(t, "live", bad))
+		assert.Equal(t, http.StatusNotFound, w.Code, "name=%s", bad)
+	}
+}
+
+func TestServeSegment_NoSegmentDir_404(t *testing.T) {
+	t.Parallel()
+	h, repo, _ := newRecHandlerForTest(t)
+	repo.seed(&domain.Recording{ID: "live", StreamCode: "live"}) // empty SegmentDir
+	w := httptest.NewRecorder()
+	h.ServeSegment(w, segReq(t, "live", "dvr_000001.ts"))
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestServeSegment_MissingFile_404(t *testing.T) {
+	t.Parallel()
+	h, repo, _ := newRecHandlerForTest(t)
+	dir := t.TempDir() // dir exists but the segment file does not
+	repo.seed(&domain.Recording{ID: "live", StreamCode: "live", SegmentDir: dir})
+	w := httptest.NewRecorder()
+	h.ServeSegment(w, segReq(t, "live", "dvr_000099.ts"))
+	assert.Equal(t, http.StatusNotFound, w.Code)
 }
