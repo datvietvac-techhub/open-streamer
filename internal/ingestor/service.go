@@ -285,7 +285,9 @@ func (s *Service) pushStreamCallbacks(streamID domain.StreamCode, priority int, 
 			s.mu.Unlock()
 			// Push session ended (encoder disconnected) — symmetric with the
 			// pull path's "failover" so push streams aren't silent on drop.
-			s.m.IngestorErrorsTotal.WithLabelValues(string(streamID), "disconnect").Inc()
+			if s.m != nil {
+				s.m.IngestorErrorsTotal.WithLabelValues(string(streamID), "disconnect").Inc()
+			}
 			if fn != nil {
 				fn(streamID, priority, err)
 			}
@@ -440,7 +442,7 @@ func (s *Service) startPullWorker(ctx context.Context, streamID domain.StreamCod
 				// connect failures from clean EOF from fatal stream errors.
 				// ErrNoPusherConnected is the push-slot fast-fail signal, not
 				// a real ingest error — skip it.
-				if !errors.Is(err, ErrNoPusherConnected) {
+				if s.m != nil && !errors.Is(err, ErrNoPusherConnected) {
 					reason := "open"
 					switch {
 					case errors.Is(err, io.EOF):
@@ -459,7 +461,9 @@ func (s *Service) startPullWorker(ctx context.Context, streamID domain.StreamCod
 			},
 			onMedia: s.onMedia,
 			onStall: func(id domain.StreamCode, _ int) {
-				s.m.IngestorErrorsTotal.WithLabelValues(string(id), "stall").Inc()
+				if s.m != nil {
+					s.m.IngestorErrorsTotal.WithLabelValues(string(id), "stall").Inc()
+				}
 			},
 			onConnect: func(id domain.StreamCode, priority int) { //nolint:contextcheck // workerCtx is cancelled on stop; publish must outlive it
 				s.bus.Publish(context.Background(), domain.Event{
@@ -508,7 +512,9 @@ func (s *Service) startPullWorker(ctx context.Context, streamID domain.StreamCod
 		}
 		cancel()
 		if genuineFailover {
-			s.m.IngestorErrorsTotal.WithLabelValues(string(streamID), "failover").Inc()
+			if s.m != nil {
+				s.m.IngestorErrorsTotal.WithLabelValues(string(streamID), "failover").Inc()
+			}
 			//nolint:contextcheck // worker ctx is cancelled; publish must outlive it for hooks/manager.
 			s.bus.Publish(context.Background(), domain.Event{
 				Type:       domain.EventInputFailed,
