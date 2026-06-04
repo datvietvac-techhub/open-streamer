@@ -35,6 +35,10 @@ type pullWorkerCallbacks struct {
 	onReconnect   func(streamID domain.StreamCode, inputPriority int, err error)
 	onPacketBytes func(streamID domain.StreamCode, inputPriority, bytes int)
 	onMedia       func(streamID domain.StreamCode, inputPriority int, p *domain.AVPacket)
+	// onStall is called when the stall watchdog detects the source has gone
+	// silent past the stall threshold while the reader is NOT erroring — a
+	// real health signal otherwise invisible (drives reason="stall").
+	onStall func(streamID domain.StreamCode, inputPriority int)
 	// onHandoff is called exactly once, after the very first successful Open.
 	// It is used by startPullWorker to cancel the previous source worker only after
 	// the new source has connected — eliminating the buffer gap during source transitions.
@@ -368,7 +372,12 @@ func readLoop(
 	watchdogCtx, cancelWatchdog := context.WithCancel(ctx)
 	defer cancelWatchdog()
 	go runStallWatchdog(watchdogCtx, streamID, bufferWriteID, buf, &lastWriteAt,
-		DefaultStallThreshold, DefaultStallCheckInterval)
+		DefaultStallThreshold, DefaultStallCheckInterval,
+		func() {
+			if cb != nil && cb.onStall != nil {
+				cb.onStall(streamID, input.Priority)
+			}
+		})
 
 	for {
 		batch, err := r.ReadPackets(ctx)

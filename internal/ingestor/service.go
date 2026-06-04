@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -282,6 +283,9 @@ func (s *Service) pushStreamCallbacks(streamID domain.StreamCode, priority int, 
 			s.mu.Lock()
 			fn := s.onInputError
 			s.mu.Unlock()
+			// Push session ended (encoder disconnected) — symmetric with the
+			// pull path's "failover" so push streams aren't silent on drop.
+			s.m.IngestorErrorsTotal.WithLabelValues(string(streamID), "disconnect").Inc()
 			if fn != nil {
 				fn(streamID, priority, err)
 			}
@@ -430,9 +434,33 @@ func (s *Service) startPullWorker(ctx context.Context, streamID domain.StreamCod
 	go func() {
 		s.mu.Lock()
 		cb := pullWorkerCallbacks{
-			onPacket:     s.onPacket,
-			onInputError: s.onInputError,
-			onMedia:      s.onMedia,
+			onPacket: s.onPacket,
+			onInputError: func(id domain.StreamCode, prio int, err error) {
+				// Classify the read/open error so dashboards can split
+				// connect failures from clean EOF from fatal stream errors.
+				// ErrNoPusherConnected is the push-slot fast-fail signal, not
+				// a real ingest error — skip it.
+				if !errors.Is(err, ErrNoPusherConnected) {
+					reason := "open"
+					switch {
+					case errors.Is(err, io.EOF):
+						reason = "eof"
+					case shouldFailoverImmediately(err):
+						reason = "fatal"
+					}
+					s.m.IngestorErrorsTotal.WithLabelValues(string(id), reason).Inc()
+				}
+				s.mu.Lock()
+				fn := s.onInputError
+				s.mu.Unlock()
+				if fn != nil {
+					fn(id, prio, err)
+				}
+			},
+			onMedia: s.onMedia,
+			onStall: func(id domain.StreamCode, _ int) {
+				s.m.IngestorErrorsTotal.WithLabelValues(string(id), "stall").Inc()
+			},
 			onConnect: func(id domain.StreamCode, priority int) { //nolint:contextcheck // workerCtx is cancelled on stop; publish must outlive it
 				s.bus.Publish(context.Background(), domain.Event{
 					Type:       domain.EventInputConnected,
@@ -469,18 +497,24 @@ func (s *Service) startPullWorker(ctx context.Context, streamID domain.StreamCod
 		}
 		s.mu.Unlock()
 		runPullWorker(workerCtx, streamID, bufferWriteID, input, reader, s.buf, cb)
+		// A worker that returned on its own (EOF / fatal read error) is a
+		// genuine failover; one whose ctx WE cancelled (Stop, or a same-priority
+		// config swap) is not. Capture this BEFORE cancel(), which always sets Err().
+		genuineFailover := workerCtx.Err() == nil
 		// Ensure the previous worker is always released — handles the case where Stop()
 		// is called during pre-connect before onHandoff had a chance to fire.
 		if prevCancel != nil {
 			prevCancel()
 		}
 		cancel()
-		s.m.IngestorErrorsTotal.WithLabelValues(string(streamID), "failover").Inc()
-		//nolint:contextcheck // worker ctx is cancelled; publish must outlive it for hooks/manager.
-		s.bus.Publish(context.Background(), domain.Event{
-			Type:       domain.EventInputFailed,
-			StreamCode: streamID,
-		})
+		if genuineFailover {
+			s.m.IngestorErrorsTotal.WithLabelValues(string(streamID), "failover").Inc()
+			//nolint:contextcheck // worker ctx is cancelled; publish must outlive it for hooks/manager.
+			s.bus.Publish(context.Background(), domain.Event{
+				Type:       domain.EventInputFailed,
+				StreamCode: streamID,
+			})
+		}
 	}()
 
 	return nil

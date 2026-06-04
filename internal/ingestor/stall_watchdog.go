@@ -65,6 +65,7 @@ func runStallWatchdog(
 	buf *buffer.Service,
 	lastWriteAt *atomic.Int64,
 	threshold, interval time.Duration,
+	onStall func(),
 ) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -85,6 +86,9 @@ func runStallWatchdog(
 					"threshold_ms", threshold.Milliseconds(),
 				)
 				buf.SetSession(bufferWriteID, domain.SessionStartStallRecovery, nil, nil)
+				if onStall != nil {
+					onStall()
+				}
 				stallSignaled = true
 			case gap < threshold && stallSignaled:
 				// A fresh write reset the clock — clear the latch so a

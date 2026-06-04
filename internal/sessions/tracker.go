@@ -434,8 +434,9 @@ func (s *service) closeByIDCtx(ctx context.Context, id string, reason domain.Ses
 		s.idleClosedTotal.Add(1)
 	case domain.SessionCloseKicked:
 		s.kickedTotal.Add(1)
-	case domain.SessionCloseClient, domain.SessionCloseShutdown:
-		// Counted only via closedTotal; no per-reason counter today.
+	case domain.SessionCloseClient, domain.SessionCloseShutdown, domain.SessionCloseMaxLifetime:
+		// Counted only via closedTotal; no per-reason in-memory counter today.
+		// (The Prometheus reason label is still recorded via observeClosed.)
 	}
 	s.observeClosed(&snap, reason)
 	s.publishClosed(ctx, &snap)

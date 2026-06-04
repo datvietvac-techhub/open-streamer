@@ -48,7 +48,7 @@ func TestStallWatchdog_EmitsBoundaryAfterStallThreshold(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runStallWatchdog(ctx, streamID, streamID, buf, &lastWriteAt, testStallThreshold, testStallCheckInterval)
+	go runStallWatchdog(ctx, streamID, streamID, buf, &lastWriteAt, testStallThreshold, testStallCheckInterval, nil)
 
 	// Wait for the watchdog's first tick to fire, then send a packet
 	// so the auto-stamped SessionStart surfaces on sub.Recv().
@@ -94,7 +94,7 @@ func TestStallWatchdog_DoesNotFireWhenWritesAreFresh(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runStallWatchdog(ctx, streamID, streamID, buf, &lastWriteAt, testStallThreshold, testStallCheckInterval)
+	go runStallWatchdog(ctx, streamID, streamID, buf, &lastWriteAt, testStallThreshold, testStallCheckInterval, nil)
 
 	// Let two watchdog ticks pass while we keep lastWriteAt fresh.
 	for i := 0; i < 3; i++ {
@@ -135,7 +135,7 @@ func TestStallWatchdog_LatchClearsAfterRecovery(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runStallWatchdog(ctx, streamID, streamID, buf, &lastWriteAt, testStallThreshold, testStallCheckInterval)
+	go runStallWatchdog(ctx, streamID, streamID, buf, &lastWriteAt, testStallThreshold, testStallCheckInterval, nil)
 
 	// First stall.
 	lastWriteAt.Store(time.Now().Add(-10 * time.Second).UnixNano())

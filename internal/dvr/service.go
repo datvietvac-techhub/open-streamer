@@ -504,6 +504,9 @@ func (s *Service) flushSegment(
 
 	if err := os.WriteFile(absPath, data, 0o644); err != nil {
 		slog.Error("dvr: write segment failed", "path", absPath, "err", err)
+		if s.m != nil {
+			s.m.DVRSegmentWriteErrorsTotal.WithLabelValues(string(sess.recording.StreamCode)).Inc()
+		}
 		s.bus.Publish(context.WithoutCancel(ctx), domain.Event{
 			Type:       domain.EventRecordingFailed,
 			StreamCode: sess.recording.StreamCode,
@@ -542,8 +545,10 @@ func (s *Service) flushSegment(
 		slog.Warn("dvr: save recording failed", "stream_code", sess.recording.StreamCode, "err", err)
 	}
 
-	s.m.DVRSegmentsWrittenTotal.WithLabelValues(string(sess.recording.StreamCode)).Inc()
-	s.m.DVRBytesWrittenTotal.WithLabelValues(string(sess.recording.StreamCode)).Add(float64(size))
+	if s.m != nil {
+		s.m.DVRSegmentsWrittenTotal.WithLabelValues(string(sess.recording.StreamCode)).Inc()
+		s.m.DVRBytesWrittenTotal.WithLabelValues(string(sess.recording.StreamCode)).Add(float64(size))
+	}
 	s.bus.Publish(context.WithoutCancel(ctx), domain.Event{
 		Type:       domain.EventSegmentWritten,
 		StreamCode: sess.recording.StreamCode,
@@ -690,7 +695,7 @@ func (s *Service) applyRetention(sess *recordingSession, segDir string) {
 			})
 		}
 		if s.m != nil && s.m.DVRRetentionPrunedBytes != nil {
-			s.m.DVRRetentionPrunedBytes.WithLabelValues(string(sess.streamCode)).Add(float64(oldest.size))
+			s.m.DVRRetentionPrunedBytes.WithLabelValues(string(sess.streamCode), reason).Add(float64(oldest.size))
 		}
 
 		// Prune gaps that ended before the new oldest segment's wall time.

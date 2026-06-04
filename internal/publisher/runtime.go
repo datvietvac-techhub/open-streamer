@@ -118,6 +118,13 @@ func (s *Service) setPushStatus(streamID domain.StreamCode, url string, status P
 	if prev != status && s.bus != nil {
 		s.publishPushEvent(streamID, url, status)
 	}
+	// Count each transition INTO reconnecting as one reconnect attempt — the
+	// gauge only shows the instantaneous state, so flapping within a scrape
+	// interval is otherwise invisible.
+	if prev != status && status == PushStatusReconnecting &&
+		s.m != nil && s.m.PublisherPushReconnectsTotal != nil {
+		s.m.PublisherPushReconnectsTotal.WithLabelValues(string(streamID), url).Inc()
+	}
 }
 
 // publishPushEvent maps the PushStatus enum to a domain.EventType and emits on
@@ -197,6 +204,7 @@ func (s *Service) removePushState(streamID domain.StreamCode, url string) {
 	s.pushMu.Unlock()
 	if s.m != nil {
 		s.m.PublisherPushState.DeleteLabelValues(string(streamID), url)
+		s.m.PublisherPushReconnectsTotal.DeleteLabelValues(string(streamID), url)
 	}
 }
 

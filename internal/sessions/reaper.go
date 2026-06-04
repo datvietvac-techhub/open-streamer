@@ -79,7 +79,7 @@ func (s *service) reapOnce(ctx context.Context) {
 			continue
 		}
 		if !maxLifeCutoff.IsZero() && sess.OpenedAt.Before(maxLifeCutoff) {
-			victims = append(victims, victim{id, domain.SessionCloseIdle})
+			victims = append(victims, victim{id, domain.SessionCloseMaxLifetime})
 		}
 	}
 	s.mu.RUnlock()

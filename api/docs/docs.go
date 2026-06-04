@@ -2534,6 +2534,8 @@ const docTemplate = `{
         "domain.EventType": {
             "type": "string",
             "enum": [
+                "session.opened",
+                "session.closed",
                 "stream.created",
                 "stream.updated",
                 "stream.started",
@@ -2567,9 +2569,7 @@ const docTemplate = `{
                 "template.updated",
                 "template.deleted",
                 "stream.runtime_created",
-                "stream.runtime_expired",
-                "session.opened",
-                "session.closed"
+                "stream.runtime_expired"
             ],
             "x-enum-comments": {
                 "EventDVRSegmentPruned": "retention loop deleted an aged-out segment",
@@ -2586,6 +2586,8 @@ const docTemplate = `{
                 "EventStreamUpdated": "PUT /streams/{code} on existing record"
             },
             "x-enum-descriptions": [
+                "",
+                "",
                 "",
                 "PUT /streams/{code} on existing record",
                 "",
@@ -2619,11 +2621,11 @@ const docTemplate = `{
                 "",
                 "",
                 "",
-                "",
-                "",
                 ""
             ],
             "x-enum-varnames": [
+                "EventSessionOpened",
+                "EventSessionClosed",
                 "EventStreamCreated",
                 "EventStreamUpdated",
                 "EventStreamStarted",
@@ -2657,9 +2659,7 @@ const docTemplate = `{
                 "EventTemplateUpdated",
                 "EventTemplateDeleted",
                 "EventStreamRuntimeCreated",
-                "EventStreamRuntimeExpired",
-                "EventSessionOpened",
-                "EventSessionClosed"
+                "EventStreamRuntimeExpired"
             ]
         },
         "domain.GlobalConfig": {
@@ -3135,6 +3135,7 @@ const docTemplate = `{
             "type": "string",
             "enum": [
                 "idle",
+                "max_lifetime",
                 "client_gone",
                 "shutdown",
                 "kicked"
@@ -3143,16 +3144,19 @@ const docTemplate = `{
                 "SessionCloseClient": "TCP/UDP peer closed (RTMP/SRT/RTSP)",
                 "SessionCloseIdle": "no activity within the configured idle window",
                 "SessionCloseKicked": "operator force-closed via API",
+                "SessionCloseMaxLifetime": "total lifetime exceeded the configured cap",
                 "SessionCloseShutdown": "server shutting down"
             },
             "x-enum-descriptions": [
                 "no activity within the configured idle window",
+                "total lifetime exceeded the configured cap",
                 "TCP/UDP peer closed (RTMP/SRT/RTSP)",
                 "server shutting down",
                 "operator force-closed via API"
             ],
             "x-enum-varnames": [
                 "SessionCloseIdle",
+                "SessionCloseMaxLifetime",
                 "SessionCloseClient",
                 "SessionCloseShutdown",
                 "SessionCloseKicked"

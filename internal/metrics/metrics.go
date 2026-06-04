@@ -13,7 +13,8 @@ type Metrics struct {
 	// ── Ingestor ─────────────────────────────────────────────────────────────
 	// IngestorBytesTotal counts raw bytes received from each input source.
 	IngestorBytesTotal *prometheus.CounterVec
-	// IngestorPacketsTotal counts MPEG-TS packets written to the buffer.
+	// IngestorPacketsTotal counts buffer writes (one per access unit on AV
+	// sources, one per TS chunk on raw-TS sources — NOT 188-byte TS packets).
 	IngestorPacketsTotal *prometheus.CounterVec
 	// IngestorErrorsTotal counts transient read/reconnect errors per stream.
 	IngestorErrorsTotal *prometheus.CounterVec
@@ -181,6 +182,36 @@ type Metrics struct {
 	// value across multiple scrapes means the reconciler goroutine has
 	// died — the safety net is gone.
 	ReconcilerLastRunSeconds prometheus.Gauge
+
+	// ── Failure counters (write-path errors that risk data loss) ──────────────
+	// DVRSegmentWriteErrorsTotal counts DVR segment writes that failed to land
+	// on disk per stream. The single most important DVR signal (lost recording
+	// data) — previously only logged + an event, invisible to dashboards.
+	DVRSegmentWriteErrorsTotal *prometheus.CounterVec
+	// PublisherSegmentWriteErrorsTotal counts HLS/DASH segment-file writes that
+	// failed per stream, format and rendition profile. Disk write failures were
+	// previously silent (no metric moved), so "no input" and "disk failing"
+	// looked identical on a dashboard.
+	PublisherSegmentWriteErrorsTotal *prometheus.CounterVec
+
+	// ── Publisher push (reconnect churn) ──────────────────────────────────────
+	// PublisherPushReconnectsTotal counts RTMP/RTMPS push session reconnect
+	// attempts per stream and destination. PublisherPushState (gauge) only
+	// shows the instantaneous state; this counter surfaces flapping that a
+	// single scrape interval would miss.
+	PublisherPushReconnectsTotal *prometheus.CounterVec
+
+	// ── Auto-publish (runtime stream lifecycle) ───────────────────────────────
+	// AutopublishStreamsActive is the number of runtime (auto-published) streams
+	// currently alive per template. A value that never drains signals the idle
+	// reaper has stalled (runtime streams are RAM-only and must be reaped).
+	AutopublishStreamsActive *prometheus.GaugeVec
+	// AutopublishStreamsCreatedTotal counts runtime streams materialised on a
+	// matching push, per template.
+	AutopublishStreamsCreatedTotal *prometheus.CounterVec
+	// AutopublishStreamsReapedTotal counts runtime streams torn down per
+	// template and reason (idle|subscribe_failed|buffer_closed).
+	AutopublishStreamsReapedTotal *prometheus.CounterVec
 }
 
 // New registers all metrics and returns a Metrics instance.
@@ -194,12 +225,12 @@ func New(i do.Injector) (*Metrics, error) {
 
 		IngestorPacketsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "open_streamer_ingestor_packets_total",
-			Help: "Total MPEG-TS packets written to the buffer per stream and protocol.",
+			Help: "Total buffer writes per stream and protocol (one per access unit on AV sources, one per TS chunk on raw-TS sources; NOT 188-byte TS packets).",
 		}, []string{"stream_code", "protocol"}),
 
 		IngestorErrorsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "open_streamer_ingestor_errors_total",
-			Help: "Total ingestion errors per stream, categorised by reason (reconnect, failover).",
+			Help: "Total ingestion errors per stream, categorised by reason (reconnect|failover|open|eof|fatal|disconnect|stall).",
 		}, []string{"stream_code", "reason"}),
 
 		ManagerFailoversTotal: promauto.NewCounterVec(prometheus.CounterOpts{
@@ -209,17 +240,17 @@ func New(i do.Injector) (*Metrics, error) {
 
 		ManagerInputHealth: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "open_streamer_manager_input_health",
-			Help: "Input health per stream and priority: 1 = delivering packets, 0 = degraded.",
+			Help: "Input health per stream and priority: 1 = the active input delivering packets, 0 = not the active input (degraded or standby).",
 		}, []string{"stream_code", "input_priority"}),
 
 		TranscoderWorkersActive: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "open_streamer_transcoder_workers_active",
-			Help: "Number of FFmpeg encoder processes currently running per stream.",
+			Help: "Number of open-streamer-transcoder subprocesses currently running per stream (1 while up, 0 while down).",
 		}, []string{"stream_code"}),
 
 		TranscoderRestartsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "open_streamer_transcoder_restarts_total",
-			Help: "Total FFmpeg process crash-restarts per stream.",
+			Help: "Total open-streamer-transcoder subprocess crash-restarts (supervisor respawns) per stream.",
 		}, []string{"stream_code"}),
 
 		TranscoderFramesTotal: promauto.NewCounterVec(prometheus.CounterOpts{
@@ -273,7 +304,7 @@ func New(i do.Injector) (*Metrics, error) {
 
 		SessionsClosedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "open_streamer_sessions_closed_total",
-			Help: "Total play sessions closed per stream, protocol and reason (idle|client_gone|kicked|shutdown).",
+			Help: "Total play sessions closed per stream, protocol and reason (idle|max_lifetime|client_gone|kicked|shutdown).",
 		}, []string{"stream_code", "proto", "reason"}),
 
 		HooksDeliveryTotal: promauto.NewCounterVec(prometheus.CounterOpts{
@@ -309,7 +340,7 @@ func New(i do.Injector) (*Metrics, error) {
 		DVRRetentionPrunedBytes: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "open_streamer_dvr_retention_pruned_bytes_total",
 			Help: "Total bytes deleted by the DVR retention loop per stream. reason label classifies the trigger (age vs size).",
-		}, []string{"stream_code"}),
+		}, []string{"stream_code", "reason"}),
 
 		BufferCapacityUsed: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "open_streamer_buffer_capacity_used",
@@ -344,7 +375,7 @@ func New(i do.Injector) (*Metrics, error) {
 
 		StreamsTotal: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "open_streamer_streams_total",
-			Help: "Number of streams currently in each top-level status (idle|active|degraded|stopped|exhausted). Refreshed by the coordinator reconciler.",
+			Help: "Number of streams currently in each top-level status (active|degraded|stopped). Refreshed by the coordinator reconciler.",
 		}, []string{"status"}),
 
 		HooksBatchSize: promauto.NewHistogramVec(prometheus.HistogramOpts{
@@ -364,6 +395,36 @@ func New(i do.Injector) (*Metrics, error) {
 			Name: "open_streamer_reconciler_last_run_seconds",
 			Help: "Unix timestamp of the most recent reconciler tick. Stale value across scrapes means the safety-net loop has stalled.",
 		}),
+
+		DVRSegmentWriteErrorsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "open_streamer_dvr_segment_write_errors_total",
+			Help: "Total DVR segment writes that failed to land on disk per stream.",
+		}, []string{"stream_code"}),
+
+		PublisherSegmentWriteErrorsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "open_streamer_publisher_segment_write_errors_total",
+			Help: "Total HLS/DASH segment-file write failures per stream, format and rendition profile.",
+		}, []string{"stream_code", "format", "profile"}),
+
+		PublisherPushReconnectsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "open_streamer_publisher_push_reconnects_total",
+			Help: "Total RTMP/RTMPS push session reconnect attempts per stream and destination.",
+		}, []string{"stream_code", "dest_url"}),
+
+		AutopublishStreamsActive: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "open_streamer_autopublish_streams_active",
+			Help: "Number of runtime (auto-published) streams currently alive per template.",
+		}, []string{"template"}),
+
+		AutopublishStreamsCreatedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "open_streamer_autopublish_streams_created_total",
+			Help: "Total runtime streams materialised on a matching push, per template.",
+		}, []string{"template"}),
+
+		AutopublishStreamsReapedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "open_streamer_autopublish_streams_reaped_total",
+			Help: "Total runtime streams torn down per template and reason (idle|subscribe_failed|buffer_closed).",
+		}, []string{"template", "reason"}),
 	}
 
 	return m, nil

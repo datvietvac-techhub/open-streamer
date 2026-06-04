@@ -276,6 +276,14 @@ func (s *Service) Delete(id domain.StreamCode) {
 	if ok {
 		rb.unsubscribeAll()
 	}
+	// Drop the per-buffer metric series so a deleted buffer (including the
+	// short-lived auto-publish runtime + per-rendition/raw buffers) doesn't
+	// keep reporting its last value forever.
+	if s.m != nil {
+		s.m.BufferCapacityUsed.DeleteLabelValues(string(id))
+		s.m.BufferSubscribers.DeleteLabelValues(string(id))
+		s.m.BufferDropsTotal.DeleteLabelValues(string(id))
+	}
 }
 
 // UnsubscribeAll closes every subscriber's channel for the given buffer.
