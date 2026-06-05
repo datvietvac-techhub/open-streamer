@@ -116,6 +116,8 @@ func (s *Service) StartRecording(ctx context.Context, code domain.StreamCode, pr
 		rec.wg.Add(1)
 		go s.runLane(rctx, rec, p, segDur)
 	}
+	rec.wg.Add(1)
+	go s.runRetention(rctx, rec, cfg)
 	slog.Info("blob: recording started", "stream_code", code, "profiles", len(profiles), "dir", streamDir)
 	return &domain.Recording{ID: domain.RecordingID(code), StreamCode: code, SegmentDir: streamDir}, nil
 }
