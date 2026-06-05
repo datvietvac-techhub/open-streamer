@@ -127,13 +127,25 @@ func (s *Server) dispatchMedia() http.HandlerFunc {
 				}
 				return
 			}
+		case mediaFileDASHIndex:
+			// DASH timeshift exists only for blob archives; legacy .ts has no
+			// MPD timeshift path, so a non-blob request falls through to the
+			// live manifest on disk.
+			if isDVRPlaybackRequest(r) && s.blobH.IsBlob(r, domain.StreamCode(code)) {
+				s.blobH.ServeMPD(w, r)
+				return
+			}
 		}
-		// Blob-archive timeshift inits/fragments carry a flat dvri-/dvrf- name.
+		// Blob-archive timeshift inits/fragments carry a flat dvri-/dvrf-/dvrt-
+		// name (dvrf- = HLS hour+seq, dvrt- = DASH $Time$).
 		if blob.IsBlobMediaFile(file) {
 			r = setURLParam(r, "file", file)
-			if strings.HasPrefix(file, "dvri-") {
+			switch {
+			case strings.HasPrefix(file, "dvri-"):
 				s.blobH.ServeInit(w, r)
-			} else {
+			case strings.HasPrefix(file, "dvrt-"):
+				s.blobH.ServeTimeFragment(w, r)
+			default:
 				s.blobH.ServeFragment(w, r)
 			}
 			return

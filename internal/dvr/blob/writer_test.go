@@ -50,6 +50,8 @@ func aPacket(ptsMs uint64) buffer.Packet {
 
 // feed drives n video frames (IDR every gop frames) at frameMs spacing from
 // PTS 0, with one audio frame per video frame, starting at wall time start.
+//
+//nolint:unparam // gop is an explicit GOP-size knob kept for test readability
 func feed(t *testing.T, w *profileWriter, n, gop int, frameMs uint64, start time.Time) {
 	t.Helper()
 	for i := 0; i < n; i++ {

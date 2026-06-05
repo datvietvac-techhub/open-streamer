@@ -93,6 +93,68 @@ func (h *BlobTimeshiftHandler) ServeTimeshift(w http.ResponseWriter, r *http.Req
 	_, _ = w.Write([]byte(blob.RenderMediaPlaylist(win, track)))
 }
 
+// ServeMPD serves the static DASH manifest for the timeshift window. It queries
+// every profile for the requested [from, from+dur) slice and hands the resolved
+// per-profile windows to blob.RenderMPD (one video AdaptationSet across covered
+// profiles + the shared audio AdaptationSet). DASH timeshift exists only for
+// blob archives; the dispatcher gates this behind IsBlob.
+func (h *BlobTimeshiftHandler) ServeMPD(w http.ResponseWriter, r *http.Request) {
+	br, ok := h.reader(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "NO_DATA", msgRecordingNoData)
+		return
+	}
+	cat := br.Catalog()
+	start, ok := parseTimeshiftStart(r, time.UnixMilli(cat.RecordingMediaOriginUnixMs).UTC())
+	if !ok {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMS", "from must be Unix seconds; delay/ago non-negative")
+		return
+	}
+	dur, ok := parseTimeshiftDuration(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "INVALID_PARAMS", "dur must be a positive number of seconds")
+		return
+	}
+	windows := make(map[string]*blob.Window, len(cat.Profiles))
+	for _, p := range cat.Profiles {
+		win, err := br.Query(p.ID, start, dur)
+		if err != nil {
+			continue
+		}
+		windows[p.ID] = win
+	}
+	mpd, err := blob.RenderMPD(cat, windows, blob.DefaultSegDur)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NO_SEGMENTS_IN_RANGE", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/dash+xml")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(mpd)
+}
+
+// ServeTimeFragment serves one DASH fragment addressed by media-time tick
+// (dvrt-<profile>-<track>-<ticks>.m4s).
+func (h *BlobTimeshiftHandler) ServeTimeFragment(w http.ResponseWriter, r *http.Request) {
+	br, ok := h.reader(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	profile, track, ticks, okN := blob.ParseTimeFragmentName(chi.URLParam(r, "file"))
+	if !okN {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := br.FragmentByTime(profile, track, ticks)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	_, _ = w.Write(data)
+}
+
 // ServeInit serves a track init (dvri-<profile>-<track>.mp4).
 func (h *BlobTimeshiftHandler) ServeInit(w http.ResponseWriter, r *http.Request) {
 	br, ok := h.reader(r)

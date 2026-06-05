@@ -3,6 +3,7 @@ package dash
 import (
 	"encoding/xml"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -48,6 +49,20 @@ type ManifestInput struct {
 	// multiple audio AdaptationSets — different languages — but this
 	// packager emits at most one.)
 	Audio *TrackManifest
+
+	// Static selects a bounded VOD-window (type="static") MPD instead of
+	// the default live (type="dynamic") one. Used by the DVR blob-archive
+	// timeshift surface: the window is fully available, so the manifest
+	// carries mediaPresentationDuration and omits every live-edge attr
+	// (availabilityStartTime / minimumUpdatePeriod / timeShiftBufferDepth /
+	// publishTime / suggestedPresentationDelay / UTCTiming). The live
+	// packager leaves this false, so its output is unchanged.
+	Static bool
+
+	// MediaPresentationDuration is the static window's total presentation
+	// span (after applying each track's presentationTimeOffset). Only read
+	// when Static is true.
+	MediaPresentationDuration time.Duration
 }
 
 // TrackManifest describes one track's manifest data. Same struct shape
@@ -97,6 +112,14 @@ type TrackManifest struct {
 	// becomes the explicit `<S t="...">`; subsequent entries use only
 	// `<S d="...">` (duration), with the player accumulating.
 	Segments []SegmentEntry
+
+	// PTO is the SegmentTemplate@presentationTimeOffset in this track's
+	// timescale. Set for a static archive window whose fragments carry an
+	// absolute (large, non-zero) tfdt: the player maps a segment at media
+	// time t to presentation time (t − PTO)/timescale, so PTO = the first
+	// emitted fragment's media time anchors the window to presentation 0.
+	// Zero (the live default) is omitted from the XML.
+	PTO uint64
 }
 
 // SegmentEntry is one segment's position + duration in track timescale.
@@ -182,21 +205,34 @@ func buildMPDDoc(in *ManifestInput) *mpdRoot {
 		maxSegDurSec = maxObservedSec
 	}
 	doc := &mpdRoot{
-		XMLNS:                      "urn:mpeg:dash:schema:mpd:2011",
-		Type:                       "dynamic",
-		Profiles:                   "urn:mpeg:dash:profile:isoff-live:2011",
-		MinBuffer:                  durationISO(minBufferSec),
-		SuggestedPresentationDelay: durationISO(segSec * 3),
-		MaxSegmentDuration:         durationISO(maxSegDurSec),
-		AvailabilityStartTime:      formatRFC3339(in.AvailabilityStart),
-		MinUpdate:                  durationISO(segSec),
-		BufferDepth:                durationISO(segSec * in.Window),
-		PublishTime:                formatRFC3339(in.PublishTime),
-		Periods:                    []mpdPeriod{{ID: "0", Start: "PT0S"}},
-		UTCTiming: &mpdUTCTiming{
+		XMLNS:              "urn:mpeg:dash:schema:mpd:2011",
+		MinBuffer:          durationISO(minBufferSec),
+		MaxSegmentDuration: durationISO(maxSegDurSec),
+		Periods:            []mpdPeriod{{ID: "0", Start: "PT0S"}},
+	}
+	if in.Static {
+		// Bounded archive window — a fully-available VOD-like presentation.
+		// Advertise the duration and OMIT every live-edge attr: a static MPD
+		// carrying minimumUpdatePeriod (or an isoff-live profile) makes
+		// players treat the window as a live stream and chase a non-existent
+		// live edge. presentationTimeOffset on each Representation anchors the
+		// absolute tfdt back to presentation 0.
+		doc.Type = "static"
+		doc.Profiles = "urn:mpeg:dash:profile:isoff-main:2011"
+		doc.MediaPresentationDuration = durationISOFractional(in.MediaPresentationDuration)
+		doc.Periods[0].Duration = doc.MediaPresentationDuration
+	} else {
+		doc.Type = "dynamic"
+		doc.Profiles = "urn:mpeg:dash:profile:isoff-live:2011"
+		doc.SuggestedPresentationDelay = durationISO(segSec * 3)
+		doc.AvailabilityStartTime = formatRFC3339(in.AvailabilityStart)
+		doc.MinUpdate = durationISO(segSec)
+		doc.BufferDepth = durationISO(segSec * in.Window)
+		doc.PublishTime = formatRFC3339(in.PublishTime)
+		doc.UTCTiming = &mpdUTCTiming{
 			SchemeIDURI: "urn:mpeg:dash:utc:direct:2014",
 			Value:       formatRFC3339(in.PublishTime),
-		},
+		}
 	}
 	per := &doc.Periods[0]
 
@@ -234,6 +270,7 @@ func buildVideoAdaptationSet(reps []TrackManifest) *mpdAdaptationSet {
 			Height:    t.Height,
 			SegmentTemplate: mpdSegmentTemplate{
 				Timescale:      int(t.Timescale), //nolint:gosec // timescale fits int
+				PTO:            t.PTO,
 				Initialization: t.InitFile,
 				Media:          t.MediaPattern,
 				StartNumber:    int(t.StartNumber), //nolint:gosec // segment numbers fit int for live durations
@@ -275,6 +312,7 @@ func buildAudioAdaptationSet(t *TrackManifest) *mpdAdaptationSet {
 			AudioSamplingRate: &asr,
 			SegmentTemplate: mpdSegmentTemplate{
 				Timescale:      int(t.Timescale), //nolint:gosec // timescale fits int
+				PTO:            t.PTO,
 				Initialization: t.InitFile,
 				Media:          t.MediaPattern,
 				StartNumber:    int(t.StartNumber), //nolint:gosec // segment numbers fit int for live durations
@@ -323,6 +361,22 @@ func durationISO(seconds int) string {
 	return fmt.Sprintf("PT%dS", seconds)
 }
 
+// durationISOFractional returns the ISO-8601 duration form with millisecond
+// precision (e.g. PT3600.04S) so a static window's mediaPresentationDuration
+// doesn't truncate the seekable tail to a whole second. Trailing zeros in the
+// fraction are trimmed; a whole-second value emits no decimal point.
+func durationISOFractional(d time.Duration) string {
+	if d <= 0 {
+		return "PT0S"
+	}
+	ms := d.Milliseconds()
+	sec, frac := ms/1000, ms%1000
+	if frac == 0 {
+		return fmt.Sprintf("PT%dS", sec)
+	}
+	return fmt.Sprintf("PT%d.%sS", sec, strings.TrimRight(fmt.Sprintf("%03d", frac), "0"))
+}
+
 // formatRFC3339 returns t in UTC RFC3339 form, or empty when t is zero.
 func formatRFC3339(t time.Time) string {
 	if t.IsZero() {
@@ -339,12 +393,13 @@ type mpdRoot struct {
 	Type                       string        `xml:"type,attr"`
 	Profiles                   string        `xml:"profiles,attr"`
 	MinBuffer                  string        `xml:"minBufferTime,attr"`
+	MediaPresentationDuration  string        `xml:"mediaPresentationDuration,attr,omitempty"`
 	SuggestedPresentationDelay string        `xml:"suggestedPresentationDelay,attr,omitempty"`
 	MaxSegmentDuration         string        `xml:"maxSegmentDuration,attr,omitempty"`
 	AvailabilityStartTime      string        `xml:"availabilityStartTime,attr,omitempty"`
-	MinUpdate                  string        `xml:"minimumUpdatePeriod,attr"`
-	BufferDepth                string        `xml:"timeShiftBufferDepth,attr"`
-	PublishTime                string        `xml:"publishTime,attr"`
+	MinUpdate                  string        `xml:"minimumUpdatePeriod,attr,omitempty"`
+	BufferDepth                string        `xml:"timeShiftBufferDepth,attr,omitempty"`
+	PublishTime                string        `xml:"publishTime,attr,omitempty"`
 	Periods                    []mpdPeriod   `xml:"Period"`
 	UTCTiming                  *mpdUTCTiming `xml:"UTCTiming,omitempty"`
 }
@@ -357,6 +412,7 @@ type mpdUTCTiming struct {
 type mpdPeriod struct {
 	ID             string             `xml:"id,attr"`
 	Start          string             `xml:"start,attr"`
+	Duration       string             `xml:"duration,attr,omitempty"`
 	AdaptationSets []mpdAdaptationSet `xml:"AdaptationSet"`
 }
 
@@ -382,6 +438,7 @@ type mpdRepresentation struct {
 
 type mpdSegmentTemplate struct {
 	Timescale      int             `xml:"timescale,attr"`
+	PTO            uint64          `xml:"presentationTimeOffset,attr,omitempty"`
 	Initialization string          `xml:"initialization,attr"`
 	Media          string          `xml:"media,attr"`
 	StartNumber    int             `xml:"startNumber,attr"`

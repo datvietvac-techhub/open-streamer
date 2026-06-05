@@ -283,6 +283,67 @@ func TestBuildManifest_TFDTValuesMatchInput(t *testing.T) {
 
 // sampleManifestInput returns a baseline two-track ManifestInput for
 // tests to mutate.
+// TestBuildManifest_StaticMode — a static (VOD-window) MPD advertises the
+// duration + the on-demand-compatible profile and OMITS every live-edge attr.
+func TestBuildManifest_StaticMode(t *testing.T) {
+	in := sampleManifestInput()
+	in.Static = true
+	in.MediaPresentationDuration = 6 * time.Second
+	in.Video[0].PTO = 900_000 // 90000-scale
+	in.Audio.PTO = 480_000    // 48000-scale
+	data, err := BuildManifest(in)
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	s := string(data)
+	for _, want := range []string{
+		`type="static"`,
+		`profiles="urn:mpeg:dash:profile:isoff-main:2011"`,
+		`mediaPresentationDuration="PT6S"`,
+		`duration="PT6S"`, // Period@duration
+		`presentationTimeOffset="900000"`,
+		`presentationTimeOffset="480000"`,
+		`minBufferTime=`, // required even for static
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("static manifest missing substring %q\n%s", want, s)
+		}
+	}
+	for _, unwanted := range []string{
+		`type="dynamic"`,
+		`availabilityStartTime=`,
+		`minimumUpdatePeriod=`,
+		`timeShiftBufferDepth=`,
+		`publishTime=`,
+		`suggestedPresentationDelay=`,
+		`<UTCTiming`,
+		`isoff-live`,
+	} {
+		if strings.Contains(s, unwanted) {
+			t.Errorf("static manifest must NOT contain %q\n%s", unwanted, s)
+		}
+	}
+}
+
+// TestBuildManifest_LivePTOOmitted — the live (dynamic) path leaves PTO at 0,
+// which must be omitted from the XML so existing live output is unchanged.
+func TestBuildManifest_LivePTOOmitted(t *testing.T) {
+	data, err := BuildManifest(sampleManifestInput())
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	s := string(data)
+	if strings.Contains(s, "presentationTimeOffset=") {
+		t.Errorf("live manifest must omit presentationTimeOffset\n%s", s)
+	}
+	if strings.Contains(s, "mediaPresentationDuration=") {
+		t.Errorf("live manifest must omit mediaPresentationDuration\n%s", s)
+	}
+	if !strings.Contains(s, `type="dynamic"`) || !strings.Contains(s, "isoff-live") {
+		t.Errorf("live manifest must stay dynamic/isoff-live\n%s", s)
+	}
+}
+
 func sampleManifestInput() *ManifestInput {
 	return &ManifestInput{
 		AvailabilityStart: time.Date(2026, 5, 11, 8, 52, 5, 0, time.UTC),

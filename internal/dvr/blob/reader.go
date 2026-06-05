@@ -3,6 +3,7 @@ package blob
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -217,6 +218,105 @@ func (br *Reader) FragmentByHour(profileID, hourCompact string, track uint8, seq
 		idx++
 	}
 	return nil, fmt.Errorf("blob: fragment %s-%d-%d not found", hourCompact, track, seq)
+}
+
+// FragmentByTime resolves a fragment addressed by exact media-time tick (the
+// DASH $Time$ form) and returns its bytes. The match is always exact-tick
+// equality against the stored FragRecord.MediaTicks — the same value emitted as
+// <S t=…> into the manifest — so the round-trip is lossless.
+//
+// Hour selection: video ticks (90000) use the catalog's per-hour video bounds.
+// Audio ticks (audio timescale) have no per-hour bounds in the catalog, so the
+// hour is estimated by converting to a video-equivalent tick; the candidate and
+// its two neighbours are scanned, since a segment straddling a UTC-hour boundary
+// can file an audio fragment one hour off from its media-time floor.
+func (br *Reader) FragmentByTime(profileID string, track uint8, mediaTicks uint64) ([]byte, error) {
+	pd, ok := br.cat.Profile(profileID)
+	if !ok {
+		return nil, fmt.Errorf("blob: unknown profile %q", profileID)
+	}
+	profDir := profileDirPath(br.streamDir, profileID)
+	for _, hr := range br.candidateHours(pd, track, mediaTicks) {
+		stem := filepath.Join(profDir, filepath.FromSlash(hr.Hour))
+		_, recs, err := ReadRanges(stem+".ranges", hourBlobSize(stem))
+		if err != nil {
+			continue
+		}
+		for _, r := range recs {
+			if r.Track != track || r.MediaTicks != mediaTicks {
+				continue
+			}
+			ext := ".cmfv"
+			if track == TrackAudio {
+				ext = ".cmfa"
+			}
+			bf, err := openBlobFile(stem + ext)
+			if err != nil {
+				return nil, err
+			}
+			data, err := bf.ReadSlice(int64(r.ByteOffset), int(r.ByteLen)) //nolint:gosec // bounded
+			_ = bf.Close()
+			return data, err
+		}
+	}
+	return nil, fmt.Errorf("blob: fragment %s track %d @%d not found", profileID, track, mediaTicks)
+}
+
+// candidateHours returns the hour records that may hold a fragment at mediaTicks
+// for track, best-first. Video uses the exact per-hour video bounds; audio
+// estimates the hour from the video-equivalent tick and adds the two neighbours.
+func (br *Reader) candidateHours(pd *ProfileDesc, track uint8, mediaTicks uint64) []HourRecord {
+	hours := append([]HourRecord(nil), pd.Hours...)
+	sort.Slice(hours, func(i, j int) bool { return hours[i].Hour < hours[j].Hour })
+
+	if track == TrackVideo {
+		var out []HourRecord
+		for _, hr := range hours {
+			if hr.MediaFromV <= mediaTicks && mediaTicks <= hr.MediaToV {
+				out = append(out, hr)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+		return hours // fallback: bound drift / pre-bounds record — scan all
+	}
+
+	aTS := br.audioTicksScale(pd)
+	if aTS == 0 || len(hours) == 0 {
+		return hours
+	}
+	vEquiv := mediaTicks * uint64(videoTimescale) / uint64(aTS) // multiply-first; overflow-safe
+	idx := len(hours) - 1
+	for i, hr := range hours {
+		if vEquiv <= hr.MediaToV {
+			idx = i
+			break
+		}
+	}
+	out := make([]HourRecord, 0, 3)
+	for _, j := range []int{idx, idx - 1, idx + 1} {
+		if j >= 0 && j < len(hours) {
+			out = append(out, hours[j])
+		}
+	}
+	return out
+}
+
+// audioTicksScale returns the profile's audio timescale: from the catalog when
+// recorded, else read from the newest hour's ranges header.
+func (br *Reader) audioTicksScale(pd *ProfileDesc) uint32 {
+	if pd.AudioTimescale > 0 {
+		return uint32(pd.AudioTimescale) //nolint:gosec // sample rate is a small positive int
+	}
+	profDir := profileDirPath(br.streamDir, pd.ID)
+	for i := len(pd.Hours) - 1; i >= 0; i-- {
+		stem := filepath.Join(profDir, filepath.FromSlash(pd.Hours[i].Hour))
+		if hdr, _, err := ReadRanges(stem+".ranges", hourBlobSize(stem)); err == nil && hdr.AudioTimescale != 0 {
+			return hdr.AudioTimescale
+		}
+	}
+	return 0
 }
 
 // ReadInit returns the init bytes ([0, initLen)) for a profile's track, taken
