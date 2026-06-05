@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,6 +93,36 @@ func (h *BlobTimeshiftHandler) ServeTimeshift(w http.ResponseWriter, r *http.Req
 		track = blob.TrackAudio
 	}
 	_, _ = w.Write([]byte(blob.RenderMediaPlaylist(win, track)))
+}
+
+// Migrate converts a stopped legacy `.ts` recording into the CMAF blob archive
+// in place (POST /streams/{code}/migrate). The caller must ensure the recording
+// is stopped first — migration is an offline replay. Optional query params:
+// `prune=1` deletes the legacy files on success; `segdur=<sec>` overrides the
+// fragment target duration.
+func (h *BlobTimeshiftHandler) Migrate(w http.ResponseWriter, r *http.Request) {
+	code := domain.StreamCode(chi.URLParam(r, "code"))
+	rec, err := h.recRepo.FindByID(r.Context(), domain.RecordingID(code))
+	if err != nil || rec.SegmentDir == "" {
+		writeError(w, http.StatusNotFound, "NO_DATA", msgRecordingNoData)
+		return
+	}
+	if !blob.IsLegacyRecording(rec.SegmentDir) {
+		writeError(w, http.StatusConflict, "NOT_LEGACY", "no un-migrated legacy recording for this stream")
+		return
+	}
+	opts := blob.MigrateOptions{StreamCode: string(code), Prune: r.URL.Query().Get("prune") == "1"}
+	if v := r.URL.Query().Get("segdur"); v != "" {
+		if sec, perr := strconv.Atoi(v); perr == nil && sec > 0 {
+			opts.SegDur = time.Duration(sec) * time.Second
+		}
+	}
+	res, err := blob.Migrate(context.WithoutCancel(r.Context()), rec.SegmentDir, opts)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "MIGRATE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": res})
 }
 
 // ServeMPD serves the static DASH manifest for the timeshift window. It queries

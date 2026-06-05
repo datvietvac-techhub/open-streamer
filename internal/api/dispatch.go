@@ -32,7 +32,7 @@ func (s *Server) dispatchStreamsSubpath() http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		code, action := splitTailAction(suffix, streamActionRestart, streamActionSwitch)
+		code, action := splitTailAction(suffix, streamActionRestart, streamActionSwitch, streamActionMigrate)
 		if err := domain.ValidateStreamCode(code); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -54,6 +54,13 @@ func (s *Server) dispatchStreamsSubpath() http.HandlerFunc {
 				return
 			}
 			s.streamH.SwitchInput(w, r)
+		case streamActionMigrate:
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodPost)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			s.blobH.Migrate(w, r)
 		default:
 			switch r.Method {
 			case http.MethodGet:
