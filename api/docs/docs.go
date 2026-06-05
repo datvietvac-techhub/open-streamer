@@ -2534,6 +2534,8 @@ const docTemplate = `{
         "domain.EventType": {
             "type": "string",
             "enum": [
+                "session.opened",
+                "session.closed",
                 "stream.created",
                 "stream.updated",
                 "stream.started",
@@ -2567,9 +2569,7 @@ const docTemplate = `{
                 "template.updated",
                 "template.deleted",
                 "stream.runtime_created",
-                "stream.runtime_expired",
-                "session.opened",
-                "session.closed"
+                "stream.runtime_expired"
             ],
             "x-enum-comments": {
                 "EventDVRSegmentPruned": "retention loop deleted an aged-out segment",
@@ -2586,6 +2586,8 @@ const docTemplate = `{
                 "EventStreamUpdated": "PUT /streams/{code} on existing record"
             },
             "x-enum-descriptions": [
+                "",
+                "",
                 "",
                 "PUT /streams/{code} on existing record",
                 "",
@@ -2619,11 +2621,11 @@ const docTemplate = `{
                 "",
                 "",
                 "",
-                "",
-                "",
                 ""
             ],
             "x-enum-varnames": [
+                "EventSessionOpened",
+                "EventSessionClosed",
                 "EventStreamCreated",
                 "EventStreamUpdated",
                 "EventStreamStarted",
@@ -2657,9 +2659,7 @@ const docTemplate = `{
                 "EventTemplateUpdated",
                 "EventTemplateDeleted",
                 "EventStreamRuntimeCreated",
-                "EventStreamRuntimeExpired",
-                "EventSessionOpened",
-                "EventSessionClosed"
+                "EventStreamRuntimeExpired"
             ]
         },
         "domain.GlobalConfig": {
@@ -3229,9 +3229,17 @@ const docTemplate = `{
                 "enabled": {
                     "type": "boolean"
                 },
+                "format": {
+                    "description": "Format selects the DVR storage backend: \"\" or \"ts\" = the legacy\nper-segment .ts writer (default); \"cmaf\" = the blob archive (per-hour\nCMAF container + range index, multi-profile, HLS+DASH timeshift).",
+                    "type": "string"
+                },
                 "max_size_gb": {
                     "description": "MaxSizeGB caps total disk usage. Oldest segments pruned when exceeded.\n0 = no limit.",
                     "type": "number"
+                },
+                "profiles": {
+                    "description": "Profiles selects which renditions the cmaf archive records:\n\"\" or \"best\" = the best rendition only (default); \"all\" = every rendition\nin the ABR ladder. Ignored for the legacy ts format.",
+                    "type": "string"
                 },
                 "retention_sec": {
                     "description": "RetentionSec is the retention window in seconds.\n0 = keep forever.",

@@ -629,6 +629,8 @@ definitions:
     type: object
   domain.EventType:
     enum:
+    - session.opened
+    - session.closed
     - stream.created
     - stream.updated
     - stream.started
@@ -663,8 +665,6 @@ definitions:
     - template.deleted
     - stream.runtime_created
     - stream.runtime_expired
-    - session.opened
-    - session.closed
     type: string
     x-enum-comments:
       EventDVRSegmentPruned: retention loop deleted an aged-out segment
@@ -681,6 +681,8 @@ definitions:
       EventPushStarted: dialing target, pre-handshake
       EventStreamUpdated: PUT /streams/{code} on existing record
     x-enum-descriptions:
+    - ""
+    - ""
     - ""
     - PUT /streams/{code} on existing record
     - ""
@@ -715,9 +717,9 @@ definitions:
     - ""
     - ""
     - ""
-    - ""
-    - ""
     x-enum-varnames:
+    - EventSessionOpened
+    - EventSessionClosed
     - EventStreamCreated
     - EventStreamUpdated
     - EventStreamStarted
@@ -752,8 +754,6 @@ definitions:
     - EventTemplateDeleted
     - EventStreamRuntimeCreated
     - EventStreamRuntimeExpired
-    - EventSessionOpened
-    - EventSessionClosed
   domain.GlobalConfig:
     properties:
       buffer:
@@ -1301,11 +1301,23 @@ definitions:
     properties:
       enabled:
         type: boolean
+      format:
+        description: |-
+          Format selects the DVR storage backend: "" or "ts" = the legacy
+          per-segment .ts writer (default); "cmaf" = the blob archive (per-hour
+          CMAF container + range index, multi-profile, HLS+DASH timeshift).
+        type: string
       max_size_gb:
         description: |-
           MaxSizeGB caps total disk usage. Oldest segments pruned when exceeded.
           0 = no limit.
         type: number
+      profiles:
+        description: |-
+          Profiles selects which renditions the cmaf archive records:
+          "" or "best" = the best rendition only (default); "all" = every rendition
+          in the ABR ladder. Ignored for the legacy ts format.
+        type: string
       retention_sec:
         description: |-
           RetentionSec is the retention window in seconds.

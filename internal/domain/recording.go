@@ -75,4 +75,20 @@ type StreamDVRConfig struct {
 	// MaxSizeGB caps total disk usage. Oldest segments pruned when exceeded.
 	// 0 = no limit.
 	MaxSizeGB float64 `json:"max_size_gb" yaml:"max_size_gb"`
+
+	// Format selects the DVR storage backend: "" or "ts" = the legacy
+	// per-segment .ts writer (default); "cmaf" = the blob archive (per-hour
+	// CMAF container + range index, multi-profile, HLS+DASH timeshift).
+	Format string `json:"format" yaml:"format"`
+
+	// Profiles selects which renditions the cmaf archive records:
+	// "" or "best" = the best rendition only (default); "all" = every rendition
+	// in the ABR ladder. Ignored for the legacy ts format.
+	Profiles string `json:"profiles" yaml:"profiles"`
 }
+
+// DVR format values for StreamDVRConfig.Format.
+const (
+	DVRFormatTS   = "ts"
+	DVRFormatCMAF = "cmaf"
+)

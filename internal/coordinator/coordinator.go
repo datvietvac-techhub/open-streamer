@@ -14,6 +14,7 @@ import (
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 	"github.com/datvietvac-techhub/open-streamer/internal/dvr"
+	"github.com/datvietvac-techhub/open-streamer/internal/dvr/blob"
 	"github.com/datvietvac-techhub/open-streamer/internal/events"
 	"github.com/datvietvac-techhub/open-streamer/internal/manager"
 	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
@@ -31,6 +32,7 @@ type Coordinator struct {
 	tc           tcDep
 	pub          pubDep
 	dvr          dvrDep
+	blobDVR      *blob.Service // cmaf blob archive; nil in tests (legacy ts path unaffected)
 	bus          events.Bus
 	m            *metrics.Metrics
 	streamRepo   store.StreamRepository
@@ -99,6 +101,7 @@ func New(i do.Injector) (*Coordinator, error) {
 		tc:           do.MustInvoke[*transcoder.Service](i),
 		pub:          do.MustInvoke[*publisher.Service](i),
 		dvr:          do.MustInvoke[*dvr.Service](i),
+		blobDVR:      do.MustInvoke[*blob.Service](i),
 		bus:          do.MustInvoke[events.Bus](i),
 		m:            do.MustInvoke[*metrics.Metrics](i),
 		streamRepo:   repo,
@@ -357,12 +360,7 @@ func (c *Coordinator) Start(ctx context.Context, stream *domain.Stream) error {
 		c.rendMu.Unlock()
 	}
 
-	if stream.DVR != nil && stream.DVR.Enabled {
-		mediaBuf := buffer.PlaybackBufferID(stream.Code, stream.Transcoder)
-		if _, err := c.dvr.StartRecording(ctx, stream.Code, mediaBuf, stream.DVR); err != nil {
-			slog.Warn("coordinator: dvr start failed", "stream_code", stream.Code, "err", err)
-		}
-	}
+	c.startDVR(ctx, stream)
 
 	now := time.Now()
 	if c.m != nil {
@@ -464,11 +462,7 @@ func (c *Coordinator) Stop(ctx context.Context, streamID domain.StreamCode) {
 	}
 
 	slog.Info("coordinator: stopping stream pipeline", "stream_code", streamID)
-	if c.dvr.IsRecording(streamID) {
-		if err := c.dvr.StopRecording(ctx, streamID); err != nil {
-			slog.Warn("coordinator: dvr stop failed", "stream_code", streamID, "err", err)
-		}
-	}
+	c.stopDVR(ctx, streamID)
 	c.pub.Stop(streamID)
 	c.tc.Stop(streamID)
 	c.mgr.Unregister(streamID)
@@ -594,11 +588,7 @@ func (c *Coordinator) Update(ctx context.Context, old, new *domain.Stream) error
 func (c *Coordinator) reloadTranscoderFull(ctx context.Context, old, new *domain.Stream) error {
 	slog.Info("coordinator: full transcoder reload", "stream_code", new.Code)
 
-	if c.dvr.IsRecording(new.Code) {
-		if err := c.dvr.StopRecording(ctx, new.Code); err != nil {
-			slog.Warn("coordinator: dvr stop during reload failed", "stream_code", new.Code, "err", err)
-		}
-	}
+	c.stopDVR(ctx, new.Code)
 	c.pub.Stop(new.Code)
 	//nolint:contextcheck // tc.Stop uses its own baseCtx from Start; by design
 	c.tc.Stop(new.Code)
@@ -756,17 +746,72 @@ func abrMetaFromUpdated(stream *domain.Stream, updated []ProfileChange) []publis
 
 // reloadDVR stops any active recording and starts a new one when DVR is enabled.
 func (c *Coordinator) reloadDVR(ctx context.Context, new *domain.Stream) {
-	if c.dvr.IsRecording(new.Code) {
-		if err := c.dvr.StopRecording(ctx, new.Code); err != nil {
-			slog.Warn("coordinator: dvr stop failed", "stream_code", new.Code, "err", err)
+	c.stopDVR(ctx, new.Code)
+	c.startDVR(ctx, new)
+}
+
+// startDVR starts the configured DVR backend for stream: the cmaf blob archive
+// when DVR.Format == "cmaf" (and the blob service is wired), else the legacy
+// per-segment .ts writer. No-op when DVR is disabled.
+func (c *Coordinator) startDVR(ctx context.Context, stream *domain.Stream) {
+	if stream.DVR == nil || !stream.DVR.Enabled {
+		return
+	}
+	if stream.DVR.Format == domain.DVRFormatCMAF && c.blobDVR != nil {
+		profiles := c.blobProfiles(stream)
+		if len(profiles) == 0 {
+			slog.Warn("coordinator: cmaf dvr has no recordable profiles", "stream_code", stream.Code)
+			return
+		}
+		if _, err := c.blobDVR.StartRecording(ctx, stream.Code, profiles, stream.DVR); err != nil {
+			slog.Warn("coordinator: blob dvr start failed", "stream_code", stream.Code, "err", err)
+		}
+		return
+	}
+	mediaBuf := buffer.PlaybackBufferID(stream.Code, stream.Transcoder)
+	if _, err := c.dvr.StartRecording(ctx, stream.Code, mediaBuf, stream.DVR); err != nil {
+		slog.Warn("coordinator: dvr start failed", "stream_code", stream.Code, "err", err)
+	}
+}
+
+// stopDVR stops whichever DVR backend is recording the stream (idempotent).
+func (c *Coordinator) stopDVR(ctx context.Context, code domain.StreamCode) {
+	if c.dvr.IsRecording(code) {
+		if err := c.dvr.StopRecording(ctx, code); err != nil {
+			slog.Warn("coordinator: dvr stop failed", "stream_code", code, "err", err)
 		}
 	}
-	if new.DVR != nil && new.DVR.Enabled {
-		mediaBuf := buffer.PlaybackBufferID(new.Code, new.Transcoder)
-		if _, err := c.dvr.StartRecording(ctx, new.Code, mediaBuf, new.DVR); err != nil {
-			slog.Warn("coordinator: dvr start failed", "stream_code", new.Code, "err", err)
+	if c.blobDVR != nil && c.blobDVR.IsRecording(code) {
+		if err := c.blobDVR.StopRecording(ctx, code); err != nil {
+			slog.Warn("coordinator: blob dvr stop failed", "stream_code", code, "err", err)
 		}
 	}
+}
+
+// blobProfiles maps a stream's transcoder ladder to the blob recorder's profile
+// list. Passthrough (no renditions) records a single p0 on the stream buffer;
+// otherwise the best rung (audio source) is always recorded, and every rung when
+// DVR.Profiles == "all".
+func (c *Coordinator) blobProfiles(stream *domain.Stream) []blob.ProfileSub {
+	rends := buffer.RenditionsForTranscoder(stream.Code, stream.Transcoder)
+	if len(rends) == 0 {
+		return []blob.ProfileSub{{ID: "p0", BufferID: stream.Code, IsAudioSource: true}}
+	}
+	best := buffer.BestRenditionIndex(rends)
+	recordAll := stream.DVR.Profiles == "all"
+	out := make([]blob.ProfileSub, 0, len(rends))
+	for i, r := range rends {
+		isBest := i == best
+		if !recordAll && !isBest {
+			continue
+		}
+		out = append(out, blob.ProfileSub{
+			ID: fmt.Sprintf("p%d", i), Slug: r.Slug, BufferID: r.BufferID,
+			Width: r.Width, Height: r.Height, BitrateKbps: r.BitrateKbps,
+			IsAudioSource: isBest,
+		})
+	}
+	return out
 }
 
 // reloadDVRIfBufferChanged reloads DVR only when the playback buffer changed
