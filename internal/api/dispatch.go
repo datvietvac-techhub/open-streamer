@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/dvr/blob"
 	"github.com/datvietvac-techhub/open-streamer/internal/mediaserve"
 )
 
@@ -117,11 +118,27 @@ func (s *Server) dispatchMedia() http.HandlerFunc {
 			return
 		case mediaFileHLSIndex:
 			if isDVRPlaybackRequest(r) {
-				s.recordingH.ServeTimeshift(w, r)
+				// Blob-archive recordings serve via the CMAF handler; legacy
+				// .ts recordings via the per-segment handler.
+				if s.blobH.IsBlob(r, domain.StreamCode(code)) {
+					s.blobH.ServeTimeshift(w, r)
+				} else {
+					s.recordingH.ServeTimeshift(w, r)
+				}
 				return
 			}
 		}
-		// DVR timeshift segments carry the dvr_ prefix and live in the
+		// Blob-archive timeshift inits/fragments carry a flat dvri-/dvrf- name.
+		if blob.IsBlobMediaFile(file) {
+			r = setURLParam(r, "file", file)
+			if strings.HasPrefix(file, "dvri-") {
+				s.blobH.ServeInit(w, r)
+			} else {
+				s.blobH.ServeFragment(w, r)
+			}
+			return
+		}
+		// Legacy DVR timeshift segments carry the dvr_ prefix and live in the
 		// recording store, not the sliding live-HLS window — route them to the
 		// DVR handler so they don't 404 against the live media roots.
 		if strings.HasPrefix(file, "dvr_") {

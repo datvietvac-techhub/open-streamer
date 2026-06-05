@@ -35,6 +35,7 @@ type Server struct {
 	streamH    *handler.StreamHandler
 	templateH  *handler.TemplateHandler
 	recordingH *handler.RecordingHandler
+	blobH      *handler.BlobTimeshiftHandler
 	hookH      *handler.HookHandler
 	configH    *handler.ConfigHandler
 	vodH       *handler.VODHandler
@@ -76,6 +77,7 @@ func New(i do.Injector) (*Server, error) {
 		streamH:    do.MustInvoke[*handler.StreamHandler](i),
 		templateH:  do.MustInvoke[*handler.TemplateHandler](i),
 		recordingH: do.MustInvoke[*handler.RecordingHandler](i),
+		blobH:      do.MustInvoke[*handler.BlobTimeshiftHandler](i),
 		hookH:      do.MustInvoke[*handler.HookHandler](i),
 		configH:    do.MustInvoke[*handler.ConfigHandler](i),
 		vodH:       do.MustInvoke[*handler.VODHandler](i),

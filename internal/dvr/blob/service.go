@@ -11,6 +11,7 @@ import (
 
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/store"
 )
 
 // ProfileSub identifies one rendition lane the blob archive should record. The
@@ -29,7 +30,8 @@ type ProfileSub struct {
 // one lane goroutine per profile; the per-recording mutex serialises catalog
 // mutations from the lanes.
 type Service struct {
-	buf *buffer.Service
+	buf     *buffer.Service
+	recRepo store.RecordingRepository
 
 	mu     sync.Mutex
 	active map[domain.StreamCode]*recording
@@ -38,8 +40,9 @@ type Service struct {
 // New constructs the blob DVR Service and registers it with DI.
 func New(i do.Injector) (*Service, error) {
 	return &Service{
-		buf:    do.MustInvoke[*buffer.Service](i),
-		active: make(map[domain.StreamCode]*recording),
+		buf:     do.MustInvoke[*buffer.Service](i),
+		recRepo: do.MustInvoke[store.RecordingRepository](i),
+		active:  make(map[domain.StreamCode]*recording),
 	}, nil
 }
 
@@ -96,6 +99,17 @@ func (s *Service) StartRecording(ctx context.Context, code domain.StreamCode, pr
 
 	if err := rec.cat.Save(streamDir); err != nil {
 		slog.Warn("blob: initial catalog save failed", "stream_code", code, "err", err)
+	}
+	// Persist a Recording row (SegmentDir = the archive root) so the media
+	// dispatcher resolves the stream dir the same way it does for legacy DVR;
+	// HasCatalog(SegmentDir) then routes serving to the blob handler.
+	if s.recRepo != nil {
+		if err := s.recRepo.Save(ctx, &domain.Recording{
+			ID: domain.RecordingID(code), StreamCode: code,
+			StartedAt: time.Now().UTC(), SegmentDir: streamDir,
+		}); err != nil {
+			slog.Warn("blob: recording row save failed", "stream_code", code, "err", err)
+		}
 	}
 	segDur := segDurFromCfg(cfg)
 	for _, p := range profiles {

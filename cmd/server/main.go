@@ -278,6 +278,7 @@ func wireServices(i *do.RootScope) {
 	do.Provide(i, handler.NewStreamHandler)
 	do.Provide(i, handler.NewTemplateHandler)
 	do.Provide(i, handler.NewRecordingHandler)
+	do.Provide(i, handler.NewBlobTimeshiftHandler)
 	do.Provide(i, handler.NewHookHandler)
 	do.Provide(i, handler.NewConfigHandler)
 	do.Provide(i, handler.NewVODHandler)
