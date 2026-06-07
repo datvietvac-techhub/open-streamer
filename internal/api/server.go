@@ -34,7 +34,6 @@ type Server struct {
 	// Handler references stored for router rebuilding on config change.
 	streamH    *handler.StreamHandler
 	templateH  *handler.TemplateHandler
-	recordingH *handler.RecordingHandler
 	blobH      *handler.BlobTimeshiftHandler
 	hookH      *handler.HookHandler
 	configH    *handler.ConfigHandler
@@ -76,7 +75,6 @@ func New(i do.Injector) (*Server, error) {
 		dashDir:    dashDir,
 		streamH:    do.MustInvoke[*handler.StreamHandler](i),
 		templateH:  do.MustInvoke[*handler.TemplateHandler](i),
-		recordingH: do.MustInvoke[*handler.RecordingHandler](i),
 		blobH:      do.MustInvoke[*handler.BlobTimeshiftHandler](i),
 		hookH:      do.MustInvoke[*handler.HookHandler](i),
 		configH:    do.MustInvoke[*handler.ConfigHandler](i),

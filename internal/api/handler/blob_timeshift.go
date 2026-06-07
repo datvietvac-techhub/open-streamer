@@ -1,10 +1,8 @@
 package handler
 
 import (
-	"context"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,16 +15,52 @@ import (
 )
 
 // BlobTimeshiftHandler serves CMAF blob-archive timeshift: the multivariant
-// master, per-profile/track media playlists, inits, and fragments. It coexists
-// with the legacy RecordingHandler — the dispatcher routes here when a stream's
-// recording is a blob archive (catalog.json present).
+// master, per-profile/track media playlists (HLS), the static MPD (DASH), inits,
+// and fragments. It is the sole DVR serving path — the dispatcher routes here for
+// any stream whose recording is a blob archive (catalog.json present).
 type BlobTimeshiftHandler struct {
 	recRepo store.RecordingRepository
+	rec     *blob.Service // reports whether a stream is actively recording
 }
 
 // NewBlobTimeshiftHandler constructs the handler and registers it with DI.
 func NewBlobTimeshiftHandler(i do.Injector) (*BlobTimeshiftHandler, error) {
-	return &BlobTimeshiftHandler{recRepo: do.MustInvoke[store.RecordingRepository](i)}, nil
+	return &BlobTimeshiftHandler{
+		recRepo: do.MustInvoke[store.RecordingRepository](i),
+		rec:     do.MustInvoke[*blob.Service](i),
+	}, nil
+}
+
+// RecordingStatusJSON returns DVR metadata for a stream's blob archive: the
+// live/stopped status, the available wall-time range, total size, gaps, and
+// profile/hour counts — all derived from catalog.json.
+func (h *BlobTimeshiftHandler) RecordingStatusJSON(w http.ResponseWriter, r *http.Request) {
+	br, ok := h.reader(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "NO_DATA", msgRecordingNoData)
+		return
+	}
+	cat := br.Catalog()
+	sum := cat.Summary()
+	status := "stopped"
+	if h.rec != nil && h.rec.IsRecording(domain.StreamCode(cat.StreamCode)) {
+		status = "recording"
+	}
+	dvrRange := map[string]any{}
+	if sum.HasData {
+		dvrRange["from"] = time.UnixMilli(sum.FromMs).UTC()
+		dvrRange["to"] = time.UnixMilli(sum.ToMs).UTC()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+		"stream_code":      cat.StreamCode,
+		"status":           status,
+		"format":           "cmaf",
+		"dvr_range":        dvrRange,
+		"gaps":             cat.Gaps,
+		"profile_count":    sum.Profiles,
+		"hour_count":       sum.Hours,
+		"total_size_bytes": sum.TotalSize,
+	}})
 }
 
 // IsBlob reports whether the stream's recording is a blob archive (so the
@@ -93,36 +127,6 @@ func (h *BlobTimeshiftHandler) ServeTimeshift(w http.ResponseWriter, r *http.Req
 		track = blob.TrackAudio
 	}
 	_, _ = w.Write([]byte(blob.RenderMediaPlaylist(win, track)))
-}
-
-// Migrate converts a stopped legacy `.ts` recording into the CMAF blob archive
-// in place (POST /streams/{code}/migrate). The caller must ensure the recording
-// is stopped first — migration is an offline replay. Optional query params:
-// `prune=1` deletes the legacy files on success; `segdur=<sec>` overrides the
-// fragment target duration.
-func (h *BlobTimeshiftHandler) Migrate(w http.ResponseWriter, r *http.Request) {
-	code := domain.StreamCode(chi.URLParam(r, "code"))
-	rec, err := h.recRepo.FindByID(r.Context(), domain.RecordingID(code))
-	if err != nil || rec.SegmentDir == "" {
-		writeError(w, http.StatusNotFound, "NO_DATA", msgRecordingNoData)
-		return
-	}
-	if !blob.IsLegacyRecording(rec.SegmentDir) {
-		writeError(w, http.StatusConflict, "NOT_LEGACY", "no un-migrated legacy recording for this stream")
-		return
-	}
-	opts := blob.MigrateOptions{StreamCode: string(code), Prune: r.URL.Query().Get("prune") == "1"}
-	if v := r.URL.Query().Get("segdur"); v != "" {
-		if sec, perr := strconv.Atoi(v); perr == nil && sec > 0 {
-			opts.SegDur = time.Duration(sec) * time.Second
-		}
-	}
-	res, err := blob.Migrate(context.WithoutCancel(r.Context()), rec.SegmentDir, opts)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "MIGRATE_FAILED", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": res})
 }
 
 // ServeMPD serves the static DASH manifest for the timeshift window. It queries

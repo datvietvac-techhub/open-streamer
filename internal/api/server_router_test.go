@@ -31,7 +31,6 @@ func newRouterTestServer() *Server {
 		hlsDir:     "./hls",
 		dashDir:    "./dash",
 		streamH:    &handler.StreamHandler{},
-		recordingH: &handler.RecordingHandler{},
 		hookH:      &handler.HookHandler{},
 		configH:    &handler.ConfigHandler{},
 		vodH:       &handler.VODHandler{},

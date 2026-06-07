@@ -629,6 +629,8 @@ definitions:
     type: object
   domain.EventType:
     enum:
+    - session.opened
+    - session.closed
     - stream.created
     - stream.updated
     - stream.started
@@ -663,8 +665,6 @@ definitions:
     - template.deleted
     - stream.runtime_created
     - stream.runtime_expired
-    - session.opened
-    - session.closed
     type: string
     x-enum-comments:
       EventDVRSegmentPruned: retention loop deleted an aged-out segment
@@ -681,6 +681,8 @@ definitions:
       EventPushStarted: dialing target, pre-handshake
       EventStreamUpdated: PUT /streams/{code} on existing record
     x-enum-descriptions:
+    - ""
+    - ""
     - ""
     - PUT /streams/{code} on existing record
     - ""
@@ -715,9 +717,9 @@ definitions:
     - ""
     - ""
     - ""
-    - ""
-    - ""
     x-enum-varnames:
+    - EventSessionOpened
+    - EventSessionClosed
     - EventStreamCreated
     - EventStreamUpdated
     - EventStreamStarted
@@ -752,8 +754,6 @@ definitions:
     - EventTemplateDeleted
     - EventStreamRuntimeCreated
     - EventStreamRuntimeExpired
-    - EventSessionOpened
-    - EventSessionClosed
   domain.GlobalConfig:
     properties:
       buffer:
@@ -2103,71 +2103,6 @@ info:
   title: Open Streamer API
   version: "1.0"
 paths:
-  /{code}/index.m3u8:
-    get:
-      parameters:
-      - description: Stream code
-        in: path
-        name: code
-        required: true
-        type: string
-      - description: Absolute start (Unix seconds)
-        in: query
-        name: from
-        type: integer
-      - description: Start N seconds before now
-        in: query
-        name: delay
-        type: integer
-      - description: Alias of delay
-        in: query
-        name: ago
-        type: integer
-      - description: Clip duration in seconds
-        in: query
-        name: dur
-        type: integer
-      produces:
-      - text/plain
-      responses:
-        "200":
-          description: VOD m3u8
-          schema:
-            type: string
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/apidocs.ErrorBody'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/apidocs.ErrorBody'
-      summary: HLS timeshift playlist (DVR)
-      tags:
-      - dvr
-  /{code}/recording_status.json:
-    get:
-      parameters:
-      - description: Stream code (the recording ID)
-        in: path
-        name: code
-        required: true
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            additionalProperties: true
-            type: object
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/apidocs.ErrorBody'
-      summary: DVR recording status
-      tags:
-      - dvr
   /config:
     get:
       description: Returns available hardware accelerators (OS-detected), static enum

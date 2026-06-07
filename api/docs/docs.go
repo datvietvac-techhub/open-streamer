@@ -1616,105 +1616,6 @@ const docTemplate = `{
                     }
                 }
             }
-        },
-        "/{code}/index.m3u8": {
-            "get": {
-                "produces": [
-                    "text/plain"
-                ],
-                "tags": [
-                    "dvr"
-                ],
-                "summary": "HLS timeshift playlist (DVR)",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Stream code",
-                        "name": "code",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "type": "integer",
-                        "description": "Absolute start (Unix seconds)",
-                        "name": "from",
-                        "in": "query"
-                    },
-                    {
-                        "type": "integer",
-                        "description": "Start N seconds before now",
-                        "name": "delay",
-                        "in": "query"
-                    },
-                    {
-                        "type": "integer",
-                        "description": "Alias of delay",
-                        "name": "ago",
-                        "in": "query"
-                    },
-                    {
-                        "type": "integer",
-                        "description": "Clip duration in seconds",
-                        "name": "dur",
-                        "in": "query"
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "VOD m3u8",
-                        "schema": {
-                            "type": "string"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/apidocs.ErrorBody"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/apidocs.ErrorBody"
-                        }
-                    }
-                }
-            }
-        },
-        "/{code}/recording_status.json": {
-            "get": {
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "dvr"
-                ],
-                "summary": "DVR recording status",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Stream code (the recording ID)",
-                        "name": "code",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": true
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/apidocs.ErrorBody"
-                        }
-                    }
-                }
-            }
         }
     },
     "definitions": {
@@ -2534,6 +2435,8 @@ const docTemplate = `{
         "domain.EventType": {
             "type": "string",
             "enum": [
+                "session.opened",
+                "session.closed",
                 "stream.created",
                 "stream.updated",
                 "stream.started",
@@ -2567,9 +2470,7 @@ const docTemplate = `{
                 "template.updated",
                 "template.deleted",
                 "stream.runtime_created",
-                "stream.runtime_expired",
-                "session.opened",
-                "session.closed"
+                "stream.runtime_expired"
             ],
             "x-enum-comments": {
                 "EventDVRSegmentPruned": "retention loop deleted an aged-out segment",
@@ -2586,6 +2487,8 @@ const docTemplate = `{
                 "EventStreamUpdated": "PUT /streams/{code} on existing record"
             },
             "x-enum-descriptions": [
+                "",
+                "",
                 "",
                 "PUT /streams/{code} on existing record",
                 "",
@@ -2619,11 +2522,11 @@ const docTemplate = `{
                 "",
                 "",
                 "",
-                "",
-                "",
                 ""
             ],
             "x-enum-varnames": [
+                "EventSessionOpened",
+                "EventSessionClosed",
                 "EventStreamCreated",
                 "EventStreamUpdated",
                 "EventStreamStarted",
@@ -2657,9 +2560,7 @@ const docTemplate = `{
                 "EventTemplateUpdated",
                 "EventTemplateDeleted",
                 "EventStreamRuntimeCreated",
-                "EventStreamRuntimeExpired",
-                "EventSessionOpened",
-                "EventSessionClosed"
+                "EventStreamRuntimeExpired"
             ]
         },
         "domain.GlobalConfig": {

@@ -32,7 +32,7 @@ func (s *Server) dispatchStreamsSubpath() http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
-		code, action := splitTailAction(suffix, streamActionRestart, streamActionSwitch, streamActionMigrate)
+		code, action := splitTailAction(suffix, streamActionRestart, streamActionSwitch)
 		if err := domain.ValidateStreamCode(code); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -54,13 +54,6 @@ func (s *Server) dispatchStreamsSubpath() http.HandlerFunc {
 				return
 			}
 			s.streamH.SwitchInput(w, r)
-		case streamActionMigrate:
-			if r.Method != http.MethodPost {
-				w.Header().Set("Allow", http.MethodPost)
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			s.blobH.Migrate(w, r)
 		default:
 			switch r.Method {
 			case http.MethodGet:
@@ -85,8 +78,8 @@ func (s *Server) dispatchStreamsSubpath() http.HandlerFunc {
 // Tail dispatch:
 //
 //	mpegts                 — live MPEG-TS over HTTP (publisher subscription)
-//	recording_status.json  — DVR metadata JSON (segment_count, dvr_range, …)
-//	index.m3u8 + DVR query — timeshift slice (from/delay/dur/ago params)
+//	recording_status.json  — CMAF DVR metadata JSON (status, range, size, gaps)
+//	index.m3u8 + DVR query — CMAF timeshift slice (from/delay/dur/ago params)
 //	index.m3u8 (no query)  — live HLS playlist (file served from disk)
 //	index.mpd              — DASH manifest (file served from disk)
 //	<*.ts|*.m4s|*.mp4>     — segment file served from disk
@@ -121,23 +114,15 @@ func (s *Server) dispatchMedia() http.HandlerFunc {
 			s.pub.HandleMPEGTS()(w, r)
 			return
 		case mediaFileRecordingStatusJS:
-			s.recordingH.RecordingStatusJSON(w, r)
+			s.blobH.RecordingStatusJSON(w, r)
 			return
 		case mediaFileHLSIndex:
-			if isDVRPlaybackRequest(r) {
-				// Blob-archive recordings serve via the CMAF handler; legacy
-				// .ts recordings via the per-segment handler.
-				if s.blobH.IsBlob(r, domain.StreamCode(code)) {
-					s.blobH.ServeTimeshift(w, r)
-				} else {
-					s.recordingH.ServeTimeshift(w, r)
-				}
+			// DVR timeshift is served from the CMAF blob archive.
+			if isDVRPlaybackRequest(r) && s.blobH.IsBlob(r, domain.StreamCode(code)) {
+				s.blobH.ServeTimeshift(w, r)
 				return
 			}
 		case mediaFileDASHIndex:
-			// DASH timeshift exists only for blob archives; legacy .ts has no
-			// MPD timeshift path, so a non-blob request falls through to the
-			// live manifest on disk.
 			if isDVRPlaybackRequest(r) && s.blobH.IsBlob(r, domain.StreamCode(code)) {
 				s.blobH.ServeMPD(w, r)
 				return
@@ -155,14 +140,6 @@ func (s *Server) dispatchMedia() http.HandlerFunc {
 			default:
 				s.blobH.ServeFragment(w, r)
 			}
-			return
-		}
-		// Legacy DVR timeshift segments carry the dvr_ prefix and live in the
-		// recording store, not the sliding live-HLS window — route them to the
-		// DVR handler so they don't 404 against the live media roots.
-		if strings.HasPrefix(file, "dvr_") {
-			r = setURLParam(r, "file", file)
-			s.recordingH.ServeSegment(w, r)
 			return
 		}
 		// Fall-through: serve the file by extension. index.m3u8 / index.mpd

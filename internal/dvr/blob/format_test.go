@@ -219,3 +219,31 @@ func TestCatalog_SaveLoadAndClocks(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
+
+func TestCatalog_Summary(t *testing.T) {
+	t.Parallel()
+	empty := (&Catalog{Profiles: []ProfileDesc{{ID: "p0"}}}).Summary()
+	assert.False(t, empty.HasData)
+	assert.Equal(t, 1, empty.Profiles)
+	assert.Zero(t, empty.Hours)
+
+	c := &Catalog{Profiles: []ProfileDesc{
+		{
+			ID:        "p0",
+			Available: []MediaWindow{{FromMs: 1000, ToMs: 5000}},
+			Hours:     []HourRecord{{SizeBytes: 100}, {SizeBytes: 200}},
+		},
+		{
+			ID:        "p1",
+			Available: []MediaWindow{{FromMs: 800, ToMs: 4800}, {FromMs: 5000, ToMs: 6000}},
+			Hours:     []HourRecord{{SizeBytes: 50}},
+		},
+	}}
+	s := c.Summary()
+	assert.True(t, s.HasData)
+	assert.EqualValues(t, 800, s.FromMs, "earliest across profiles")
+	assert.EqualValues(t, 6000, s.ToMs, "latest across profiles")
+	assert.EqualValues(t, 350, s.TotalSize)
+	assert.Equal(t, 3, s.Hours)
+	assert.Equal(t, 2, s.Profiles)
+}

@@ -21,7 +21,6 @@ import (
 const (
 	streamActionRestart = "restart"
 	streamActionSwitch  = "switch"
-	streamActionMigrate = "migrate"
 )
 
 // Reserved media actions under /<code>/. These are dispatched by exact-name

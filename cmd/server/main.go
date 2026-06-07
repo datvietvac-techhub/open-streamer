@@ -22,7 +22,6 @@ import (
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/coordinator"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
-	"github.com/datvietvac-techhub/open-streamer/internal/dvr"
 	"github.com/datvietvac-techhub/open-streamer/internal/dvr/blob"
 	"github.com/datvietvac-techhub/open-streamer/internal/events"
 	"github.com/datvietvac-techhub/open-streamer/internal/hooks"
@@ -226,7 +225,6 @@ func wireServices(i *do.RootScope) {
 	do.Provide(i, manager.New)
 	do.Provide(i, transcoder.New)
 	do.Provide(i, publisher.New)
-	do.Provide(i, dvr.New)
 	do.Provide(i, blob.New)
 	do.Provide(i, hooks.New)
 	// GeoIPResolver factory — registered BEFORE sessions.New so sessions.New
@@ -277,7 +275,6 @@ func wireServices(i *do.RootScope) {
 	// API handlers
 	do.Provide(i, handler.NewStreamHandler)
 	do.Provide(i, handler.NewTemplateHandler)
-	do.Provide(i, handler.NewRecordingHandler)
 	do.Provide(i, handler.NewBlobTimeshiftHandler)
 	do.Provide(i, handler.NewHookHandler)
 	do.Provide(i, handler.NewConfigHandler)

@@ -84,6 +84,42 @@ type Catalog struct {
 	Retention                  RetentionCfg  `json:"retention"`
 }
 
+// CatalogSummary aggregates a catalog's coverage for status reporting: the
+// overall available wall-time range (across all profiles), total bytes on disk,
+// and counts. HasData is false when no profile has any recorded coverage yet.
+type CatalogSummary struct {
+	FromMs    int64
+	ToMs      int64
+	TotalSize int64
+	Hours     int
+	Profiles  int
+	HasData   bool
+}
+
+// Summary computes the catalog's coverage summary. The range spans the earliest
+// Available.FromMs to the latest Available.ToMs over every profile; total size
+// sums every hour's recorded bytes.
+func (c *Catalog) Summary() CatalogSummary {
+	s := CatalogSummary{Profiles: len(c.Profiles)}
+	for i := range c.Profiles {
+		pd := &c.Profiles[i]
+		for _, w := range pd.Available {
+			if !s.HasData || w.FromMs < s.FromMs {
+				s.FromMs = w.FromMs
+			}
+			if !s.HasData || w.ToMs > s.ToMs {
+				s.ToMs = w.ToMs
+			}
+			s.HasData = true
+		}
+		for _, hr := range pd.Hours {
+			s.TotalSize += hr.SizeBytes
+			s.Hours++
+		}
+	}
+	return s
+}
+
 // Profile returns the descriptor for id and whether it exists.
 func (c *Catalog) Profile(id string) (*ProfileDesc, bool) {
 	for i := range c.Profiles {
