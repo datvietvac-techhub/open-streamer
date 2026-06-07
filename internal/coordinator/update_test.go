@@ -16,6 +16,7 @@ import (
 
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/dvr/blob"
 	"github.com/datvietvac-techhub/open-streamer/internal/events"
 	"github.com/datvietvac-techhub/open-streamer/internal/manager"
 	"github.com/datvietvac-techhub/open-streamer/internal/publisher"
@@ -201,7 +202,7 @@ func (d *spyDVR) IsRecording(c domain.StreamCode) bool {
 	return d.recording[c]
 }
 
-func (d *spyDVR) StartRecording(_ context.Context, c domain.StreamCode, _ domain.StreamCode, _ *domain.StreamDVRConfig) (*domain.Recording, error) {
+func (d *spyDVR) StartRecording(_ context.Context, c domain.StreamCode, _ []blob.ProfileSub, _ *domain.StreamDVRConfig) (*domain.Recording, error) {
 	d.mu.Lock()
 	d.recording[c] = true
 	d.started = append(d.started, c)
@@ -435,7 +436,7 @@ func TestUpdate_DVRDisabled_StopsRecording(t *testing.T) {
 	old.DVR = &domain.StreamDVRConfig{Enabled: true, RetentionSec: 3600}
 	h.simulateRunning(old)
 	// Simulate DVR already recording.
-	_, _ = h.dvr.StartRecording(context.Background(), old.Code, old.Code, old.DVR)
+	_, _ = h.dvr.StartRecording(context.Background(), old.Code, nil, old.DVR)
 
 	new := baseStream()
 	new.DVR = &domain.StreamDVRConfig{Enabled: false}

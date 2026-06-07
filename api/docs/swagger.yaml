@@ -1301,12 +1301,6 @@ definitions:
     properties:
       enabled:
         type: boolean
-      format:
-        description: |-
-          Format selects the DVR storage backend: "" or "ts" = the legacy
-          per-segment .ts writer (default); "cmaf" = the blob archive (per-hour
-          CMAF container + range index, multi-profile, HLS+DASH timeshift).
-        type: string
       max_size_gb:
         description: |-
           MaxSizeGB caps total disk usage. Oldest segments pruned when exceeded.
@@ -1314,9 +1308,9 @@ definitions:
         type: number
       profiles:
         description: |-
-          Profiles selects which renditions the cmaf archive records:
+          Profiles selects which renditions the CMAF blob archive records:
           "" or "best" = the best rendition only (default); "all" = every rendition
-          in the ABR ladder. Ignored for the legacy ts format.
+          in the ABR ladder.
         type: string
       retention_sec:
         description: |-

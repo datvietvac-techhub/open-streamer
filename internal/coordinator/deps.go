@@ -8,6 +8,7 @@ import (
 	"context"
 
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/dvr/blob"
 	"github.com/datvietvac-techhub/open-streamer/internal/manager"
 	"github.com/datvietvac-techhub/open-streamer/internal/publisher"
 	"github.com/datvietvac-techhub/open-streamer/internal/transcoder"
@@ -45,9 +46,11 @@ type pubDep interface {
 	UpdateABRMasterMeta(domain.StreamCode, []publisher.ABRRepMeta)
 }
 
-// dvrDep is the subset of dvr.Service the coordinator needs.
+// dvrDep is the subset of the CMAF blob-archive recorder (blob.Service) the
+// coordinator needs. DVR is CMAF-only — the legacy per-segment .ts writer was
+// retired; existing .ts recordings are served read-only and migrated on demand.
 type dvrDep interface {
 	IsRecording(domain.StreamCode) bool
-	StartRecording(context.Context, domain.StreamCode, domain.StreamCode, *domain.StreamDVRConfig) (*domain.Recording, error)
+	StartRecording(context.Context, domain.StreamCode, []blob.ProfileSub, *domain.StreamDVRConfig) (*domain.Recording, error)
 	StopRecording(context.Context, domain.StreamCode) error
 }

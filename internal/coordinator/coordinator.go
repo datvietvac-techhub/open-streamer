@@ -13,7 +13,6 @@ import (
 
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
-	"github.com/datvietvac-techhub/open-streamer/internal/dvr"
 	"github.com/datvietvac-techhub/open-streamer/internal/dvr/blob"
 	"github.com/datvietvac-techhub/open-streamer/internal/events"
 	"github.com/datvietvac-techhub/open-streamer/internal/manager"
@@ -31,8 +30,7 @@ type Coordinator struct {
 	mgr          mgrDep
 	tc           tcDep
 	pub          pubDep
-	dvr          dvrDep
-	blobDVR      *blob.Service // cmaf blob archive; nil in tests (legacy ts path unaffected)
+	dvr          dvrDep // CMAF blob archive recorder; nil in unit tests that don't exercise DVR
 	bus          events.Bus
 	m            *metrics.Metrics
 	streamRepo   store.StreamRepository
@@ -100,8 +98,7 @@ func New(i do.Injector) (*Coordinator, error) {
 		mgr:          do.MustInvoke[*manager.Service](i),
 		tc:           do.MustInvoke[*transcoder.Service](i),
 		pub:          do.MustInvoke[*publisher.Service](i),
-		dvr:          do.MustInvoke[*dvr.Service](i),
-		blobDVR:      do.MustInvoke[*blob.Service](i),
+		dvr:          do.MustInvoke[*blob.Service](i),
 		bus:          do.MustInvoke[events.Bus](i),
 		m:            do.MustInvoke[*metrics.Metrics](i),
 		streamRepo:   repo,
@@ -750,41 +747,29 @@ func (c *Coordinator) reloadDVR(ctx context.Context, new *domain.Stream) {
 	c.startDVR(ctx, new)
 }
 
-// startDVR starts the configured DVR backend for stream: the cmaf blob archive
-// when DVR.Format == "cmaf" (and the blob service is wired), else the legacy
-// per-segment .ts writer. No-op when DVR is disabled.
+// startDVR records the stream into the CMAF blob archive (the only DVR backend).
+// No-op when DVR is disabled or the recorder isn't wired (unit tests).
 func (c *Coordinator) startDVR(ctx context.Context, stream *domain.Stream) {
-	if stream.DVR == nil || !stream.DVR.Enabled {
+	if stream.DVR == nil || !stream.DVR.Enabled || c.dvr == nil {
 		return
 	}
-	if stream.DVR.Format == domain.DVRFormatCMAF && c.blobDVR != nil {
-		profiles := c.blobProfiles(stream)
-		if len(profiles) == 0 {
-			slog.Warn("coordinator: cmaf dvr has no recordable profiles", "stream_code", stream.Code)
-			return
-		}
-		if _, err := c.blobDVR.StartRecording(ctx, stream.Code, profiles, stream.DVR); err != nil {
-			slog.Warn("coordinator: blob dvr start failed", "stream_code", stream.Code, "err", err)
-		}
+	profiles := c.blobProfiles(stream)
+	if len(profiles) == 0 {
+		slog.Warn("coordinator: dvr has no recordable profiles", "stream_code", stream.Code)
 		return
 	}
-	mediaBuf := buffer.PlaybackBufferID(stream.Code, stream.Transcoder)
-	if _, err := c.dvr.StartRecording(ctx, stream.Code, mediaBuf, stream.DVR); err != nil {
+	if _, err := c.dvr.StartRecording(ctx, stream.Code, profiles, stream.DVR); err != nil {
 		slog.Warn("coordinator: dvr start failed", "stream_code", stream.Code, "err", err)
 	}
 }
 
-// stopDVR stops whichever DVR backend is recording the stream (idempotent).
+// stopDVR stops the blob recording for the stream (idempotent).
 func (c *Coordinator) stopDVR(ctx context.Context, code domain.StreamCode) {
-	if c.dvr.IsRecording(code) {
-		if err := c.dvr.StopRecording(ctx, code); err != nil {
-			slog.Warn("coordinator: dvr stop failed", "stream_code", code, "err", err)
-		}
+	if c.dvr == nil || !c.dvr.IsRecording(code) {
+		return
 	}
-	if c.blobDVR != nil && c.blobDVR.IsRecording(code) {
-		if err := c.blobDVR.StopRecording(ctx, code); err != nil {
-			slog.Warn("coordinator: blob dvr stop failed", "stream_code", code, "err", err)
-		}
+	if err := c.dvr.StopRecording(ctx, code); err != nil {
+		slog.Warn("coordinator: dvr stop failed", "stream_code", code, "err", err)
 	}
 }
 

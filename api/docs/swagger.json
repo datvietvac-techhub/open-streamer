@@ -3222,16 +3222,12 @@
                 "enabled": {
                     "type": "boolean"
                 },
-                "format": {
-                    "description": "Format selects the DVR storage backend: \"\" or \"ts\" = the legacy\nper-segment .ts writer (default); \"cmaf\" = the blob archive (per-hour\nCMAF container + range index, multi-profile, HLS+DASH timeshift).",
-                    "type": "string"
-                },
                 "max_size_gb": {
                     "description": "MaxSizeGB caps total disk usage. Oldest segments pruned when exceeded.\n0 = no limit.",
                     "type": "number"
                 },
                 "profiles": {
-                    "description": "Profiles selects which renditions the cmaf archive records:\n\"\" or \"best\" = the best rendition only (default); \"all\" = every rendition\nin the ABR ladder. Ignored for the legacy ts format.",
+                    "description": "Profiles selects which renditions the CMAF blob archive records:\n\"\" or \"best\" = the best rendition only (default); \"all\" = every rendition\nin the ABR ladder.",
                     "type": "string"
                 },
                 "retention_sec": {
