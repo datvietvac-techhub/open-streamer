@@ -3,6 +3,8 @@ package blob
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/Eyevinn/mp4ff/aac"
@@ -260,7 +262,36 @@ func (w *profileWriter) emit(dec dash.CutDecision, now time.Time) error {
 		}
 	}
 	w.seg.MarkCut(now)
+	w.checkpointHour()
 	return nil
+}
+
+// checkpointHour flushes the in-progress hour's running summary to the catalog
+// after each fragment, so recording_status reflects coverage/size near-realtime
+// (matching the legacy per-segment index updates) instead of only on hour seal.
+func (w *profileWriter) checkpointHour() {
+	if w.sink == nil || w.hour.IsZero() {
+		return
+	}
+	w.cur.SizeBytes = w.hourSize()
+	w.sink(w.profileID, w.cur) // cur.Sealed is false until sealHour
+}
+
+// hourFilesExist reports whether any blob file for this hour stem is present.
+func hourFilesExist(stem string) bool {
+	for _, ext := range []string{".cmfv", ".cmfa", ".ranges", ".open"} {
+		if _, err := os.Stat(stem + ext); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// removeHourFiles deletes all blob files for an hour stem (best effort).
+func removeHourFiles(stem string) {
+	for _, ext := range []string{".cmfv", ".cmfa", ".ranges", ".ranges.tmp", ".open"} {
+		_ = os.Remove(stem + ext)
+	}
 }
 
 func (w *profileWriter) emitAudio(count int) error {
@@ -362,6 +393,14 @@ func (w *profileWriter) openHour(h time.Time) error {
 		return err
 	}
 	stem := hourStem(hdir, hourToken(h))
+	// Resume into an existing wall-hour (e.g. a mid-hour restart): the blob files
+	// for this hour are already on disk and createBlobFile is O_EXCL, which would
+	// fail and kill the lane. Discard the stale partial hour and start it fresh —
+	// recording continuity wins over the partial hour (not recovered, by design).
+	if hourFilesExist(stem) {
+		slog.Warn("blob: resuming into existing hour; discarding partial hour", "profile", w.profileID, "hour", hourRel(h))
+		removeHourFiles(stem)
+	}
 	vinit, err := dash.EncodeInit(w.videoInit.Init)
 	if err != nil {
 		return fmt.Errorf("blob: encode video init: %w", err)

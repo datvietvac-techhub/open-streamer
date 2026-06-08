@@ -160,3 +160,53 @@ func TestProfileWriter_RotatesAtHourBoundary(t *testing.T) {
 		"tfdt must stay contiguous across the hour rotation")
 	assert.True(t, first13.Keyframe, "new hour must open on a keyframe")
 }
+
+// TestProfileWriter_ResumeIntoExistingHour — a fresh writer resuming into a
+// wall-hour whose blob files already exist (mid-hour restart) must discard the
+// stale partial hour and keep recording, not die on the O_EXCL create.
+func TestProfileWriter_ResumeIntoExistingHour(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	start := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+
+	w1 := newProfileWriter(dir, "p0", true, time.Second, nil)
+	feed(t, w1, 150, 25, 40, start) // writes hour 12; 12.cmfv now exists
+	require.NoError(t, w1.Close())
+
+	stem := filepath.Join(profileDirPath(dir, "p0"), "2026", "06", "05", "12")
+	_, err := os.Stat(stem + ".cmfv")
+	require.NoError(t, err, "hour 12 blob must exist before resume")
+
+	// Resume: a brand-new writer feeds into the SAME wall-hour. feed() asserts
+	// NoError on every Ingest, so an O_EXCL failure here would fail the test.
+	var hours []HourRecord
+	w2 := newProfileWriter(dir, "p0", true, time.Second, func(_ string, hr HourRecord) { hours = append(hours, hr) })
+	feed(t, w2, 150, 25, 40, start)
+	require.NoError(t, w2.Close())
+
+	require.NotEmpty(t, hours, "resumed writer must produce fragments")
+	assert.Positive(t, hours[len(hours)-1].FragCountV)
+}
+
+// TestProfileWriter_CheckpointsInProgressHour — the catalog sink fires per
+// fragment DURING recording (before seal), with the in-progress hour
+// (Sealed=false) carrying a growing frag count and size, so recording_status is
+// near-realtime.
+func TestProfileWriter_CheckpointsInProgressHour(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	start := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+
+	var seen []HourRecord
+	w := newProfileWriter(dir, "p0", true, time.Second, func(_ string, hr HourRecord) { seen = append(seen, hr) })
+	feed(t, w, 150, 25, 40, start) // 6 s of frames; NO Close → no seal yet
+
+	require.NotEmpty(t, seen, "sink must fire per fragment before seal")
+	last := seen[len(seen)-1]
+	assert.False(t, last.Sealed, "in-progress checkpoint must not be sealed")
+	assert.Positive(t, last.FragCountV, "frag count reported near-realtime")
+	assert.Positive(t, last.SizeBytes, "size reported near-realtime")
+
+	// Frag count is non-decreasing across checkpoints (monotonic growth).
+	assert.LessOrEqual(t, seen[0].FragCountV, last.FragCountV)
+}

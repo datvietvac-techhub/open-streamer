@@ -170,8 +170,11 @@ func (s *Service) runLane(ctx context.Context, rec *recording, p ProfileSub, seg
 				return // buffer destroyed
 			}
 			if err := w.Ingest(pkt, time.Now()); err != nil {
-				slog.Warn("blob: lane ingest error", "profile", p.ID, "err", err)
-				return
+				// A per-packet write error must not kill the recording — log and
+				// keep going so a transient fault (or a single bad packet) can't
+				// permanently stop the lane.
+				slog.Warn("blob: lane ingest error (continuing)", "profile", p.ID, "err", err)
+				continue
 			}
 			if !originReported {
 				if _, wallMs, set := w.Origin(); set {
@@ -181,8 +184,8 @@ func (s *Service) runLane(ctx context.Context, rec *recording, p ProfileSub, seg
 			}
 		case <-ticker.C:
 			if err := w.Tick(time.Now()); err != nil {
-				slog.Warn("blob: lane tick error", "profile", p.ID, "err", err)
-				return
+				slog.Warn("blob: lane tick error (continuing)", "profile", p.ID, "err", err)
+				continue
 			}
 		}
 	}
