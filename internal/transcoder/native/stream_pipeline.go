@@ -210,6 +210,8 @@ type StreamPipeline struct {
 	videoSrcIntervalMs int64
 	lastVideoSrc       int64 // previous video source PTS (for the interval)
 	hasVideoSrc        bool
+	lastAudioSrc       int64 // previous audio source PTS (regress-guard conjunct)
+	hasAudioSrc        bool
 
 	// audioReenc is non-nil when Audio.Copy is false — AAC frames are
 	// decoded → resampled → re-encoded instead of passed through. nil
@@ -469,6 +471,37 @@ func (p *StreamPipeline) releaseAudio() []OutputFrame {
 	return out
 }
 
+// rebaseRegressLimitMs bounds how far the SOURCE PTS may jump backwards —
+// with the rebased value equally far behind the emitted output — before the
+// pipeline treats the source timeline as broken (a 33-bit PTS wrap that
+// slipped past the demuxer's unwrap after a mid-session demuxer rebuild, or
+// a genuine upstream reset) and re-anchors the shared A/V offset. Both
+// conjuncts are required: the output-behind condition alone would also
+// match a long stall whose pacing pushed the output ahead of a FROZEN
+// source PTS (the NVDEC mis-timestamp class) — re-anchoring there would
+// yank the shared offset forward ~30 s every 30 s and permanently desync
+// audio. A frozen source (delta 0) never trips the source-regression
+// conjunct; a wrap (source drops ~95 443 717 ms) always does. Anything
+// smaller — B-frame reordering, ms truncation, HLS-pull burst skew — is
+// handled by the per-track monotonic clamps below. Without this guard a
+// huge backward jump strands `src+offset` permanently below the output
+// line, where the +1 ms tie-break compresses the emitted timeline ~40×
+// forever (the failure that took every transcoded stream down at the
+// first 26.5 h wrap).
+const rebaseRegressLimitMs = 30_000
+
+// reanchorOnRegress recomputes the shared A/V offset when a rebased value
+// falls hopelessly behind the output line. The break is common-mode (both
+// tracks ride one source clock), so a single re-anchor heals both tracks
+// while preserving their relative A/V offset.
+func (p *StreamPipeline) reanchorOnRegress(srcPTS int64, track string) {
+	slog.Warn("native: source timeline broke backwards, re-anchoring",
+		"track", track, "src_pts_ms", srcPTS, "pts_offset_ms", p.ptsOffset,
+		"last_video_out_ms", p.lastVideoOut, "last_audio_out_ms", p.lastAudioOut)
+	p.pendingRebase = true
+	p.anchorRebase(srcPTS)
+}
+
 // rebaseVideoPTS / rebaseAudioPTS map a source-stream PTS (ms) onto
 // the pipeline's continuous output timeline. The offset is recomputed
 // lazily on the first frame after a switch (pendingRebase) so the new
@@ -478,6 +511,10 @@ func (p *StreamPipeline) releaseAudio() []OutputFrame {
 // audio ordering.
 func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 	p.anchorRebase(srcPTS)
+	if p.hasVideoSrc && p.lastVideoSrc-srcPTS > rebaseRegressLimitMs &&
+		p.lastVideoOut-(srcPTS+p.ptsOffset) > rebaseRegressLimitMs {
+		p.reanchorOnRegress(srcPTS, "video")
+	}
 	// Whether the SOURCE advanced since the previous frame — captured BEFORE
 	// updating lastVideoSrc. <= 0 means a genuine stall/regress (decoder
 	// repeating or rewinding PTS); > 0 means the source is moving forward and
@@ -523,6 +560,11 @@ func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 
 func (p *StreamPipeline) rebaseAudioPTS(srcPTS int64) int64 {
 	p.anchorRebase(srcPTS)
+	if p.hasAudioSrc && p.lastAudioSrc-srcPTS > rebaseRegressLimitMs &&
+		p.lastAudioOut-(srcPTS+p.ptsOffset) > rebaseRegressLimitMs {
+		p.reanchorOnRegress(srcPTS, "audio")
+	}
+	p.lastAudioSrc, p.hasAudioSrc = srcPTS, true
 	out := srcPTS + p.ptsOffset
 	if out <= p.lastAudioOut {
 		out = p.lastAudioOut + 1
@@ -805,6 +847,7 @@ func (p *StreamPipeline) SwitchInput(newCfg DecoderConfig) ([]OutputFrame, error
 	p.pendingRebase = true
 	p.pendingAudio = nil                           // drop the old input's held audio; new input re-anchors
 	p.hasVideoSrc, p.videoSrcIntervalMs = false, 0 // relearn the new source's frame interval
+	p.hasAudioSrc = false                          // new source = new audio clock for the regress guard
 	// EXT-X-DISCONTINUITY is only needed when the OUTPUT stream's shape
 	// can change across the switch. With audio re-encode the output is
 	// fully continuous — same encoder (identical SPS/PPS), continuous
@@ -882,6 +925,7 @@ func (p *StreamPipeline) switchInputGPU() ([]OutputFrame, error) {
 	p.pendingRebase = true
 	p.pendingAudio = nil                           // drop the old input's held audio; new input re-anchors
 	p.hasVideoSrc, p.videoSrcIntervalMs = false, 0 // relearn the new source's frame interval
+	p.hasAudioSrc = false                          // new source = new audio clock for the regress guard
 	if p.audioReenc != nil {
 		p.audioReenc.SwitchInput()
 	} else {
