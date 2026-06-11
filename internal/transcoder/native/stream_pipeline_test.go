@@ -658,3 +658,92 @@ func TestRebaseVideoPTS_StallThenRecovery(t *testing.T) {
 	// (1160) in ONE frame, not a +1 ms crawl; 1200 → 1200.
 	assert.Equal(t, []int64{1040, 1080, 1120, 1160, 1200}, got)
 }
+
+// TestRebaseVideoPTS_WrapBackwardJumpReanchors reproduces the 33-bit PTS
+// wrap that took every transcoded stream down: the (already-rebased-domain)
+// source PTS suddenly falls back by ~26.5 h. The old code left the output in
+// the +1 ms tie-break regime forever (timeline compressed ~40×); the regress
+// guard must instead re-anchor once and keep real-time pacing.
+func TestRebaseVideoPTS_WrapBackwardJumpReanchors(t *testing.T) {
+	const wrapMs = int64(95_443_717) // 2³³ / 90
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true}
+
+	// Healthy run just below the wrap point.
+	src := wrapMs - 120
+	var lastOut int64
+	for i := 0; i < 3; i++ {
+		lastOut = p.rebaseVideoPTS(src)
+		src += 40
+	}
+
+	// Wire wraps: source PTS falls back to ~0 and keeps advancing.
+	got := make([]int64, 0, 4)
+	for _, s := range []int64{3, 43, 83, 123} {
+		got = append(got, p.rebaseVideoPTS(s))
+	}
+
+	// First post-wrap frame re-anchors to lastOut+1; the rest track the
+	// source line at 40 ms steps — NOT +1 ms compression.
+	want := []int64{lastOut + 1, lastOut + 41, lastOut + 81, lastOut + 121}
+	assert.Equal(t, want, got)
+}
+
+// TestRebaseAudioPTS_WrapBackwardJumpReanchors — audio-side counterpart;
+// also asserts the shared offset keeps the A/V relationship: after video
+// re-anchors, the audio frame (riding the same wrapped clock) lands at its
+// pre-wrap relative position without triggering a second re-anchor.
+func TestRebaseAudioPTS_WrapBackwardJumpReanchors(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true}
+
+	// Audio anchors first (audio PTS leads video by 10 ms on this source),
+	// so both outputs sit above zero and the A/V relation is observable.
+	aOut := p.rebaseAudioPTS(95_443_587)
+	vOut := p.rebaseVideoPTS(95_443_597)
+	assert.Equal(t, aOut+10, vOut, "pre-wrap A/V relation")
+
+	// Wrap hits; video frame arrives first and re-anchors the shared offset.
+	vOut2 := p.rebaseVideoPTS(20) // ≡ continuation of the same clock
+	aOut2 := p.rebaseAudioPTS(10)
+	assert.Equal(t, vOut+1, vOut2, "video re-anchors to lastOut+1")
+	assert.Equal(t, vOut2-10, aOut2, "audio keeps the A/V relation through the shared re-anchor")
+}
+
+// TestRebaseVideoPTS_SmallRegressKeepsClampBehavior — a backward dip far
+// below the 30 s guard threshold must NOT re-anchor; the established
+// stall-pacing path handles it exactly as before (regression guard for the
+// guard).
+func TestRebaseVideoPTS_SmallRegressKeepsClampBehavior(t *testing.T) {
+	p := &StreamPipeline{lastVideoOut: 10_000, lastVideoSrc: 10_000, hasVideoSrc: true, videoSrcIntervalMs: 40}
+	// 5 s backward jump (ptsOffset 0): NOT advancing → stall pacing +40, no re-anchor.
+	assert.Equal(t, int64(10_040), p.rebaseVideoPTS(5_000))
+	// Source keeps advancing from there → stays clamped/paced until it
+	// naturally re-crosses; no offset rewrite happened.
+	assert.Equal(t, int64(0), p.ptsOffset)
+}
+
+// TestRebaseVideoPTS_LongStallDoesNotReanchor pins the blocker found in
+// review: a FROZEN source PTS whose stall-pacing has pushed the output far
+// (>30 s) ahead must keep pacing — the regress guard requires the SOURCE
+// itself to have jumped backwards, so a stall can never yank the shared
+// offset forward and desync audio.
+func TestRebaseVideoPTS_LongStallDoesNotReanchor(t *testing.T) {
+	p := &StreamPipeline{
+		lastVideoOut: 50_000, lastVideoSrc: 1_000, hasVideoSrc: true,
+		videoSrcIntervalMs: 40, // output already paced 49 s past the frozen src
+	}
+	out := p.rebaseVideoPTS(1_000) // still frozen
+	assert.Equal(t, int64(50_040), out, "keeps stall pacing")
+	assert.Equal(t, int64(0), p.ptsOffset, "shared offset untouched")
+}
+
+// TestRebaseAudioPTS_WrapAudioFirstReanchors — the wrap reaches the audio
+// track first (no video frame in between): the audio-side guard must fire
+// on its own source-regression + output-behind conjunction.
+func TestRebaseAudioPTS_WrapAudioFirstReanchors(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true}
+	aOut := p.rebaseAudioPTS(95_443_587) // anchors the shared offset
+	aOut2 := p.rebaseAudioPTS(10)        // wire wrapped; audio arrives first
+	assert.Equal(t, aOut+1, aOut2, "audio re-anchors to lastOut+1")
+	// Subsequent audio tracks the source line again.
+	assert.Equal(t, aOut2+40, p.rebaseAudioPTS(50))
+}
