@@ -58,8 +58,25 @@ type OnFrameFunc func(cid StreamType, frame []byte, ptsMs, dtsMs uint64)
 // error; cancellation comes via closing r.
 //
 // Zero-value Demuxer is usable but OnFrame must be set before Input.
+//
+// PTS/DTS unwrap: MPEG-TS timestamps are 33-bit and wrap every
+// 2³³/90000 s ≈ 26.5 h (ISO/IEC 13818-1 expects consumers to unwrap).
+// The Demuxer unwraps at this boundary so every OnFrame consumer sees
+// one continuous timeline — without this, a long-running source (or
+// our own tsnorm remux once its wallclock-anchored timeline crosses
+// 2³³ ticks) hands downstream a ~95443 s backward jump that breaks
+// PTS-rebase and segmenter math. The wrap epoch is shared across all
+// PIDs of the program (video and audio ride one clock), so the two
+// tracks can never disagree by a wrap span.
 type Demuxer struct {
 	OnFrame OnFrameFunc
+
+	// 33-bit unwrap state — one epoch per Demuxer instance. A Demuxer
+	// is rebuilt per session boundary, which resets the epoch with the
+	// session (matching the fresh-source contract above).
+	wrapOffsetTicks int64 // accumulated multiples of 2³³ (90 kHz ticks)
+	lastTicks       int64 // newest unwrapped timestamp seen, for wrap detection
+	haveTicks       bool
 }
 
 // New constructs a fresh Demuxer. Equivalent to &Demuxer{}; provided
@@ -111,29 +128,64 @@ func (d *Demuxer) Input(ctx context.Context, r io.Reader) error {
 		if !ok {
 			continue
 		}
-		ptsMs, dtsMs := pesTimestampsMs(data.PES)
+		ptsMs, dtsMs := d.pesTimestampsMs(data.PES)
 		d.OnFrame(st, data.PES.Data, ptsMs, dtsMs)
 	}
 }
 
+// 33-bit timestamp wrap constants (90 kHz ticks).
+const (
+	ptsSpanTicks     = int64(1) << 33
+	ptsHalfSpanTicks = ptsSpanTicks >> 1
+)
+
+// unwrapTicks maps a 33-bit wire timestamp onto the Demuxer's
+// continuous timeline. A value that lands more than half a span behind
+// the newest seen timestamp is the next wrap cycle (advance the epoch);
+// a value more than half a span AHEAD while an epoch is active is a
+// straggler from just before the wrap (a reordered B-frame PTS crossing
+// the boundary) and is pulled back one span. Anything within ±half a
+// span — including ordinary B-frame reordering and source jumps far
+// smaller than 13.25 h — passes through against the current epoch.
+func (d *Demuxer) unwrapTicks(base int64) int64 {
+	t := base + d.wrapOffsetTicks
+	if d.haveTicks {
+		switch {
+		case d.lastTicks-t > ptsHalfSpanTicks:
+			d.wrapOffsetTicks += ptsSpanTicks
+			t += ptsSpanTicks
+		case t-d.lastTicks > ptsHalfSpanTicks && d.wrapOffsetTicks >= ptsSpanTicks:
+			t -= ptsSpanTicks
+		}
+	}
+	if !d.haveTicks || t > d.lastTicks {
+		d.lastTicks, d.haveTicks = t, true
+	}
+	return t
+}
+
 // pesTimestampsMs converts a PES's optional-header PTS / DTS from
-// astits's 90 kHz clock reference to milliseconds. Returns (0, 0)
-// when the PES has no optional header (rare but valid for some
-// stream types) or when the PTS field is absent.
+// astits's 90 kHz clock reference to milliseconds, unwrapping the
+// 33-bit wire value onto the Demuxer's continuous timeline. Returns
+// (0, 0) when the PES has no optional header (rare but valid for some
+// stream types) or when the PTS field is absent — absent fields never
+// touch the unwrap state, so a stray timestamp-less PES can't be
+// mistaken for a wrap.
 //
 // When the PES uses PTSDTSIndicator=OnlyPTS (no DTS field on the
 // wire), dtsMs is filled with ptsMs — see OnFrameFunc's docstring
 // for why this lives at the boundary rather than at every caller.
-func pesTimestampsMs(p *astits.PESData) (ptsMs, dtsMs uint64) {
+func (d *Demuxer) pesTimestampsMs(p *astits.PESData) (ptsMs, dtsMs uint64) {
 	if p == nil || p.Header == nil || p.Header.OptionalHeader == nil {
 		return 0, 0
 	}
 	oh := p.Header.OptionalHeader
-	if oh.PTS != nil {
-		ptsMs = uint64(oh.PTS.Base) / 90 //nolint:gosec // clock base is non-negative for valid PES
+	if oh.PTS == nil {
+		return 0, 0
 	}
+	ptsMs = uint64(d.unwrapTicks(oh.PTS.Base)) / 90 //nolint:gosec // unwrapped ticks are non-negative
 	if oh.DTS != nil {
-		dtsMs = uint64(oh.DTS.Base) / 90 //nolint:gosec
+		dtsMs = uint64(d.unwrapTicks(oh.DTS.Base)) / 90 //nolint:gosec
 	} else {
 		// OnlyPTS PES — per ISO/IEC 13818-1 § 2.4.3.7 the absence of
 		// the DTS field means DTS equals PTS. Substitute here so every
