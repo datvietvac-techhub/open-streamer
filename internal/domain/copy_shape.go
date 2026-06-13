@@ -191,37 +191,19 @@ func StreamMainBufferIsTS(s *Stream) bool {
 	return inputSourceIsRawTS(s.Inputs[0].URL)
 }
 
-// inputSourceIsRawTS reports whether the URL scheme indicates a raw MPEG-TS
-// source (UDP / HLS / SRT / File) — those are the protocols whose ingest
-// reader uses TSPassthroughPacketReader.
+// inputSourceIsRawTS reports whether the URL indicates a raw MPEG-TS source
+// (UDP / HLS / HTTP-TS / SRT / File) — the protocols whose ingest reader uses
+// TSPassthroughPacketReader, so their main buffer carries TS chunks.
 //
-// Inlined scheme prefixes (rather than importing pkg/protocol) to keep the
-// `domain` package free of upward dependencies.
+// Delegates to protocol.Detect (already imported above) instead of an inlined
+// scheme/suffix scan: the old hand-rolled version missed HTTP-TS (`.ts`,
+// `/mpegts`), `.m3u`, and uppercase variants, misclassifying those upstreams
+// as direct-AV and blacking out copy:// / mixer:// of them (B-7).
 func inputSourceIsRawTS(rawURL string) bool {
-	switch {
-	case len(rawURL) >= 6 && rawURL[:6] == "udp://":
+	switch protocol.Detect(rawURL) { //nolint:exhaustive // default: every other Kind is not a TS-passthrough source
+	case protocol.KindUDP, protocol.KindHLS, protocol.KindHTTPTS, protocol.KindSRT, protocol.KindFile:
 		return true
-	case len(rawURL) >= 7 && rawURL[:7] == "http://":
-		return looksLikeHLS(rawURL)
-	case len(rawURL) >= 8 && rawURL[:8] == "https://":
-		return looksLikeHLS(rawURL)
-	case len(rawURL) >= 6 && rawURL[:6] == "srt://":
-		return true
-	case len(rawURL) >= 7 && rawURL[:7] == "file://":
-		return true
-	case len(rawURL) > 0 && rawURL[0] == '/':
-		return true // bare absolute path = file
+	default:
+		return false
 	}
-	return false
-}
-
-// looksLikeHLS does a coarse `.m3u8` substring check — matches the HLS reader's
-// own URL-classification rule and avoids pulling in pkg/protocol just for this.
-func looksLikeHLS(rawURL string) bool {
-	for i := 0; i < len(rawURL); i++ {
-		if i+5 <= len(rawURL) && rawURL[i:i+5] == ".m3u8" {
-			return true
-		}
-	}
-	return false
 }

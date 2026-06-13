@@ -235,6 +235,17 @@ func (h *StreamHandler) resolveStream(ctx context.Context, s *domain.Stream) *do
 	return domain.ResolveStream(s, tpl)
 }
 
+// resolveStreams resolves every stream in the slice against its template.
+// copy:// / mixer:// shape validation must see the inherited Inputs/Transcoder
+// of upstream candidates, not their raw (often empty) records (B-6).
+func (h *StreamHandler) resolveStreams(ctx context.Context, ss []*domain.Stream) []*domain.Stream {
+	out := make([]*domain.Stream, len(ss))
+	for i, s := range ss {
+		out[i] = h.resolveStream(ctx, s)
+	}
+	return out
+}
+
 // List streams; optional ?status=idle|active|degraded|stopped.
 // @Summary List streams
 // @Tags streams
@@ -391,13 +402,9 @@ func (h *StreamHandler) Put(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wasRunning := exists && h.coordinator.IsRunning(code)
-	// nowEnabled: existing stream toggled disabled→enabled.
-	// freshlyCreated: brand-new stream that should run from the moment it's
-	// saved. Without this branch, POST /streams would persist the record
-	// but never call Start — the stream would stay in StatusStopped until
-	// the reconciler picked it up on the next tick.
+	// nowEnabled: existing stream toggled disabled→enabled. (freshlyCreated
+	// is computed below against the resolved inputs — see B-5.)
 	nowEnabled := exists && cur.Disabled && !body.Disabled
-	freshlyCreated := !exists && !body.Disabled && len(body.Inputs) > 0
 
 	// Reject a save that points at a non-existent template — silently
 	// persisting it would leave the runtime resolution unable to fill
@@ -430,6 +437,12 @@ func (h *StreamHandler) Put(w http.ResponseWriter, r *http.Request) {
 	// runtime is merged.
 	resolvedCur := h.resolveStream(pipelineCtx, cur)
 	resolvedBody := h.resolveStream(pipelineCtx, body)
+	// freshlyCreated: a brand-new enabled stream that should run from the
+	// moment it's saved (otherwise it sits StatusStopped until the
+	// reconciler's next tick). Tested against the RESOLVED inputs so a
+	// stream that inherits its Inputs from a template — none on the raw
+	// body — still starts on create (B-5).
+	freshlyCreated := !exists && !body.Disabled && len(resolvedBody.Inputs) > 0
 	switch {
 	case wasRunning:
 		if err := h.coordinator.Update(pipelineCtx, resolvedCur, resolvedBody); err != nil {
@@ -480,7 +493,9 @@ func (h *StreamHandler) validateCopyConfig(r *http.Request, proposed *domain.Str
 	if err != nil {
 		return &putValidationError{code: "LIST_FAILED", message: "list streams for copy validation: " + err.Error()}
 	}
-	return validateCopyConfigOn(proposed, all)
+	// Resolve templates so the shape check classifies upstreams by their
+	// inherited config, not raw records (B-6).
+	return validateCopyConfigOn(h.resolveStream(r.Context(), proposed), h.resolveStreams(r.Context(), all))
 }
 
 // validateCopyConfigOn runs the copy:// safety checks against an in-memory
@@ -556,7 +571,9 @@ func (h *StreamHandler) validateMixerConfig(r *http.Request, proposed *domain.St
 	if err != nil {
 		return &putValidationError{code: "LIST_FAILED", message: "list streams for mixer validation: " + err.Error()}
 	}
-	return validateMixerConfigOn(proposed, all)
+	// Resolve templates so the shape check classifies upstreams by their
+	// inherited config, not raw records (B-6).
+	return validateMixerConfigOn(h.resolveStream(r.Context(), proposed), h.resolveStreams(r.Context(), all))
 }
 
 // validateMixerConfigOn runs the mixer:// safety checks against an in-memory

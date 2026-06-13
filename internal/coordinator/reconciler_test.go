@@ -160,3 +160,39 @@ func TestReconcileOnceSkipsNilStreams(t *testing.T) {
 	})
 	assert.True(t, h.coord.IsRunning("ok"))
 }
+
+// fakeTemplateRepoRec is a minimal TemplateRepository for the template-
+// inheritance reconcile test (B-5).
+type fakeTemplateRepoRec struct{ tpl *domain.Template }
+
+func (r *fakeTemplateRepoRec) Save(context.Context, *domain.Template) error { return nil }
+func (r *fakeTemplateRepoRec) FindByCode(context.Context, domain.TemplateCode) (*domain.Template, error) {
+	if r.tpl != nil {
+		return r.tpl, nil
+	}
+	return nil, errors.New("template not found")
+}
+func (r *fakeTemplateRepoRec) List(context.Context) ([]*domain.Template, error)  { return nil, nil }
+func (r *fakeTemplateRepoRec) Delete(context.Context, domain.TemplateCode) error { return nil }
+
+// B-5: a stream that inherits its Inputs from a template (none on the raw
+// record) must still be started by the reconciler. Before the fix the raw
+// len(Inputs)==0 gate ran before resolveTemplate, so such a stream was
+// skipped forever.
+func TestReconcileOnceStartsTemplateInheritedInputs(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	tplCode := domain.TemplateCode("tpl-inherit")
+	h.coord.templateRepo = &fakeTemplateRepoRec{tpl: &domain.Template{
+		Inputs: []domain.Input{{URL: "udp://example.invalid:1234", Priority: 0}},
+	}}
+	h.coord.streamRepo = &fakeStreamRepo{streams: []*domain.Stream{
+		{Code: "inherits", Template: &tplCode}, // no own Inputs
+	}}
+	defer h.coord.Stop(context.Background(), "inherits")
+
+	h.coord.reconcileOnce(context.Background())
+
+	assert.True(t, h.coord.IsRunning("inherits"),
+		"stream inheriting Inputs from a template must be started (B-5)")
+}

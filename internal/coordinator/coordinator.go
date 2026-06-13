@@ -108,6 +108,16 @@ func New(i do.Injector) (*Coordinator, error) {
 			if err != nil {
 				return nil, false
 			}
+			// Resolve the template so copy:// / mixer:// upstream-shape
+			// lookups see the inherited Inputs/Transcoder, not the raw
+			// (often empty) record — otherwise a template-based upstream
+			// is misclassified and the downstream copy/mixer blacks out
+			// with no error (B-6).
+			if s.Template != nil && templates != nil {
+				if tpl, terr := templates.FindByCode(context.Background(), *s.Template); terr == nil {
+					s = domain.ResolveStream(s, tpl)
+				}
+			}
 			return s, true
 		},
 		renditions:  make(map[domain.StreamCode][]string),
@@ -890,11 +900,16 @@ func BootstrapPersistedStreams(ctx context.Context, log *slog.Logger, repo store
 			log.Debug("bootstrap: skip stream (disabled)", "stream_code", st.Code)
 			continue
 		}
-		if len(st.Inputs) == 0 {
+		// Resolve the template before the input-eligibility gate: a stream
+		// that inherits its Inputs from a template carries none on its raw
+		// record, so gating on the raw Inputs would skip it forever (B-5).
+		// resolveTemplate is a no-op when Template==nil, so a genuinely
+		// input-less stream is still skipped.
+		resolved := coord.resolveTemplate(ctx, st)
+		if len(resolved.Inputs) == 0 {
 			log.Debug("bootstrap: skip stream (no inputs)", "stream_code", st.Code)
 			continue
 		}
-		resolved := coord.resolveTemplate(ctx, st)
 		if err := coord.Start(ctx, resolved); err != nil {
 			log.Warn("bootstrap: stream start failed", "stream_code", st.Code, "err", err)
 			continue
@@ -958,14 +973,21 @@ func (c *Coordinator) reconcileOnce(ctx context.Context) {
 		return
 	}
 	for _, st := range streams {
-		if st == nil || st.Disabled || len(st.Inputs) == 0 {
+		if st == nil || st.Disabled {
 			continue
 		}
 		if c.IsRunning(st.Code) {
 			continue
 		}
+		// Resolve the template before the inputs gate so a stream that
+		// inherits Inputs from a template isn't skipped forever (B-5).
+		// Done after the IsRunning check so running streams pay no lookup.
+		resolved := c.resolveTemplate(ctx, st)
+		if len(resolved.Inputs) == 0 {
+			continue
+		}
 		slog.Info("coordinator: reconciler starting stopped stream", "stream_code", st.Code)
-		if err := c.Start(ctx, c.resolveTemplate(ctx, st)); err != nil {
+		if err := c.Start(ctx, resolved); err != nil {
 			slog.Warn("coordinator: reconciler start failed",
 				"stream_code", st.Code, "err", err)
 		}
