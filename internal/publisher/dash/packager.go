@@ -60,6 +60,17 @@ const (
 	videoPSAccumCap = 4 * 1024
 )
 
+// trackLossTimeout is how long a track may be silent (no frame arrival AND
+// an empty queue) once the stream is Live before the segmenter treats it as
+// dead and stops waiting for it. Without this, the init-presence flags
+// (videoInit/audioInit) latch true for the session lifetime, so when one
+// track dies mid-session the V/A duration coupling in buildCutDecision holds
+// every cut forever (Ok=false) and the DASH live edge freezes. 6 s ≈ 2× the
+// default pairing window — long enough to ride out a brief source stall, short
+// enough that a genuine track death un-freezes the surviving track quickly.
+// A package-level var (not const) so tests can shrink it. See liveTrackPresence.
+var trackLossTimeout = 6 * time.Second
+
 // Config carries the per-stream packager configuration.
 type Config struct {
 	// StreamID is used for log fields. Free-form; not used in any file path.
@@ -144,6 +155,14 @@ type Packager struct {
 	availStart time.Time
 	vSegN      uint64
 	aSegN      uint64
+
+	// lastVideoFrameAt / lastAudioFrameAt record the wallclock arrival of
+	// the most recent accepted frame on each track. Once the stream is
+	// Live, liveTrackPresence uses these (plus queue depth) to declare a
+	// silent track dead after trackLossTimeout so the surviving track keeps
+	// cutting instead of freezing on the dead track's missing frames (A-8).
+	lastVideoFrameAt time.Time
+	lastAudioFrameAt time.Time
 
 	// pairingTruncated latches after truncateAtPairingLocked runs so it
 	// fires exactly once per session lifetime. Without this latch, a
@@ -382,6 +401,7 @@ func (p *Packager) handleH264(av *domain.AVPacket) {
 		DTSms:  av.DTSms,
 		IsIDR:  av.KeyFrame,
 	})
+	p.lastVideoFrameAt = time.Now()
 	if p.videoInit != nil {
 		p.state.OpenPairingWindow(time.Now())
 	}
@@ -460,6 +480,7 @@ func (p *Packager) handleAAC(av *domain.AVPacket) {
 	for _, f := range frames {
 		p.pushAudioWithDiag(f)
 	}
+	p.lastAudioFrameAt = time.Now()
 	if p.audioInit != nil {
 		p.state.OpenPairingWindow(time.Now())
 	}
@@ -606,6 +627,39 @@ func (p *Packager) onSessionBoundary() {
 	p.state.OnSessionBoundaryHandled()
 }
 
+// liveTrackPresence reports which tracks the segmenter should still wait
+// for. The base answer is init-presence (a track exists once its init
+// segment is built), but a track that has built its init can later die
+// mid-session — the upstream stops delivering one elementary stream while
+// the other keeps flowing. The init pointer never clears, so without this
+// the V/A coupling in buildCutDecision would hold every cut forever and
+// freeze the live edge (A-8).
+//
+// We only down-grade once the stream is Live: during WaitingForPairing the
+// init-presence flags drive the pairing handshake (and queues are still
+// filling), and during a SessionBoundary the queue was just reset so the
+// arrival timestamps are intentionally stale. A track counts as alive while
+// it has queued frames OR delivered one within trackLossTimeout; past that,
+// with an empty queue, it is declared dead and the surviving track resumes
+// cutting (audio death → video-only cuts; video death → cutAudioOnly). The
+// flag flips back automatically when the track resumes (handlers re-stamp
+// lastXFrameAt), and tfdt stays wallclock-anchored so the resumed segment
+// lands at the right live-edge position with no extra re-anchoring.
+func (p *Packager) liveTrackPresence(now time.Time) (haveVideo, haveAudio bool) {
+	haveVideo = p.videoInit != nil
+	haveAudio = p.audioInit != nil
+	if p.state.State() != StateLive {
+		return haveVideo, haveAudio
+	}
+	if haveVideo && p.queue.VideoLen() == 0 && now.Sub(p.lastVideoFrameAt) >= trackLossTimeout {
+		haveVideo = false
+	}
+	if haveAudio && p.queue.AudioLen() == 0 && now.Sub(p.lastAudioFrameAt) >= trackLossTimeout {
+		haveAudio = false
+	}
+	return haveVideo, haveAudio
+}
+
 // tryCut checks the segmenter at every tick. Holds the mutex throughout
 // — segmenter decisions + writes are short and locking the entire path
 // avoids state-tearing under concurrent onPacket.
@@ -617,8 +671,7 @@ func (p *Packager) tryCut(now time.Time) {
 		return
 	}
 
-	haveVideo := p.videoInit != nil
-	haveAudio := p.audioInit != nil
+	haveVideo, haveAudio := p.liveTrackPresence(now)
 
 	videoReady := haveVideo && p.queue.VideoLen() > 0
 	audioReady := haveAudio && p.queue.AudioLen() > 0

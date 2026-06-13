@@ -832,6 +832,120 @@ func TestPackager_BehindPrevSegEnd(t *testing.T) {
 	})
 }
 
+// liveTrackTestPackager builds a minimal Live-state packager for
+// liveTrackPresence tests: both init segments present (so the base
+// presence flags are true), an empty queue, and the state machine
+// advanced past WaitingForPairing to Live — the only state where
+// track-death down-grading applies.
+func liveTrackTestPackager() *Packager {
+	p := &Packager{
+		state:     NewStateMachine(defaultPairingTimeout),
+		queue:     NewFrameQueue(),
+		videoInit: &VideoInit{},
+		audioInit: &AudioInit{SampleRate: 48000},
+	}
+	p.state.OnFirstSegmentFlushed() // WaitingForPairing → Live
+	return p
+}
+
+// TestLiveTrackPresence_TrackDeath covers A-8: once a stream is Live, a
+// track that has gone silent (no frame arrival within trackLossTimeout AND
+// an empty queue) is declared dead so the surviving track keeps cutting.
+// Before the fix, videoInit/audioInit latched the presence flags true for
+// the session lifetime, so a mid-session track death froze the live edge
+// (buildCutDecision's V/A coupling held every cut on the missing track).
+func TestLiveTrackPresence_TrackDeath(t *testing.T) {
+	now := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+
+	t.Run("audio_silent_past_timeout_is_dead_video_survives", func(t *testing.T) {
+		p := liveTrackTestPackager()
+		p.lastVideoFrameAt = now.Add(-500 * time.Millisecond) // fresh
+		p.lastAudioFrameAt = now.Add(-2 * trackLossTimeout)   // stale, queue empty
+		haveV, haveA := p.liveTrackPresence(now)
+		if !haveV {
+			t.Error("video should stay alive on a recent frame, got haveVideo=false")
+		}
+		if haveA {
+			t.Error("audio should be declared dead (silent past timeout, empty queue), got haveAudio=true")
+		}
+	})
+
+	t.Run("video_silent_past_timeout_is_dead_audio_survives", func(t *testing.T) {
+		p := liveTrackTestPackager()
+		p.lastVideoFrameAt = now.Add(-2 * trackLossTimeout)
+		p.lastAudioFrameAt = now.Add(-100 * time.Millisecond)
+		haveV, haveA := p.liveTrackPresence(now)
+		if haveV {
+			t.Error("video should be declared dead (silent past timeout, empty queue), got haveVideo=true")
+		}
+		if !haveA {
+			t.Error("audio should stay alive on a recent frame, got haveAudio=false")
+		}
+	})
+
+	t.Run("silent_track_with_queued_frames_still_draining_not_dead", func(t *testing.T) {
+		p := liveTrackTestPackager()
+		p.lastVideoFrameAt = now.Add(-2 * trackLossTimeout)
+		p.lastAudioFrameAt = now.Add(-2 * trackLossTimeout)
+		// Both stale by arrival, but the queues still hold buffered frames
+		// to drain — the segmenter must keep both until the queue empties.
+		p.queue.PushVideo(VideoFrame{AnnexB: []byte{0x00, 0x00, 0x00, 0x01}, IsIDR: true})
+		p.queue.PushAudio(AudioFrame{Raw: []byte{0xAA, 0xBB}})
+		haveV, haveA := p.liveTrackPresence(now)
+		if !haveV || !haveA {
+			t.Errorf("queued frames must keep tracks alive: haveVideo=%v haveAudio=%v", haveV, haveA)
+		}
+	})
+
+	t.Run("recent_frames_keep_both_tracks_alive", func(t *testing.T) {
+		p := liveTrackTestPackager()
+		p.lastVideoFrameAt = now.Add(-trackLossTimeout / 2)
+		p.lastAudioFrameAt = now.Add(-trackLossTimeout / 2)
+		haveV, haveA := p.liveTrackPresence(now)
+		if !haveV || !haveA {
+			t.Errorf("recent frames must keep tracks alive: haveVideo=%v haveAudio=%v", haveV, haveA)
+		}
+	})
+
+	t.Run("waiting_for_pairing_uses_init_presence_no_downgrade", func(t *testing.T) {
+		// Fresh state machine stays in WaitingForPairing. Even with both
+		// tracks stale + empty queues, the pairing handshake must not be
+		// disturbed — presence stays init-based.
+		p := &Packager{
+			state:     NewStateMachine(defaultPairingTimeout),
+			queue:     NewFrameQueue(),
+			videoInit: &VideoInit{},
+			audioInit: &AudioInit{SampleRate: 48000},
+		}
+		p.lastVideoFrameAt = now.Add(-2 * trackLossTimeout)
+		p.lastAudioFrameAt = now.Add(-2 * trackLossTimeout)
+		haveV, haveA := p.liveTrackPresence(now)
+		if !haveV || !haveA {
+			t.Errorf("WaitingForPairing must not down-grade tracks: haveVideo=%v haveAudio=%v", haveV, haveA)
+		}
+	})
+
+	t.Run("genuinely_single_track_stream_unaffected", func(t *testing.T) {
+		// Video-only stream (no audioInit) must keep haveAudio=false without
+		// the down-grade path ever mattering, and haveVideo must follow the
+		// usual liveness rule.
+		p := &Packager{
+			state:     NewStateMachine(defaultPairingTimeout),
+			queue:     NewFrameQueue(),
+			videoInit: &VideoInit{},
+		}
+		p.state.OnFirstSegmentFlushed()
+		p.lastVideoFrameAt = now.Add(-100 * time.Millisecond)
+		haveV, haveA := p.liveTrackPresence(now)
+		if !haveV {
+			t.Error("video-only stream with a recent frame should have haveVideo=true")
+		}
+		if haveA {
+			t.Error("video-only stream must have haveAudio=false (no audioInit)")
+		}
+	})
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────
 
 // waitForFile polls path until it exists or timeout elapses.
