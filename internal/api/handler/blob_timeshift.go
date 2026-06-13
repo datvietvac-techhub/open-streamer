@@ -117,7 +117,7 @@ func (h *BlobTimeshiftHandler) ServeTimeshift(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "INVALID_PARAMS", "dur must be a positive number of seconds")
 		return
 	}
-	win, err := br.Query(q.Get("profile"), start, dur)
+	win, err := br.Query(r.Context(), q.Get("profile"), start, dur)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NO_SEGMENTS_IN_RANGE", err.Error())
 		return
@@ -153,7 +153,7 @@ func (h *BlobTimeshiftHandler) ServeMPD(w http.ResponseWriter, r *http.Request) 
 	}
 	windows := make(map[string]*blob.Window, len(cat.Profiles))
 	for _, p := range cat.Profiles {
-		win, err := br.Query(p.ID, start, dur)
+		win, err := br.Query(r.Context(), p.ID, start, dur)
 		if err != nil {
 			continue
 		}

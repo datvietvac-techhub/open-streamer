@@ -1,12 +1,52 @@
 package blob
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
+
+// MaxTimeshiftWindow bounds the depth of a single timeshift query. Without it,
+// an absent or oversized `dur` resolves the window end to +inf, the hour filter
+// admits every hour, and Query builds a FragmentRef per fragment for the WHOLE
+// archive — per profile — so one unauthenticated `?from=0` request allocates
+// and reads hundreds of MB on a multi-day, multi-profile archive and a few
+// concurrent requests OOM the host (A-2). A package var so ops can tune it and
+// tests can shrink it; 24h comfortably covers typical timeshift / catch-up.
+var MaxTimeshiftWindow = 24 * time.Hour
+
+// resolveWindowBounds computes the [lo, hi) wall-time millisecond bounds for a
+// timeshift query. It clamps the start UP to the archive's earliest hour (so a
+// from=0 / ago=<huge> request can't anchor at the epoch and admit every hour)
+// and the depth to maxMs (so an absent or oversized dur can't load the whole
+// archive). durMs <= 0 means "open-ended" and is treated as maxMs. See A-2.
+func resolveWindowBounds(earliestMs int64, hasEarliest bool, fromMs, durMs, maxMs int64) (lo, hi int64) {
+	if hasEarliest && fromMs < earliestMs {
+		fromMs = earliestMs
+	}
+	if durMs <= 0 || durMs > maxMs {
+		durMs = maxMs
+	}
+	return fromMs, fromMs + durMs
+}
+
+// earliestHourMs returns the wall-time (ms) of the profile's oldest hour.
+// pd.Hours is not guaranteed sorted, so it scans for the minimum.
+func earliestHourMs(pd *ProfileDesc) (int64, bool) {
+	if len(pd.Hours) == 0 {
+		return 0, false
+	}
+	earliest := pd.Hours[0].WallFromMs
+	for _, hr := range pd.Hours[1:] {
+		if hr.WallFromMs < earliest {
+			earliest = hr.WallFromMs
+		}
+	}
+	return earliest, true
+}
 
 // FragmentRef locates one stored fragment for serving. ByteOffset/ByteLen point
 // into the hour blob (.cmfv for video, .cmfa for audio); the reader slices those
@@ -62,27 +102,24 @@ func (br *Reader) Catalog() *Catalog { return br.cat }
 // fragment refs. dur <= 0 means "to the end of the recording". Video is
 // keyframe-snapped (start at the last IDR ≤ from); audio is paired by media-time
 // overlap so the player has samples covering the first video frame.
-func (br *Reader) Query(profileID string, from time.Time, dur time.Duration) (*Window, error) {
+func (br *Reader) Query(ctx context.Context, profileID string, from time.Time, dur time.Duration) (*Window, error) {
 	pd, ok := br.cat.Profile(profileID)
 	if !ok {
 		return nil, fmt.Errorf("blob: unknown profile %q", profileID)
 	}
 	profDir := profileDirPath(br.streamDir, profileID)
 
-	fromMs := from.UTC().UnixMilli()
-	endMs := int64(1<<62 - 1)
-	if dur > 0 {
-		endMs = fromMs + dur.Milliseconds()
-	}
+	earliest, hasEarliest := earliestHourMs(pd)
+	fromMs, endMs := resolveWindowBounds(earliest, hasEarliest, from.UTC().UnixMilli(), dur.Milliseconds(), MaxTimeshiftWindow.Milliseconds())
 	fromTicks := br.cat.WallToMediaTicks(fromMs)
-	endTicks := uint64(1<<63 - 1)
-	if dur > 0 {
-		endTicks = br.cat.WallToMediaTicks(endMs)
-	}
+	endTicks := br.cat.WallToMediaTicks(endMs)
 
 	var allV, allA []FragmentRef
 	var vTS, aTS uint32
 	for _, hr := range pd.Hours {
+		if err := ctx.Err(); err != nil {
+			return nil, err // abort a long scan when the request is cancelled / times out
+		}
 		if hr.WallToMs < fromMs || hr.WallFromMs > endMs {
 			continue // hour outside the window
 		}
