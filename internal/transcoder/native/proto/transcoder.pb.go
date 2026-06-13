@@ -851,10 +851,20 @@ func (x *WatermarkConfig) GetResize() bool {
 }
 
 type InputPacket struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`                                      // raw MPEG-TS bytes from the buffer hub
-	SessionStart  bool                   `protobuf:"varint,2,opt,name=session_start,json=sessionStart,proto3" json:"session_start,omitempty"` // mirrors buffer.Packet.SessionStart
-	SessionId     int64                  `protobuf:"varint,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Data         []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`                                      // raw MPEG-TS bytes, or one AV-path ES access unit
+	SessionStart bool                   `protobuf:"varint,2,opt,name=session_start,json=sessionStart,proto3" json:"session_start,omitempty"` // mirrors buffer.Packet.SessionStart
+	SessionId    int64                  `protobuf:"varint,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// AV-path (RTSP / RTMP / copy / mixer) fields. Raw-TS chunks leave
+	// codec CODEC_UNSPECIFIED and pts/dts 0 — the subprocess recovers
+	// in-band PES timing from the TS bytes. For AV-path packets these
+	// carry the normalised source codec + millisecond PTS/DTS so audio
+	// is routed to the audio path (not fed to the video decoder) and the
+	// output timeline tracks the source instead of collapsing to a
+	// 1 ms/frame counter.
+	Codec         Codec `protobuf:"varint,4,opt,name=codec,proto3,enum=transcoder.v1.Codec" json:"codec,omitempty"`
+	PtsMs         int64 `protobuf:"varint,5,opt,name=pts_ms,json=ptsMs,proto3" json:"pts_ms,omitempty"`
+	DtsMs         int64 `protobuf:"varint,6,opt,name=dts_ms,json=dtsMs,proto3" json:"dts_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -906,6 +916,27 @@ func (x *InputPacket) GetSessionStart() bool {
 func (x *InputPacket) GetSessionId() int64 {
 	if x != nil {
 		return x.SessionId
+	}
+	return 0
+}
+
+func (x *InputPacket) GetCodec() Codec {
+	if x != nil {
+		return x.Codec
+	}
+	return Codec_CODEC_UNSPECIFIED
+}
+
+func (x *InputPacket) GetPtsMs() int64 {
+	if x != nil {
+		return x.PtsMs
+	}
+	return 0
+}
+
+func (x *InputPacket) GetDtsMs() int64 {
+	if x != nil {
+		return x.DtsMs
 	}
 	return 0
 }
@@ -1334,12 +1365,15 @@ const file_transcoder_proto_rawDesc = "" +
 	"font_color\x18\n" +
 	" \x01(\tR\tfontColor\x12\x1b\n" +
 	"\tfont_file\x18\v \x01(\tR\bfontFile\x12\x16\n" +
-	"\x06resize\x18\f \x01(\bR\x06resize\"e\n" +
+	"\x06resize\x18\f \x01(\bR\x06resize\"\xbf\x01\n" +
 	"\vInputPacket\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12#\n" +
 	"\rsession_start\x18\x02 \x01(\bR\fsessionStart\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\x03R\tsessionId\"\xe0\x01\n" +
+	"session_id\x18\x03 \x01(\x03R\tsessionId\x12*\n" +
+	"\x05codec\x18\x04 \x01(\x0e2\x14.transcoder.v1.CodecR\x05codec\x12\x15\n" +
+	"\x06pts_ms\x18\x05 \x01(\x03R\x05ptsMs\x12\x15\n" +
+	"\x06dts_ms\x18\x06 \x01(\x03R\x05dtsMs\"\xe0\x01\n" +
 	"\fOutputPacket\x12!\n" +
 	"\ftarget_index\x18\x01 \x01(\x05R\vtargetIndex\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12*\n" +
@@ -1423,15 +1457,16 @@ var file_transcoder_proto_depIdxs = []int32{
 	5,  // 8: transcoder.v1.ConfigureRequest.targets:type_name -> transcoder.v1.Target
 	6,  // 9: transcoder.v1.ConfigureRequest.audio:type_name -> transcoder.v1.AudioConfig
 	7,  // 10: transcoder.v1.ConfigureRequest.watermark:type_name -> transcoder.v1.WatermarkConfig
-	1,  // 11: transcoder.v1.OutputPacket.codec:type_name -> transcoder.v1.Codec
-	14, // 12: transcoder.v1.Health.profiles:type_name -> transcoder.v1.Health.Profile
-	2,  // 13: transcoder.v1.Transcoder.Run:input_type -> transcoder.v1.Request
-	3,  // 14: transcoder.v1.Transcoder.Run:output_type -> transcoder.v1.Event
-	14, // [14:15] is the sub-list for method output_type
-	13, // [13:14] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	1,  // 11: transcoder.v1.InputPacket.codec:type_name -> transcoder.v1.Codec
+	1,  // 12: transcoder.v1.OutputPacket.codec:type_name -> transcoder.v1.Codec
+	14, // 13: transcoder.v1.Health.profiles:type_name -> transcoder.v1.Health.Profile
+	2,  // 14: transcoder.v1.Transcoder.Run:input_type -> transcoder.v1.Request
+	3,  // 15: transcoder.v1.Transcoder.Run:output_type -> transcoder.v1.Event
+	15, // [15:16] is the sub-list for method output_type
+	14, // [14:15] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_transcoder_proto_init() }

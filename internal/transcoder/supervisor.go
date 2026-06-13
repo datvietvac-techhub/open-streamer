@@ -298,8 +298,19 @@ func (sv *supervisor) forwardOnePacket(stream pb.Transcoder_RunClient, pkt buffe
 		}
 	}
 	data := pkt.TS
+	var codec pb.Codec
+	var ptsMs, dtsMs int64
 	if len(data) == 0 && pkt.AV != nil {
-		data = pkt.AV.Data
+		av := pkt.AV
+		// AV-path: only video and AAC audio are wired into the subprocess.
+		// Drop other audio (MP2 / MP3 / AC3 / …) rather than forward it
+		// un-tagged into the H.264 decoder — that mis-routing was B-1.
+		if !av.Codec.IsVideo() && av.Codec != domain.AVCodecAAC {
+			return nil
+		}
+		data = av.Data
+		codec = avToProtoCodec(av.Codec)
+		ptsMs, dtsMs = int64(av.PTSms), int64(av.DTSms)
 	}
 	if len(data) == 0 {
 		return nil
@@ -309,12 +320,31 @@ func (sv *supervisor) forwardOnePacket(stream pb.Transcoder_RunClient, pkt buffe
 			Data:         data,
 			SessionStart: pkt.SessionStart,
 			SessionId:    int64(pkt.SessionID),
+			Codec:        codec,
+			PtsMs:        ptsMs,
+			DtsMs:        dtsMs,
 		}},
 	}); err != nil {
 		return fmt.Errorf("send packet: %w", err)
 	}
 	*firstWritten = true
 	return nil
+}
+
+// avToProtoCodec maps a buffer-hub AVPacket codec to the wire Codec enum
+// for AV-path forwarding. Codecs the subprocess can't handle map to
+// CODEC_UNSPECIFIED (the caller drops non-video, non-AAC payloads).
+func avToProtoCodec(c domain.AVCodec) pb.Codec {
+	switch c { //nolint:exhaustive // default maps unknown/unsupported codecs to CODEC_UNSPECIFIED
+	case domain.AVCodecH264:
+		return pb.Codec_CODEC_H264
+	case domain.AVCodecH265:
+		return pb.Codec_CODEC_H265
+	case domain.AVCodecAAC:
+		return pb.Codec_CODEC_AAC
+	default:
+		return pb.Codec_CODEC_UNSPECIFIED
+	}
 }
 
 func (sv *supervisor) sendSwitch(stream pb.Transcoder_RunClient, newRawID domain.StreamCode) error {

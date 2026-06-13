@@ -124,9 +124,19 @@ message WatermarkConfig {
 // ─── Data ──────────────────────────────────────────────────────────────
 
 message InputPacket {
-  bytes  data           = 1; // raw MPEG-TS bytes from the buffer hub
+  bytes  data           = 1; // raw MPEG-TS bytes, or one AV-path ES access unit
   bool   session_start  = 2; // mirrors buffer.Packet.SessionStart
   int64  session_id     = 3;
+  // AV-path (RTSP / RTMP / copy / mixer) fields. Raw-TS chunks leave
+  // codec CODEC_UNSPECIFIED and pts/dts 0 — the subprocess recovers
+  // in-band PES timing from the TS bytes. For AV-path packets these
+  // carry the normalised source codec + millisecond PTS/DTS so audio
+  // is routed to the audio path (not fed to the video decoder) and the
+  // output timeline tracks the source instead of collapsing to a
+  // 1 ms/frame counter.
+  Codec  codec          = 4;
+  int64  pts_ms         = 5;
+  int64  dts_ms         = 6;
 }
 
 message OutputPacket {
