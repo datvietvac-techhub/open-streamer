@@ -71,6 +71,13 @@ type Coordinator struct {
 	// envelope including started_at + uptime_sec) so frontend can
 	// render uptime without a Prometheus round-trip.
 	startedAt map[domain.StreamCode]time.Time
+
+	// lifecycleLocks serialises Start/Stop/Update per stream so the multi-step
+	// pipeline wiring can't interleave. Without it a racing op's rollback tore
+	// down another op's buffers / manager registration (both keyed only by
+	// stream code) and leaked monitor goroutines (C-1).
+	lifecycleMu    sync.Mutex
+	lifecycleLocks map[domain.StreamCode]*sync.Mutex
 }
 
 // streamDegradation flags the discrete failure modes that should pull a
@@ -120,11 +127,12 @@ func New(i do.Injector) (*Coordinator, error) {
 			}
 			return s, true
 		},
-		renditions:  make(map[domain.StreamCode][]string),
-		abrCopies:   make(map[domain.StreamCode]*abrCopyEntry),
-		abrMixers:   make(map[domain.StreamCode]*abrMixerEntry),
-		degradation: make(map[domain.StreamCode]*streamDegradation),
-		startedAt:   make(map[domain.StreamCode]time.Time),
+		renditions:     make(map[domain.StreamCode][]string),
+		abrCopies:      make(map[domain.StreamCode]*abrCopyEntry),
+		abrMixers:      make(map[domain.StreamCode]*abrMixerEntry),
+		degradation:    make(map[domain.StreamCode]*streamDegradation),
+		startedAt:      make(map[domain.StreamCode]time.Time),
+		lifecycleLocks: make(map[domain.StreamCode]*sync.Mutex),
 	}
 	// Watermarks library is optional — coordinator runs fine without it
 	// (only direct ImagePath watermarks resolve). Tolerate "no provider".
@@ -165,22 +173,38 @@ func newForTesting(
 	m *metrics.Metrics,
 ) *Coordinator {
 	c := &Coordinator{
-		buf:         buf,
-		mgr:         mgr,
-		tc:          tc,
-		pub:         pub,
-		dvr:         dvr,
-		bus:         bus,
-		m:           m,
-		renditions:  make(map[domain.StreamCode][]string),
-		abrCopies:   make(map[domain.StreamCode]*abrCopyEntry),
-		abrMixers:   make(map[domain.StreamCode]*abrMixerEntry),
-		degradation: make(map[domain.StreamCode]*streamDegradation),
-		startedAt:   make(map[domain.StreamCode]time.Time),
+		buf:            buf,
+		mgr:            mgr,
+		tc:             tc,
+		pub:            pub,
+		dvr:            dvr,
+		bus:            bus,
+		m:              m,
+		renditions:     make(map[domain.StreamCode][]string),
+		abrCopies:      make(map[domain.StreamCode]*abrCopyEntry),
+		abrMixers:      make(map[domain.StreamCode]*abrMixerEntry),
+		degradation:    make(map[domain.StreamCode]*streamDegradation),
+		startedAt:      make(map[domain.StreamCode]time.Time),
+		lifecycleLocks: make(map[domain.StreamCode]*sync.Mutex),
 	}
 	c.mgr.SetExhaustedCallback(c.handleAllInputsExhausted)
 	c.mgr.SetRestoredCallback(c.handleInputRestored)
 	return c
+}
+
+// lockStream acquires the per-stream lifecycle lock and returns its unlock
+// func. Start/Stop/Update hold it for their whole body so they serialise per
+// stream; the *Locked variants run under it and must not re-acquire (C-1).
+func (c *Coordinator) lockStream(code domain.StreamCode) func() {
+	c.lifecycleMu.Lock()
+	mu, ok := c.lifecycleLocks[code]
+	if !ok {
+		mu = &sync.Mutex{}
+		c.lifecycleLocks[code] = mu
+	}
+	c.lifecycleMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
 }
 
 // SetUpstreamLookupForTesting injects an upstream stream resolver — used by
@@ -278,6 +302,15 @@ func (c *Coordinator) Start(ctx context.Context, stream *domain.Stream) error {
 	if stream == nil {
 		return fmt.Errorf("coordinator: nil stream")
 	}
+	unlock := c.lockStream(stream.Code)
+	defer unlock()
+	return c.startLocked(ctx, stream)
+}
+
+// startLocked is Start's body; the caller holds the per-stream lifecycle lock
+// (Start, or Update which already holds it). The IsRunning check is the
+// re-check under the lock so a racing Start collapses to a clean no-op (C-1).
+func (c *Coordinator) startLocked(ctx context.Context, stream *domain.Stream) error {
 	if c.IsRunning(stream.Code) {
 		return nil
 	}
@@ -447,6 +480,14 @@ func (c *Coordinator) RunningStreams() []domain.StreamCode {
 // ctx is used for the DVR stop and the EventStreamStopped publish; cleanup
 // of in-memory state always proceeds even if ctx is cancelled.
 func (c *Coordinator) Stop(ctx context.Context, streamID domain.StreamCode) {
+	unlock := c.lockStream(streamID)
+	defer unlock()
+	c.stopLocked(ctx, streamID)
+}
+
+// stopLocked is Stop's body; the caller holds the per-stream lifecycle lock
+// (Stop, Update, or the reloadTranscoderFull self-heal fallback).
+func (c *Coordinator) stopLocked(ctx context.Context, streamID domain.StreamCode) {
 	c.abrMu.Lock()
 	abr, isABR := c.abrCopies[streamID]
 	if isABR {
@@ -505,7 +546,15 @@ func (c *Coordinator) Update(ctx context.Context, old, new *domain.Stream) error
 	if old == nil || new == nil {
 		return fmt.Errorf("coordinator: Update requires both old and new stream")
 	}
+	unlock := c.lockStream(new.Code)
+	defer unlock()
+	return c.updateLocked(ctx, old, new)
+}
 
+// updateLocked is Update's body; it holds the per-stream lifecycle lock so it
+// calls startLocked/stopLocked (never the public, re-locking variants) and
+// serialises against a concurrent Start/Stop (C-1).
+func (c *Coordinator) updateLocked(ctx context.Context, old, new *domain.Stream) error {
 	// ABR copy / ABR mixer use custom pipelines (no ingestor / transcoder),
 	// so the per-component diff routing doesn't apply. Whenever either side
 	// is on one of these paths we full-cycle: stop whatever is running, then
@@ -518,11 +567,11 @@ func (c *Coordinator) Update(ctx context.Context, old, new *domain.Stream) error
 	_, _, willBeABRMixer := c.detectABRMixer(new)
 	willBeABRMixer = willBeABRMixer && !new.Disabled
 	if wasABRCopy || wasABRMixer || willBeABRCopy || willBeABRMixer {
-		c.Stop(ctx, old.Code)
+		c.stopLocked(ctx, old.Code)
 		if new.Disabled || len(new.Inputs) == 0 {
 			return nil
 		}
-		return c.Start(ctx, new)
+		return c.startLocked(ctx, new)
 	}
 
 	diff := ComputeDiff(old, new)
@@ -539,7 +588,7 @@ func (c *Coordinator) Update(ctx context.Context, old, new *domain.Stream) error
 	)
 
 	if diff.NowDisabled {
-		c.Stop(ctx, new.Code)
+		c.stopLocked(ctx, new.Code)
 		return nil
 	}
 
@@ -646,7 +695,7 @@ func (c *Coordinator) reloadTranscoderFull(ctx context.Context, old, new *domain
 	if len(transcoderTargets) > 0 {
 		tcRT := c.transcoderConfigWithWatermark(new)
 		if err := c.tc.Start(ctx, new.Code, newIngestID, tcRT, transcoderTargets); err != nil {
-			return fmt.Errorf("transcoder start: %w", err)
+			return c.reloadFailed(ctx, new.Code, fmt.Errorf("transcoder start: %w", err))
 		}
 		c.rendMu.Lock()
 		c.renditions[new.Code] = renditionSlugs
@@ -654,11 +703,28 @@ func (c *Coordinator) reloadTranscoderFull(ctx context.Context, old, new *domain
 	}
 
 	if err := c.pub.Start(ctx, new); err != nil {
-		return fmt.Errorf("publisher start: %w", err)
+		return c.reloadFailed(ctx, new.Code, fmt.Errorf("publisher start: %w", err))
 	}
 
 	c.reloadDVR(ctx, new)
 	return nil
+}
+
+// reloadFailed handles a reloadTranscoderFull error that occurs AFTER teardown
+// has begun. By that point DVR + publisher + the old transcoder are already
+// down, but ingest may still be registered — a bare return would leave the
+// stream IsRunning=true with zero output and the reconciler blind to it (A-6,
+// e.g. a transcoder binary missing after a bad deploy, NVENC fault). Fall back
+// to a clean full stop (Stop is idempotent against the partial state): IsRunning
+// flips false, so the 10 s reconcile tick restarts the stream from the persisted
+// config — a permanent invisible outage becomes a ≤10 s self-healing one, and a
+// retried identical PUT becomes meaningful. The caller holds the lifecycle lock,
+// so use stopLocked (not Stop) to avoid re-acquiring it.
+func (c *Coordinator) reloadFailed(ctx context.Context, code domain.StreamCode, err error) error {
+	slog.Warn("coordinator: transcoder reload failed mid-flight — full stop for reconciler self-heal",
+		"stream_code", code, "err", err)
+	c.stopLocked(ctx, code)
+	return err
 }
 
 // reloadProfiles applies per-profile transcoder changes without touching unchanged profiles.

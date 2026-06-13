@@ -527,3 +527,38 @@ func TestRestoredCallback_FiresAfterExhaustedRecovers(t *testing.T) {
 		}
 	}
 }
+
+// A-5 + C-1: re-registering an already-registered stream must error, not
+// silently overwrite the prior monitor goroutine + ticker (leak) and let a
+// concurrent Unregister stop the new worker.
+func TestRegister_RefusesDuplicate(t *testing.T) {
+	t.Parallel()
+	svc, _ := newSvc(t)
+	st := &domain.Stream{Code: "dup", Inputs: []domain.Input{{URL: "udp://x:1", Priority: 0}}}
+	require.NoError(t, svc.Register(context.Background(), st, "dup"))
+	require.Error(t, svc.Register(context.Background(), st, "dup"),
+		"re-registering an active stream must error")
+}
+
+// A-5: a synchronous ingest-start failure must degrade the input and (for a
+// single-input stream) drive it to exhausted — not sit silently Idle while the
+// coordinator reports the stream Active and the reconciler stays blind.
+func TestRegister_StartFailureDrivesExhausted(t *testing.T) {
+	t.Parallel()
+	svc, ing := newSvc(t)
+	ing.startErr = errors.New("dead source")
+	exhausted := make(chan domain.StreamCode, 1)
+	svc.SetExhaustedCallback(func(c domain.StreamCode) {
+		select {
+		case exhausted <- c:
+		default:
+		}
+	})
+	st := &domain.Stream{Code: "deadsrc", Inputs: []domain.Input{{URL: "udp://x:1", Priority: 0}}}
+	require.NoError(t, svc.Register(context.Background(), st, "deadsrc"))
+	select {
+	case <-exhausted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("single-input start failure must degrade → exhausted (A-5)")
+	}
+}
