@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -90,4 +93,37 @@ func TestValidateCopyConfig_AllowsMissingUpstream(t *testing.T) {
 	t.Parallel()
 	proposed := mkStreamWithInputs("dn", "copy://ghost")
 	require.Nil(t, validateCopyConfigOn(proposed, nil))
+}
+
+// B-6: copy:// shape validation must resolve the upstream's template before
+// classifying it. An upstream that inherits its ABR transcoder from a
+// template looks single-stream on its raw record; without resolution the
+// "ABR-copy must be the sole input" rule is silently skipped and the
+// misconfig only surfaces later as a runtime blackout.
+func TestValidateCopyConfig_ResolvesTemplateUpstream(t *testing.T) {
+	t.Parallel()
+	tplCode := domain.TemplateCode("abr-tpl")
+	tr := newFakeTemplateRepo()
+	require.NoError(t, tr.Save(context.Background(), &domain.Template{
+		Code: tplCode,
+		Transcoder: &domain.TranscoderConfig{
+			Video: domain.VideoTranscodeConfig{Profiles: []domain.VideoProfile{
+				{Width: 1920, Height: 1080, Bitrate: 4500},
+				{Width: 1280, Height: 720, Bitrate: 3000},
+			}},
+		},
+	}))
+	repo := newFakeStreamRepoFull()
+	repo.seed(&domain.Stream{Code: "up", Template: &tplCode}) // ABR inherited; raw record looks single-stream
+	h := &StreamHandler{streamRepo: repo, templateRepo: tr}
+
+	// copy://up + a fallback input → the ABR-copy is NOT the sole input.
+	proposed := &domain.Stream{Code: "down", Inputs: []domain.Input{
+		{URL: "copy://up"},
+		{URL: "udp://example.invalid:1234"},
+	}}
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/streams/down", nil)
+	vErr := h.validateCopyConfig(req, proposed)
+	require.NotNil(t, vErr, "ABR-copy with a fallback must be rejected once the template is resolved (B-6)")
+	require.Equal(t, "INVALID_COPY_SHAPE", vErr.code)
 }

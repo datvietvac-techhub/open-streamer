@@ -151,3 +151,34 @@ func TestValidateCopyShape_NoCopyInputsIsNoOp(t *testing.T) {
 	s := &Stream{Code: "a", Inputs: []Input{{URL: "rtmp://origin/a"}}}
 	require.NoError(t, ValidateCopyShape(s, mkLookup(s)))
 }
+
+// B-7: inputSourceIsRawTS must classify TS-passthrough sources via
+// protocol.Detect. The old inlined scan missed HTTP-TS (.ts, /mpegts),
+// .m3u, and uppercase variants — misclassifying those upstreams as
+// direct-AV and blacking out copy:// / mixer:// of them.
+func TestInputSourceIsRawTS(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"udp://239.0.0.1:1234", true},
+		{"http://cdn/live.m3u8", true},     // HLS
+		{"https://cdn/live.m3u8", true},    // HLS over https
+		{"http://cdn/playlist.m3u", true},  // .m3u (was missed)
+		{"http://relay/chan/mpegts", true}, // HTTP-TS (was missed)
+		{"http://cdn/live.ts", true},       // HTTP-TS (was missed)
+		{"http://CDN/LIVE.M3U8", true},     // uppercase (Detect lowercases)
+		{"srt://host:9000", true},
+		{"file:///media/clip.ts", true},
+		{"/media/clip.ts", true}, // bare path = file
+		{"rtmp://host/app/key", false},
+		{"rtsp://host/stream", false},
+		{"copy://other", false},
+		{"mixer://v,a", false},
+		{"http://site/page.html", false}, // not a TS source
+	}
+	for _, c := range cases {
+		require.Equalf(t, c.want, inputSourceIsRawTS(c.url), "url=%s", c.url)
+	}
+}

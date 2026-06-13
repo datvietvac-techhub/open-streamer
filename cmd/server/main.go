@@ -295,10 +295,20 @@ func wireServices(i *do.RootScope) {
 func wireCopyLookup(i do.Injector) {
 	ing := do.MustInvoke[*ingestor.Service](i)
 	repo := do.MustInvoke[store.StreamRepository](i)
+	templates := do.MustInvoke[store.TemplateRepository](i)
 	ing.SetStreamLookup(func(code domain.StreamCode) (*domain.Stream, bool) {
 		s, err := repo.FindByCode(context.Background(), code)
 		if err != nil {
 			return nil, false
+		}
+		// Resolve the template so the copy:// / mixer:// reader classifies
+		// the upstream by its inherited Inputs/Transcoder, not the raw
+		// (often empty) record — otherwise it picks direct-AV mode and
+		// drops every TS-only packet, blacking out with no error (B-6).
+		if s.Template != nil {
+			if tpl, terr := templates.FindByCode(context.Background(), *s.Template); terr == nil {
+				s = domain.ResolveStream(s, tpl)
+			}
 		}
 		return s, true
 	})
