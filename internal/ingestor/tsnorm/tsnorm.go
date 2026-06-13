@@ -114,6 +114,12 @@ const muxerTablesRetransmitPeriod = 40
 // its prefetch behaviour into the ack-timing logic).
 const tsPacketSize = 188
 
+// maxDemuxRestarts caps how many times runDemux rebuilds the astits demuxer
+// after a parse error before giving up. Mirrors pull.TSDemuxPacketReader so a
+// transient corruption (one truncated datagram, a bad adaptation field) resyncs
+// instead of permanently killing normalisation.
+const maxDemuxRestarts = 8
+
 // Normaliser wallclock-anchors the per-PES PTS / DTS values inside one
 // stream's MPEG-TS byte feed. NOT safe for concurrent Process calls —
 // the internal mutex serialises them; callers running in a single
@@ -273,6 +279,7 @@ func (n *Normaliser) Process(chunk []byte) ([]byte, error) {
 	select {
 	case n.chunks <- chunk:
 	case <-n.demuxDone:
+		n.started = false // demux goroutine died — relaunch lazily on the next Process (A-4)
 		return nil, io.EOF
 	}
 	select {
@@ -281,6 +288,7 @@ func (n *Normaliser) Process(chunk []byte) ([]byte, error) {
 		// Drain whatever the goroutine did manage to emit before
 		// dying — gives the worker a chance to surface a partial
 		// segment instead of swallowing it on shutdown.
+		n.started = false // demux goroutine died — relaunch lazily on the next Process (A-4)
 		if n.outBuf.Len() == 0 {
 			return nil, io.EOF
 		}
@@ -388,19 +396,32 @@ func (n *Normaliser) runDemux() {
 		astits.DemuxerOptPacketSize(tsPacketSize),
 	)
 
+	consecutiveErrors := 0
 	for {
 		data, err := dmx.NextData()
 		if err != nil {
 			if errors.Is(err, astits.ErrNoMorePackets) || errors.Is(err, io.EOF) {
 				return
 			}
-			// Parse errors are recoverable in principle (the next PSI
-			// re-syncs the demuxer) but astits returns them as fatal.
-			// We log and bail — the caller's session-boundary path
-			// rebuilds us on the next OnSession.
-			slog.Debug("tsnorm: demuxer exit on error", "err", err)
-			return
+			// astits surfaces a parse error as fatal, but it's recoverable:
+			// rebuild the demuxer on the SAME reader so it resyncs on the next
+			// sync byte (mirrors pull.TSDemuxPacketReader). Before this, a single
+			// truncated UDP datagram or corrupt adaptation field killed this
+			// goroutine for good — every later Process returned io.EOF and the
+			// worker silently fell back to un-normalised raw passthrough with no
+			// self-heal (A-4).
+			consecutiveErrors++
+			if consecutiveErrors > maxDemuxRestarts {
+				slog.Warn("tsnorm: demuxer giving up after repeated parse errors",
+					"err", err, "restarts", consecutiveErrors)
+				return
+			}
+			slog.Debug("tsnorm: demuxer parse error — rebuilding to resync",
+				"err", err, "restart", consecutiveErrors)
+			dmx = astits.NewDemuxer(n.ctx, rdr, astits.DemuxerOptPacketSize(tsPacketSize))
+			continue
 		}
+		consecutiveErrors = 0
 		switch {
 		case data.PMT != nil:
 			for _, es := range data.PMT.ElementaryStreams {

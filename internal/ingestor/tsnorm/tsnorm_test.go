@@ -3,6 +3,8 @@ package tsnorm_test
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"testing"
 
 	gompeg2 "github.com/yapingcat/gomedia/go-mpeg2"
@@ -685,5 +687,42 @@ func TestProcess_DiscontinuityIndicatorReseedsOnSession(t *testing.T) {
 	out2 = append(out2, n.Flush()...)
 	if !hasDiscontinuityIndicatorOn(out2, 0x100) {
 		t.Fatal("post-OnSession pulse must carry discontinuity_indicator=1 on video PID")
+	}
+}
+
+// A-4: a parse error must not permanently kill normalisation. After a corrupt
+// chunk the demuxer rebuilds and resyncs, so a later valid chunk is still
+// normalised — instead of every later Process returning io.EOF and the worker
+// silently falling back to un-normalised raw passthrough forever.
+func TestProcess_RecoversFromParseError(t *testing.T) {
+	mkValid := func() []byte {
+		m := tsmux.NewFromAV(context.Background())
+		var b bytes.Buffer
+		m.Write(&domain.AVPacket{
+			Codec: domain.AVCodecH264, Data: buildH264IDR(),
+			PTSms: 1000, DTSms: 1000, KeyFrame: true,
+		}, func(p []byte) { b.Write(p) })
+		return b.Bytes()
+	}
+	n := tsnorm.New(context.Background(), timeline.DefaultConfig())
+
+	if _, err := n.Process(mkValid()); err != nil {
+		t.Fatalf("Process(valid #1): %v", err)
+	}
+	// Corrupt 188-byte packet (no 0x47 sync) → astits parse error path.
+	if _, err := n.Process(make([]byte, 188)); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("Process(corrupt) unexpected err: %v", err)
+	}
+	// A subsequent valid chunk must still normalise — not a permanent io.EOF.
+	out, err := n.Process(mkValid())
+	if errors.Is(err, io.EOF) {
+		t.Fatal("tsnorm returned io.EOF after a parse error — normalisation died permanently (A-4)")
+	}
+	if err != nil {
+		t.Fatalf("Process(valid #2): %v", err)
+	}
+	out = append(out, n.Flush()...)
+	if len(out) == 0 {
+		t.Fatal("tsnorm produced no output after recovering from a parse error")
 	}
 }
