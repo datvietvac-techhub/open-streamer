@@ -371,9 +371,11 @@ func encoderCodecForBackend(hw pb.HWBackend, explicit string) string {
 // every stream while the GPU's NVDEC sits idle. Other backends keep the
 // universal CPU decoder (cuvid is NVIDIA-only).
 //
-// Input is assumed H.264 (every current source speaks it and the pipeline
-// is H.264-centric); wire H.265 detection alongside hevc_cuvid when HEVC
-// sources land.
+// The startup decoder assumes H.264 (the dominant source codec). HEVC
+// sources are handled at runtime: StreamPipeline.ensureVideoDecoder
+// rebuilds the decoder to hevc / hevc_cuvid on the first video frame whose
+// codec differs from the active decoder, so no codec needs to be known
+// here before the first packet arrives.
 func decoderCodecForBackend(hw pb.HWBackend) string {
 	if hw == pb.HWBackend_HW_BACKEND_NVENC {
 		return "h264_cuvid"
