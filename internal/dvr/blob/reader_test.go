@@ -2,6 +2,7 @@ package blob
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestBlobReader_QueryRenderAndSlice(t *testing.T) {
 	br, err := NewReader(dir)
 	require.NoError(t, err)
 
-	win, err := br.Query("p0", time.UnixMilli(originWallMs).UTC(), 0)
+	win, err := br.Query(t.Context(), "p0", time.UnixMilli(originWallMs).UTC(), 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, win.Video, "window must hold video fragments")
 	require.NotEmpty(t, win.Audio, "window must pair audio fragments")
@@ -103,6 +104,62 @@ func TestBlobReader_NoArchive(t *testing.T) {
 	t.Parallel()
 	_, err := NewReader(t.TempDir())
 	assert.Error(t, err)
+}
+
+// TestResolveWindowBounds locks the A-2 clamp: an absent/oversized dur is
+// capped to maxMs (so Query can't admit the whole archive), and a start below
+// the earliest hour is pulled up to it (so from=0 / ago=<huge> can't anchor at
+// the epoch).
+func TestResolveWindowBounds(t *testing.T) {
+	t.Parallel()
+	const earliest, maxMs = 1_000_000, 60_000
+	tcs := []struct {
+		name           string
+		hasEarliest    bool
+		fromMs, durMs  int64
+		wantLo, wantHi int64
+	}{
+		{"open_ended_dur_clamped_to_max", true, 2_000_000, 0, 2_000_000, 2_000_000 + maxMs},
+		{"negative_dur_clamped_to_max", true, 2_000_000, -5, 2_000_000, 2_000_000 + maxMs},
+		{"oversized_dur_clamped_to_max", true, 2_000_000, maxMs * 100, 2_000_000, 2_000_000 + maxMs},
+		{"in_range_dur_preserved", true, 2_000_000, 10_000, 2_000_000, 2_010_000},
+		{"from_below_earliest_pulled_up", true, 0, 0, earliest, earliest + maxMs},
+		{"from_above_earliest_preserved", true, 5_000_000, 0, 5_000_000, 5_000_000 + maxMs},
+		{"no_earliest_leaves_from", false, 0, 0, 0, maxMs},
+	}
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lo, hi := resolveWindowBounds(earliest, tc.hasEarliest, tc.fromMs, tc.durMs, maxMs)
+			assert.Equal(t, tc.wantLo, lo, "lo")
+			assert.Equal(t, tc.wantHi, hi, "hi")
+		})
+	}
+}
+
+// TestBlobReader_QueryClampsAndCancels exercises the clamp + ctx threading on a
+// real archive: a from=epoch (effectively from=0) query still returns the
+// archive's fragments because the start is pulled up to the earliest hour
+// (pre-fix it would scan from the epoch), and a cancelled context aborts the
+// scan instead of reading every hour.
+func TestBlobReader_QueryClampsAndCancels(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeArchive(t, dir)
+	br, err := NewReader(dir)
+	require.NoError(t, err)
+
+	// from=epoch, open-ended dur: start clamps up to the earliest hour, so the
+	// 6 s archive is returned rather than an epoch-anchored empty/giant scan.
+	win, err := br.Query(t.Context(), "p0", time.UnixMilli(0).UTC(), 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, win.Video, "from=0 must clamp to earliest hour and return fragments")
+
+	// A cancelled request aborts the hour scan with the context error.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = br.Query(ctx, "p0", time.UnixMilli(0).UTC(), 0)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestParseNames(t *testing.T) {

@@ -52,7 +52,7 @@ func TestRenderMPD_TimeRoundTrip(t *testing.T) {
 
 	// Query from a mid-recording instant so the window starts past the origin
 	// (T0 > 0) and the per-rep presentationTimeOffset is exercised end-to-end.
-	win, err := br.Query("p0", time.UnixMilli(originWallMs+1200).UTC(), 0)
+	win, err := br.Query(t.Context(), "p0", time.UnixMilli(originWallMs+1200).UTC(), 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, win.Video)
 	require.NotEmpty(t, win.Audio)
@@ -97,7 +97,7 @@ func TestFragmentByTime_AcrossHourBoundary(t *testing.T) {
 	br, err := NewReader(dir)
 	require.NoError(t, err)
 
-	win, err := br.Query("p0", time.UnixMilli(originWallMs).UTC(), 0)
+	win, err := br.Query(t.Context(), "p0", time.UnixMilli(originWallMs).UTC(), 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, win.Audio)
 
