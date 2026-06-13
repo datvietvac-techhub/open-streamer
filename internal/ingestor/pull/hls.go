@@ -440,6 +440,37 @@ func (r *HLSReader) fetchPlaylistOnce(ctx context.Context, playlistURL string) (
 
 // ─── Segment fetching ────────────────────────────────────────────────────────
 
+// Response-body size caps. Without them, fetchSegmentOnce's io.ReadAll and the
+// playlist parser allocate whatever the upstream sends — a malicious,
+// compromised, or (via SSRF / a 3xx redirect, see S-4) attacker-chosen host can
+// return a multi-GB body and OOM-kill the shared process, taking every stream on
+// the host down (A-7). The only prior bound was the 60 s segment timeout
+// (~7.5 GB at 1 Gbps). Package vars so ops can tune them and tests can shrink
+// them.
+var (
+	hlsMaxSegmentBytes  int64 = 64 << 20 // 64 MiB — generous for any real segment
+	hlsMaxPlaylistBytes int64 = 8 << 20  // 8 MiB — a huge live/VOD playlist is still well under this
+)
+
+// errBodyTooLarge is returned when a response body exceeds its size cap. For a
+// segment it is treated as a failed fetch (retried, then skipped) rather than
+// fatal, so one bad segment doesn't kill the stream.
+var errBodyTooLarge = errors.New("hls: response body exceeds size cap")
+
+// readCapped reads from r up to max bytes. It reads at most max+1 bytes via an
+// io.LimitReader, so an over-limit body is rejected WITHOUT allocating the whole
+// thing (the OOM the cap exists to prevent); a body of exactly max is allowed.
+func readCapped(r io.Reader, maxBytes int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errBodyTooLarge
+	}
+	return data, nil
+}
+
 // fetchSegmentWithRetry downloads a segment, retrying transient failures.
 func (r *HLSReader) fetchSegmentWithRetry(ctx context.Context, segURL string) ([]byte, error) {
 	var lastErr error
@@ -480,7 +511,7 @@ func (r *HLSReader) fetchSegmentOnce(ctx context.Context, segURL string) ([]byte
 	if resp.StatusCode != http.StatusOK {
 		return nil, &httpStatusErr{url: segURL, code: resp.StatusCode}
 	}
-	return io.ReadAll(resp.Body)
+	return readCapped(resp.Body, hlsMaxSegmentBytes)
 }
 
 // retryWait waits for exponential backoff (hlsRetryBase × 2^attempt).
@@ -513,7 +544,10 @@ func parseM3U8(body io.Reader, base *url.URL) (*fetchResult, error) {
 		pendingDisc bool
 	)
 
-	scanner := bufio.NewScanner(body)
+	// Cap the playlist body so a malicious/redirected host can't stream an
+	// unbounded M3U8 into the scanner (A-7). 8 MiB transitively bounds the
+	// parsed segment/variant count too (~50 B/line → well under 200k lines).
+	scanner := bufio.NewScanner(io.LimitReader(body, hlsMaxPlaylistBytes))
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
 	for scanner.Scan() {
