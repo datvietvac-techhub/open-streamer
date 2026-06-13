@@ -196,3 +196,17 @@ func TestReconcileOnceStartsTemplateInheritedInputs(t *testing.T) {
 	assert.True(t, h.coord.IsRunning("inherits"),
 		"stream inheriting Inputs from a template must be started (B-5)")
 }
+
+// D-2: a non-transcoded raw-TS source (UDP/HLS-pull/HTTP-TS/SRT/file) writes TS
+// chunks the blob writer can't ingest — recording it produced ZERO bytes while
+// status said "recording". blobProfiles must refuse it (no lane) so no catalog
+// or Recording row is created. A non-transcoded AV source still records.
+func TestBlobProfiles_RefusesRawTSSource(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	raw := &domain.Stream{Code: "udp-dvr", DVR: &domain.StreamDVRConfig{Enabled: true}, Inputs: []domain.Input{{URL: "udp://239.0.0.1:1234"}}}
+	require.Nil(t, h.coord.blobProfiles(raw), "raw-TS source must not get a DVR lane (D-2)")
+
+	av := &domain.Stream{Code: "rtmp-dvr", DVR: &domain.StreamDVRConfig{Enabled: true}, Inputs: []domain.Input{{URL: "rtmp://host/app/key"}}}
+	require.NotEmpty(t, h.coord.blobProfiles(av), "non-transcoded AV source records via the p0 lane")
+}
