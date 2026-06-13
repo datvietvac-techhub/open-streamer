@@ -105,12 +105,16 @@ type spyTC struct {
 	stopped         []domain.StreamCode
 	profilesStopped []int
 	profilesStarted []int
+	startErr        error // when set, Start returns it (drives the A-6 reload-failure path)
 }
 
 func (t *spyTC) Start(_ context.Context, c domain.StreamCode, _ domain.StreamCode, _ *domain.TranscoderConfig, _ []transcoder.RenditionTarget) error {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.startErr != nil {
+		return t.startErr
+	}
 	t.started = append(t.started, c)
-	t.mu.Unlock()
 	return nil
 }
 

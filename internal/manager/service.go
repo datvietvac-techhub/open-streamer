@@ -399,6 +399,15 @@ func (s *Service) Register(ctx context.Context, stream *domain.Stream, bufferWri
 	}
 
 	s.mu.Lock()
+	if _, exists := s.streams[stream.Code]; exists {
+		// Already registered: overwriting would orphan the prior monitor
+		// goroutine + ticker (cancel unreachable) and let a concurrent
+		// Unregister stop the new worker. Refuse — the coordinator's
+		// per-stream lifecycle lock makes this a defensive backstop (C-1).
+		s.mu.Unlock()
+		cancel()
+		return fmt.Errorf("manager: stream %q already registered", stream.Code)
+	}
 	s.streams[stream.Code] = state
 	s.mu.Unlock()
 
@@ -419,6 +428,13 @@ func (s *Service) Register(ctx context.Context, stream *domain.Stream, bufferWri
 				"input_priority", best.Input.Priority,
 				"err", err,
 			)
+			// Route the synchronous start failure through the normal degrade
+			// path so the input is marked degraded, error history recorded, and
+			// failover / exhausted-handling engage. Without this the stream sat
+			// Idle while StreamStatus reported Active and the reconciler was
+			// blind (A-5): multi-input promotes a backup; single-input flips to
+			// Degraded and the probe loop keeps trying to recover.
+			s.ReportInputError(stream.Code, best.Input.Priority, err)
 		} else {
 			// Record the baseline event so the UI's switch history shows
 			// "stream came up on input N at T" before any failover happens.
