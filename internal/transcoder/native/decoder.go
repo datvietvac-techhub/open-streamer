@@ -144,6 +144,48 @@ func cpuDecoderFallback(name string) string {
 	}
 }
 
+// decoderCodecFamily maps a libavcodec decoder name to the elementary-
+// stream codec it decodes. The cuvid (NVDEC) and CPU variants of the same
+// codec share a family. Used to detect when an incoming video frame's
+// codec no longer matches the active decoder so the pipeline can rebuild
+// it instead of crash-looping on AVERROR_INVALIDDATA (A-3). An empty name
+// defaults to H.264 (NewDecoder's default). Unknown names map to
+// esCodecUnknown so a mismatch is reported (forcing a rebuild) rather than
+// silently treated as matching.
+func decoderCodecFamily(name string) esFrameCodec {
+	switch name {
+	case "hevc", "hevc_cuvid":
+		return esCodecH265
+	case "h264", "h264_cuvid", "":
+		return esCodecH264
+	default:
+		return esCodecUnknown
+	}
+}
+
+// videoDecoderNameForCodec resolves the libavcodec decoder name for an
+// incoming elementary-stream codec, preserving the GPU (cuvid) vs CPU lane
+// of the currently-active decoder. A raw-TS or AV source whose video is
+// HEVC must decode with hevc / hevc_cuvid; feeding H.265 NAL units to an
+// H.264 decoder returns AVERROR_INVALIDDATA on every packet (A-3).
+// newDecoderWithFallback degrades the cuvid choice to CPU if NVDEC can't
+// open it on this host.
+func videoDecoderNameForCodec(current string, codec esFrameCodec) string {
+	gpu := isCUVIDDecoder(current)
+	switch codec { //nolint:exhaustive // default covers esCodecH264 + non-video codecs routed defensively as H.264
+	case esCodecH265:
+		if gpu {
+			return "hevc_cuvid"
+		}
+		return "hevc"
+	default: // esCodecH264 (and, defensively, anything else routed as video)
+		if gpu {
+			return "h264_cuvid"
+		}
+		return "h264"
+	}
+}
+
 // Decode submits one encoded packet and drains any frames the decoder
 // is ready to release. Returns CLONED frames — the caller takes
 // ownership and MUST call Free on each one to avoid leaking libav

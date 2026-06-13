@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/asticode/go-astiav"
+	gocodec "github.com/yapingcat/gomedia/go-codec"
 )
 
 // PipelineConfig describes one stream's full transcode topology: a
@@ -629,6 +630,95 @@ func buildRendition(r RenditionConfig) (*Encoder, *Scaler, *Watermarker, error) 
 	return enc, sc, wm, nil
 }
 
+// ensureVideoDecoder rebuilds the video decoder when the incoming
+// elementary-stream codec differs from the codec the active decoder was
+// opened for. The startup decoder is always H.264 (decoderCodecForBackend
+// assumes H.264 sources), but a raw-TS or AV source can carry HEVC — from
+// the very first frame, or after an upstream mux switches H.264→HEVC on an
+// established stream. Feeding H.265 NAL units to an H.264 decoder returns
+// AVERROR_INVALIDDATA on every packet, which the supervisor escalates to a
+// terminal error → respawn → same first frame → permanent crash loop with
+// restart_count climbing (A-3). HEVC decode infrastructure already exists
+// (hevc / hevc_cuvid via newDecoderWithFallback); this just selects it on
+// demand.
+//
+// On a rebuild the old decoder is flushed through the surviving encoder so
+// the cutover stays monotonic in encoder PTS space; the keyframe gate is
+// reset so decode resumes on the new codec's first IRAP; and on the GPU
+// path the scale graphs rebind to the new decoder's freshly-allocated CUDA
+// pool (same reason as switchInputGPU). The encoder is never rebuilt — it
+// operates on decoded YUV/CUDA frames and is codec-agnostic — so the output
+// stream stays continuous. Returns any frames flushed from the old decoder
+// (nil in the common start-of-stream case where it has decoded nothing).
+//
+// Non-video codecs (AAC, unknown) and a decoder that already matches the
+// source return immediately, so the per-frame call on the hot path is a
+// cheap family compare.
+func (p *StreamPipeline) ensureVideoDecoder(codec esFrameCodec) ([]OutputFrame, error) {
+	if codec != esCodecH264 && codec != esCodecH265 {
+		return nil, nil // not a video codec routed to the decoder
+	}
+	p.mu.Lock()
+	current := p.cfg.Decoder.Codec
+	p.mu.Unlock()
+	if decoderCodecFamily(current) == codec {
+		return nil, nil // decoder already matches the source codec
+	}
+
+	newName := videoDecoderNameForCodec(current, codec)
+	slog.Warn("native: source video codec differs from decoder — rebuilding",
+		"decoder", current, "rebuild_to", newName)
+
+	p.mu.Lock()
+	oldDec := p.decoder
+	p.mu.Unlock()
+
+	flushed, err := oldDec.Flush()
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: flush decoder on codec change: %w", err)
+	}
+	out, err := p.runFramesThroughEncoder(flushed)
+	if err != nil {
+		return out, err
+	}
+	oldDec.Close()
+
+	cfg := p.cfg.Decoder
+	cfg.Codec = newName
+	if p.useGPU {
+		cfg.cuda = p.cuda // new decoder emits CUDA frames into a fresh auto-pool
+		for _, gs := range p.gpuScalers {
+			if gs != nil {
+				gs.MarkSourceChanged() // rebind scale_cuda to the new pool
+			}
+		}
+	}
+	newDec, err := newDecoderWithFallback(cfg)
+	if err != nil {
+		return out, fmt.Errorf("pipeline: alloc %s decoder for codec change: %w", newName, err)
+	}
+
+	p.mu.Lock()
+	p.decoder = newDec
+	p.cfg.Decoder = cfg
+	p.mu.Unlock()
+	p.sawKeyframe = false
+	p.pendingForceKeyframe = true
+	return out, nil
+}
+
+// isVideoKeyframeAnnexB reports whether an Annex-B access unit carries a
+// random-access point for its codec — an H.264 IDR (NAL type 5) or an HEVC
+// IRAP. The AV-path keyframe gate uses it so decode resumes on a clean SAP
+// regardless of codec (the raw-TS path already tags f.keyframe per codec at
+// demux time).
+func isVideoKeyframeAnnexB(codec esFrameCodec, data []byte) bool {
+	if codec == esCodecH265 {
+		return gocodec.IsH265IDRFrame(data)
+	}
+	return isH264KeyframeAnnexB(data)
+}
+
 // ProcessPacket feeds one compressed packet from the active input into
 // the decoder → scaler → encoder chain and returns the encoded packets
 // ready to ship to the output buffer. Returns (nil, nil) when the
@@ -676,9 +766,18 @@ func (p *StreamPipeline) ProcessPacket(data []byte, codec esFrameCodec, pts, dts
 		return p.handleAudio([]esFrame{{data: data, pts: pts, dts: dts, codec: esCodecAAC}})
 	}
 
+	// Rebuild the decoder if this source's video codec differs from the
+	// active decoder (HEVC source, or a mid-stream H.264→HEVC switch) — see
+	// ensureVideoDecoder (A-3). Any frames flushed from the old decoder are
+	// carried through and prepended to this call's output.
+	rebuilt, err := p.ensureVideoDecoder(codec)
+	if err != nil {
+		return rebuilt, err
+	}
+
 	if !p.sawKeyframe {
-		if !isH264KeyframeAnnexB(data) {
-			return nil, nil
+		if !isVideoKeyframeAnnexB(codec, data) {
+			return rebuilt, nil
 		}
 		p.sawKeyframe = true
 	}
@@ -689,9 +788,10 @@ func (p *StreamPipeline) ProcessPacket(data []byte, codec esFrameCodec, pts, dts
 
 	frames, err := dec.Decode(data, pts, dts)
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: decode: %w", err)
+		return rebuilt, fmt.Errorf("pipeline: decode: %w", err)
 	}
-	return p.runFramesThroughEncoder(frames)
+	encoded, err := p.runFramesThroughEncoder(frames)
+	return append(rebuilt, encoded...), err
 }
 
 // decodeAndEncodeESFrames feeds a batch of demuxed video ES access
@@ -702,18 +802,28 @@ func (p *StreamPipeline) decodeAndEncodeESFrames(frames []esFrame) ([]OutputFram
 	if len(frames) == 0 {
 		return nil, nil
 	}
-	p.mu.Lock()
-	dec := p.decoder
-	p.mu.Unlock()
 
 	var out []OutputFrame
 	for _, f := range frames {
+		// Rebuild the decoder if the demuxed codec differs from the active
+		// one — a raw-TS source whose video is HEVC (esCodecH265) would
+		// otherwise feed H.265 into the H.264 decoder and crash-loop the
+		// subprocess (A-3). No-op once the decoder matches.
+		rebuilt, err := p.ensureVideoDecoder(f.codec)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, rebuilt...)
+
 		if !p.sawKeyframe {
 			if !f.keyframe {
 				continue
 			}
 			p.sawKeyframe = true
 		}
+		p.mu.Lock()
+		dec := p.decoder
+		p.mu.Unlock()
 		decoded, err := dec.Decode(f.data, f.pts, f.dts)
 		if err != nil {
 			return out, fmt.Errorf("pipeline: decode: %w", err)
