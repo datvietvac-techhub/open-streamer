@@ -96,6 +96,10 @@ type Service struct {
 	tracker      sessions.Tracker
 	m            *metrics.Metrics
 
+	// limiter caps concurrent playback connections (per stream + global) for
+	// the long-lived play/push protocols — see conn_limiter.go (A-1).
+	limiter *connLimiter
+
 	mu      sync.Mutex
 	streams map[domain.StreamCode]*streamState
 
@@ -148,11 +152,15 @@ func New(i do.Injector) (*Service, error) {
 	}
 
 	svc := &Service{
-		cfg:          pub,
-		buf:          buf,
-		bus:          bus,
-		tracker:      tracker,
-		m:            m,
+		cfg:     pub,
+		buf:     buf,
+		bus:     bus,
+		tracker: tracker,
+		m:       m,
+		limiter: newConnLimiter(
+			resolvePlaybackCap(pub.MaxPlaybackConnPerStream, defaultMaxPlaybackConnPerStream),
+			resolvePlaybackCap(pub.MaxPlaybackConnTotal, defaultMaxPlaybackConnTotal),
+		),
 		streams:      make(map[domain.StreamCode]*streamState),
 		mediaBuffer:  make(map[domain.StreamCode]domain.StreamCode),
 		rtspMounts:   make(map[string]*gortsplib.ServerStream),
@@ -172,9 +180,13 @@ func New(i do.Injector) (*Service, error) {
 // NewServiceForTesting creates a Service without DI, for use in integration tests.
 func NewServiceForTesting(cfg config.PublisherConfig, buf *buffer.Service, bus events.Bus) *Service {
 	svc := &Service{
-		cfg:          cfg,
-		buf:          buf,
-		bus:          bus,
+		cfg: cfg,
+		buf: buf,
+		bus: bus,
+		limiter: newConnLimiter(
+			resolvePlaybackCap(cfg.MaxPlaybackConnPerStream, defaultMaxPlaybackConnPerStream),
+			resolvePlaybackCap(cfg.MaxPlaybackConnTotal, defaultMaxPlaybackConnTotal),
+		),
 		streams:      make(map[domain.StreamCode]*streamState),
 		mediaBuffer:  make(map[domain.StreamCode]domain.StreamCode),
 		rtspMounts:   make(map[string]*gortsplib.ServerStream),

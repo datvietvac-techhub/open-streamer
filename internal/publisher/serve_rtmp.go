@@ -54,6 +54,14 @@ func (s *Service) HandleRTMPPlay(
 		return fmt.Errorf("stream %q not active", key)
 	}
 
+	// Cap concurrent playback connections before allocating the per-session
+	// demux pipeline + tsBuffer (A-1). Released on every return path via defer.
+	if !s.limiter.acquire(code) {
+		slog.Warn("publisher: RTMP play rejected — playback cap reached", "stream_code", code, "remote", info.RemoteAddr)
+		return fmt.Errorf("stream %q: playback connection cap reached", key)
+	}
+	defer s.limiter.release(code)
+
 	sub, err := s.buf.Subscribe(bufID)
 	if err != nil {
 		return fmt.Errorf("subscribe %q: %w", key, err)

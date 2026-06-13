@@ -97,6 +97,14 @@ type BufferConfig struct {
 type PublisherConfig struct {
 	HLS  PublisherHLSConfig  `mapstructure:"hls" json:"hls" yaml:"hls"`
 	DASH PublisherDASHConfig `mapstructure:"dash" json:"dash" yaml:"dash"`
+
+	// MaxPlaybackConnPerStream / MaxPlaybackConnTotal cap concurrent RTSP /
+	// RTMP / SRT / HTTP-MPEGTS playback connections (per stream and globally)
+	// to bound the heavyweight per-connection state a flood can allocate (A-1).
+	// Unset (0) applies a protective default; a negative value means unlimited.
+	// HLS/DASH viewers go over stateless HTTP and are not counted here.
+	MaxPlaybackConnPerStream int `mapstructure:"max_playback_conn_per_stream" json:"max_playback_conn_per_stream" yaml:"max_playback_conn_per_stream"`
+	MaxPlaybackConnTotal     int `mapstructure:"max_playback_conn_total" json:"max_playback_conn_total" yaml:"max_playback_conn_total"`
 }
 
 // PublisherHLSConfig is filesystem + live packaging for Apple HLS (m3u8 + segments).
