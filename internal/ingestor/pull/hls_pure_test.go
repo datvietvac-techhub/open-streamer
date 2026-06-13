@@ -6,9 +6,14 @@ package pull
 // network or goroutines.
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -251,4 +256,98 @@ func TestIsMediaTag(t *testing.T) {
 	} {
 		assert.False(t, isMediaTag(l), "%q should not be a media tag", l)
 	}
+}
+
+// ─── A-7: response-body size caps ────────────────────────────────────────────
+
+// countingReader yields the configured number of bytes and records how many
+// were actually read, so a test can prove readCapped rejects an oversized body
+// WITHOUT consuming it all (the OOM the cap exists to prevent).
+type countingReader struct {
+	remaining int
+	read      int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	if c.remaining <= 0 {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if n > c.remaining {
+		n = c.remaining
+	}
+	c.remaining -= n
+	c.read += n
+	return n, nil
+}
+
+func TestReadCapped(t *testing.T) {
+	t.Parallel()
+	t.Run("under_cap_returns_body", func(t *testing.T) {
+		t.Parallel()
+		got, err := readCapped(strings.NewReader("hello"), 100)
+		require.NoError(t, err)
+		assert.Equal(t, "hello", string(got))
+	})
+	t.Run("exactly_at_cap_allowed", func(t *testing.T) {
+		t.Parallel()
+		got, err := readCapped(strings.NewReader("12345"), 5)
+		require.NoError(t, err)
+		assert.Len(t, got, 5)
+	})
+	t.Run("over_cap_rejected_without_full_read", func(t *testing.T) {
+		t.Parallel()
+		cr := &countingReader{remaining: 10_000_000} // "10 MB" body
+		_, err := readCapped(cr, 100)
+		require.ErrorIs(t, err, errBodyTooLarge)
+		assert.LessOrEqual(t, cr.read, 101, "must not read more than cap+1 bytes (no OOM)")
+	})
+}
+
+func TestFetchSegmentOnce_RejectsOversizedSegment(t *testing.T) {
+	orig := hlsMaxSegmentBytes
+	hlsMaxSegmentBytes = 64
+	t.Cleanup(func() { hlsMaxSegmentBytes = orig })
+
+	t.Run("oversized_body_rejected", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(make([]byte, 1<<20)) // 1 MiB >> 64 B cap
+		}))
+		defer srv.Close()
+		r := &HLSReader{segClient: srv.Client()}
+		_, err := r.fetchSegmentOnce(context.Background(), srv.URL)
+		require.ErrorIs(t, err, errBodyTooLarge)
+	})
+
+	t.Run("within_cap_succeeds", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("tiny segment"))
+		}))
+		defer srv.Close()
+		r := &HLSReader{segClient: srv.Client()}
+		got, err := r.fetchSegmentOnce(context.Background(), srv.URL)
+		require.NoError(t, err)
+		assert.Equal(t, "tiny segment", string(got))
+	})
+}
+
+// TestParseM3U8_PlaylistBodyCapped — a playlist whose bytes exceed the cap is
+// truncated by the LimitReader, so the parser sees only the first cap bytes and
+// can't be driven to allocate a huge segment slice.
+func TestParseM3U8_PlaylistBodyCapped(t *testing.T) {
+	orig := hlsMaxPlaylistBytes
+	hlsMaxPlaylistBytes = 128
+	t.Cleanup(func() { hlsMaxPlaylistBytes = orig })
+
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n")
+	for i := 0; i < 10_000; i++ {
+		b.WriteString("#EXTINF:6.0,\nseg" + strconv.Itoa(i) + ".ts\n")
+	}
+	base, _ := url.Parse("http://h/p.m3u8")
+	res, err := parseM3U8(strings.NewReader(b.String()), base)
+	require.NoError(t, err)
+	require.NotNil(t, res.media)
+	assert.Less(t, len(res.media.segments), 100,
+		"playlist body cap must bound the parsed segment slice (got %d)", len(res.media.segments))
 }
