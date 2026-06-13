@@ -790,6 +790,16 @@ func (c *Coordinator) stopDVR(ctx context.Context, code domain.StreamCode) {
 func (c *Coordinator) blobProfiles(stream *domain.Stream) []blob.ProfileSub {
 	rends := buffer.RenditionsForTranscoder(stream.Code, stream.Transcoder)
 	if len(rends) == 0 {
+		// Non-transcoded: the p0 lane records the stream's main buffer, but the
+		// blob writer only ingests AVPackets. A raw-TS main buffer (UDP /
+		// HLS-pull / HTTP-TS / SRT / file) records ZERO bytes while the status
+		// still reports "recording" (D-2). Refuse loudly so no catalog or
+		// Recording row is created and the status never lies.
+		if domain.StreamMainBufferIsTS(stream) {
+			slog.Warn("coordinator: DVR unsupported for a raw-TS source (writer records nothing) — skipping recording",
+				"stream_code", stream.Code)
+			return nil
+		}
 		return []blob.ProfileSub{{ID: "p0", BufferID: stream.Code, IsAudioSource: true}}
 	}
 	best := buffer.BestRenditionIndex(rends)

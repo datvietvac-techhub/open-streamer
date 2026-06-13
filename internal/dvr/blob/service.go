@@ -87,13 +87,24 @@ func (s *Service) StartRecording(ctx context.Context, code domain.StreamCode, pr
 		return nil, err
 	}
 
+	cat := newCatalog(code, profiles, cfg)
+	// Merge prior on-disk coverage so retention sees (and prunes) pre-restart
+	// hours instead of orphaning them. A fresh empty catalog overwriting
+	// catalog.json on every restart defeated retention and grew disk without
+	// bound (D-1). Hours/Available/Gaps are wall- and size-anchored, so
+	// retention stays correct regardless of the per-run media origin; the new
+	// run anchors its own origin, so recent timeshift keeps working.
+	if prev, ok, lerr := LoadCatalog(streamDir); lerr == nil && ok && prev.Format == CatalogFormat {
+		mergePriorCoverage(cat, prev)
+	}
+
 	s.mu.Lock()
 	if _, ok := s.active[code]; ok {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("blob: already recording %s", code)
 	}
 	rctx, cancel := context.WithCancel(context.WithoutCancel(ctx)) //nolint:contextcheck // lane outlives the request
-	rec := &recording{streamDir: streamDir, cancel: cancel, cat: newCatalog(code, profiles, cfg)}
+	rec := &recording{streamDir: streamDir, cancel: cancel, cat: cat}
 	s.active[code] = rec
 	s.mu.Unlock()
 
@@ -271,6 +282,39 @@ func newCatalog(code domain.StreamCode, profiles []ProfileSub, cfg *domain.Strea
 		cat.Retention = RetentionCfg{MaxAgeSec: cfg.RetentionSec, MaxSizeGB: int(cfg.MaxSizeGB)}
 	}
 	return cat
+}
+
+// mergePriorCoverage carries the on-disk coverage of a previously-saved catalog
+// into a freshly-built one (same stream, new run), so a restart no longer wipes
+// the record of pre-restart hours — which had left their blobs orphaned and
+// uncounted by retention, growing disk without bound (D-1).
+//
+// Only wall/size-anchored coverage is carried (Hours, Available, Gaps); profile
+// metadata and Retention come from the new config. Media-origin is deliberately
+// NOT carried — the new run anchors its own origin so recent timeshift keeps
+// working; pre-restart hours stay listed and prunable (retention is wall/size
+// based) even though playing back across the restart boundary needs a per-hour
+// reader anchor (follow-up). Profiles present only in the old catalog (ladder
+// reorder / removed rung) are carried forward so their hours remain prunable.
+func mergePriorCoverage(cat, prev *Catalog) {
+	prevByID := make(map[string]*ProfileDesc, len(prev.Profiles))
+	for i := range prev.Profiles {
+		prevByID[prev.Profiles[i].ID] = &prev.Profiles[i]
+	}
+	have := make(map[string]bool, len(cat.Profiles))
+	for i := range cat.Profiles {
+		have[cat.Profiles[i].ID] = true
+		if p, ok := prevByID[cat.Profiles[i].ID]; ok {
+			cat.Profiles[i].Hours = p.Hours
+			cat.Profiles[i].Available = p.Available
+		}
+	}
+	for i := range prev.Profiles {
+		if !have[prev.Profiles[i].ID] {
+			cat.Profiles = append(cat.Profiles, prev.Profiles[i])
+		}
+	}
+	cat.Gaps = prev.Gaps
 }
 
 // segDurFromCfg resolves the fragment target duration.
