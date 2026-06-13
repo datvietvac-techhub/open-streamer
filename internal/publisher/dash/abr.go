@@ -42,10 +42,30 @@ type ABRMaster struct {
 	segDur       time.Duration
 	window       int
 
-	mu       sync.Mutex
-	shards   map[string]ShardSnapshot // slug → latest snapshot
-	debounce *time.Timer
-	stopped  bool
+	mu        sync.Mutex
+	shards    map[string]ShardSnapshot // slug → latest snapshot
+	sharedAST time.Time                // ladder-wide availabilityStart, set once (B-4)
+	debounce  *time.Timer
+	stopped   bool
+}
+
+// SharedAST returns the ladder-wide availabilityStartTime, setting it to
+// `candidate` on the first call with a non-zero candidate and returning that
+// same value on every later call. Every shard anchors its timeline + pacing to
+// this ONE value so the published AST is correct for all renditions, every
+// shard's behindPrevSegEnd paces against the same origin, and the dynamic-MPD
+// AST never changes mid-stream regardless of which shard flushes first (B-4).
+//
+// Safe for concurrent use; called from each shard's packager under that
+// shard's mutex — like UpdateShard it only touches m's own state, so there is
+// no cross-lock deadlock.
+func (m *ABRMaster) SharedAST(candidate time.Time) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sharedAST.IsZero() && !candidate.IsZero() {
+		m.sharedAST = candidate
+	}
+	return m.sharedAST
 }
 
 // ShardSnapshot is a point-in-time view of one rendition, produced by

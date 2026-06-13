@@ -324,6 +324,51 @@ func TestPackager_PairingTimeout_VideoOnly(t *testing.T) {
 	<-doneCh
 }
 
+// TestPackager_NonAudioShardEmitsBeforePairingDeadline covers B-4: a shard that
+// doesn't pack audio (an ABR non-primary rendition) must emit its first segment
+// at the first IDR WITHOUT waiting out the pairing window for audio that can't
+// arrive. With a long pairing timeout the segment must still appear promptly —
+// pre-fix it blocked until the deadline, anchoring the shard's availStart ~1 s
+// late and skewing the ladder AST + per-shard pacing.
+func TestPackager_NonAudioShardEmitsBeforePairingDeadline(t *testing.T) {
+	p, bs, id, done := setupPackager(t, false) // PackAudio=false (non-primary ABR shard)
+	defer done()
+	// A long pairing window: if the shard waited for audio, no segment would
+	// appear within the test's 2 s budget.
+	p.cfg.PairingTimeout = 30 * time.Second
+	p.state = NewStateMachine(p.cfg.PairingTimeout)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sub, err := bs.Subscribe(id)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer bs.Unsubscribe(id, sub)
+
+	doneCh := make(chan struct{})
+	go func() {
+		p.Run(ctx, sub)
+		close(doneCh)
+	}()
+
+	pushAV(t, bs, id, domain.AVCodecH264, buildH264IDR(), 0, 0, true)
+	for i := 1; i <= 20; i++ {
+		pts := uint64(i) * 40 //nolint:gosec
+		isKey := i == 20
+		frame := buildH264NonIDR()
+		if isKey {
+			frame = buildH264IDR()
+		}
+		pushAV(t, bs, id, domain.AVCodecH264, frame, pts, pts, isKey)
+	}
+	// Must appear well within the 30 s pairing window — proving the non-audio
+	// shard paired on video alone instead of waiting for audio.
+	waitForFile(t, filepath.Join(p.cfg.StreamDir, "seg_v_00001.m4s"), 2*time.Second)
+	cancel()
+	<-doneCh
+}
+
 // TestPackager_NonPackShard_DropsIncomingAACFrames — when PackAudio=false
 // (typical ABR non-primary shard), incoming AAC frames must not enqueue.
 // Cut returns AudioCount=0 because audioSR=0, so the drain branch in
