@@ -80,6 +80,15 @@ func (s *Service) HandleMPEGTS() http.HandlerFunc {
 			return
 		}
 
+		// Cap concurrent playback connections before allocating any per-client
+		// state (A-1). Released on every return path via defer.
+		if !s.limiter.acquire(code) {
+			slog.Warn("publisher: mpegts connection rejected — playback cap reached", "stream_code", code, "remote", r.RemoteAddr)
+			http.Error(w, "too many connections", http.StatusServiceUnavailable)
+			return
+		}
+		defer s.limiter.release(code)
+
 		sub, err := s.buf.Subscribe(bufID)
 		if err != nil {
 			// Buffer was deleted between mpegtsTargetFor and Subscribe —

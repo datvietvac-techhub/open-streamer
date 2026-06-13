@@ -226,6 +226,24 @@ func (h *rtspHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respo
 	if code == "" {
 		return &base.Response{StatusCode: base.StatusBadRequest}, nil
 	}
+
+	// A repeated PLAY on the same session (e.g. after PAUSE) is already counted
+	// and tracked — don't re-acquire the cap or overwrite the entry.
+	h.svc.rtspSessionsMu.Lock()
+	_, already := h.svc.rtspSessions[ctx.Session]
+	h.svc.rtspSessionsMu.Unlock()
+	if already {
+		return &base.Response{StatusCode: base.StatusOK}, nil
+	}
+
+	// Cap concurrent playback connections before tracking the session (A-1).
+	// The rtspSessions entry (created below on success) is the release marker
+	// OnSessionClose uses, so it is stored even when the tracker is absent.
+	if !h.svc.limiter.acquire(code) {
+		slog.Warn("publisher: RTSP play rejected — playback cap reached", "stream_code", code)
+		return &base.Response{StatusCode: base.StatusServiceUnavailable}, nil
+	}
+
 	ua := ""
 	if ctx.Request != nil {
 		if v, ok := ctx.Request.Header["User-Agent"]; ok && len(v) > 0 {
@@ -233,11 +251,9 @@ func (h *rtspHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respo
 		}
 	}
 	sess := openRTSPSession(context.Background(), h.svc.tracker, code, ctx.Conn.NetConn().RemoteAddr(), ua)
-	if sess != nil {
-		h.svc.rtspSessionsMu.Lock()
-		h.svc.rtspSessions[ctx.Session] = &rtspClient{ps: sess}
-		h.svc.rtspSessionsMu.Unlock()
-	}
+	h.svc.rtspSessionsMu.Lock()
+	h.svc.rtspSessions[ctx.Session] = &rtspClient{ps: sess, code: code}
+	h.svc.rtspSessionsMu.Unlock()
 	return &base.Response{StatusCode: base.StatusOK}, nil
 }
 
@@ -260,8 +276,11 @@ func (h *rtspHandler) OnSessionClose(ctx *gortsplib.ServerHandlerOnSessionCloseC
 	if !ok {
 		return
 	}
-	rc.pollBytes(ctx.Session)
-	rc.ps.close()
+	h.svc.limiter.release(rc.code) // pair the OnPlay acquire (A-1)
+	if rc.ps != nil {
+		rc.pollBytes(ctx.Session)
+		rc.ps.close()
+	}
 }
 
 // lookupStream matches a request path to a registered ServerStream.
@@ -420,8 +439,9 @@ func runRTSPPipeline(
 // directly.
 type rtspClient struct {
 	ps           *playSession
-	gortspSess   rtspStatsSource // captured for nil-safe pollBytes when the close ctx isn't handy
-	lastOutbound atomic.Uint64   // cumulative bytes seen on the previous poll
+	code         domain.StreamCode // stream code, for releasing the playback cap on close (ps may be nil when no tracker)
+	gortspSess   rtspStatsSource   // captured for nil-safe pollBytes when the close ctx isn't handy
+	lastOutbound atomic.Uint64     // cumulative bytes seen on the previous poll
 }
 
 // rtspStatsSource is the subset of *gortsplib.ServerSession pollBytes
@@ -447,6 +467,9 @@ func (c *rtspClient) pollBytes(ss rtspStatsSource) {
 	}
 	if ss == nil {
 		return
+	}
+	if c.ps == nil {
+		return // cap-only entry (no sessions tracker) — nothing to credit
 	}
 	stats := ss.Stats()
 	if stats == nil {
@@ -475,7 +498,7 @@ func (s *Service) touchRTSPSessions(streamCode domain.StreamCode) {
 	s.rtspSessionsMu.Lock()
 	victims := make([]victim, 0, len(s.rtspSessions))
 	for ss, rc := range s.rtspSessions {
-		if rc != nil && rc.ps.streamCode == streamCode {
+		if rc != nil && rc.ps != nil && rc.ps.streamCode == streamCode {
 			rc.gortspSess = ss
 			victims = append(victims, victim{client: rc, ss: ss})
 		}

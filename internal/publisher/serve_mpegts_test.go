@@ -204,6 +204,65 @@ func TestHandleMPEGTS_ClientDisconnectReleasesSubscriber(t *testing.T) {
 	}
 }
 
+// TestHandleMPEGTS_PlaybackCapRejectsAndReleases verifies A-1 end-to-end: with
+// a per-stream cap of 1, a second concurrent connection is rejected with 503,
+// and once the first connection closes the freed slot lets a new one through
+// (the deferred release in the handler ran).
+func TestHandleMPEGTS_PlaybackCapRejectsAndReleases(t *testing.T) {
+	t.Parallel()
+
+	streamCode := domain.StreamCode("ch_cap")
+	buf := buffer.NewServiceForTesting(64)
+	buf.Create(streamCode)
+	bus := events.New(4, 64)
+	pub := publisher.NewServiceForTesting(config.PublisherConfig{
+		HLS:                      config.PublisherHLSConfig{Dir: t.TempDir()},
+		DASH:                     config.PublisherDASHConfig{Dir: t.TempDir()},
+		MaxPlaybackConnPerStream: 1,
+	}, buf, bus)
+	require.NoError(t, pub.Start(context.Background(), &domain.Stream{
+		Code:      streamCode,
+		Protocols: &domain.OutputProtocols{MPEGTS: true},
+	}))
+	t.Cleanup(func() { pub.Stop(streamCode) })
+
+	r := chi.NewRouter()
+	r.Get("/{code}/mpegts", pub.HandleMPEGTS())
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+	url := srv.URL + "/ch_cap/mpegts"
+
+	// conn1 occupies the only slot (acquire happens before the 200 header).
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	req1, _ := http.NewRequestWithContext(ctx1, http.MethodGet, url, nil)
+	resp1, err := http.DefaultClient.Do(req1)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp1.StatusCode)
+
+	// conn2 is over the per-stream cap → 503, no slot held.
+	resp2 := mustGet(t, url)
+	assert.Equal(t, http.StatusServiceUnavailable, resp2.StatusCode)
+	_ = resp2.Body.Close()
+
+	// Release conn1; the deferred release frees the slot.
+	cancel1()
+	_, _ = io.Copy(io.Discard, resp1.Body)
+	_ = resp1.Body.Close()
+
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel() // release the probe's own slot before the next tick
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return false
+		}
+		ok := resp.StatusCode == http.StatusOK
+		_ = resp.Body.Close()
+		return ok
+	}, 2*time.Second, 50*time.Millisecond, "slot must free after conn1 closes")
+}
+
 // makeTSPayload returns one 188-byte TS-shaped packet whose 5th byte is the
 // given marker. Used so the test can assert on packet contents flowing end-
 // to-end without bringing in a full TS builder.

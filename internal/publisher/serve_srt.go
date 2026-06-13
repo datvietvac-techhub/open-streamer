@@ -117,6 +117,14 @@ func (s *Service) srtHandleSubscribe(ctx context.Context, conn srt.Conn) {
 		return
 	}
 
+	// Cap concurrent playback connections before allocating the subscriber +
+	// muxer state (A-1). The conn is closed by the deferred conn.Close above.
+	if !s.limiter.acquire(streamCode) {
+		slog.Warn("publisher: SRT play rejected — playback cap reached", "stream_code", streamCode, "remote", conn.RemoteAddr())
+		return
+	}
+	defer s.limiter.release(streamCode)
+
 	sub, err := s.buf.Subscribe(bufID)
 	if err != nil {
 		slog.Warn("publisher: SRT subscribe failed", "stream_code", streamCode, "err", err)
