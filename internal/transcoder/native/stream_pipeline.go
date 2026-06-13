@@ -639,7 +639,7 @@ func buildRendition(r RenditionConfig) (*Encoder, *Scaler, *Watermarker, error) 
 // derives its own monotonic PTS via NextPTS — that's the simplest way
 // to keep the encoder's output timing stable across input switches
 // where the source PTS bases differ.
-func (p *StreamPipeline) ProcessPacket(data []byte, pts, dts int64) ([]OutputFrame, error) {
+func (p *StreamPipeline) ProcessPacket(data []byte, codec esFrameCodec, pts, dts int64) ([]OutputFrame, error) {
 	if p.isClosed() {
 		return nil, errors.New("native: process on closed pipeline")
 	}
@@ -665,6 +665,15 @@ func (p *StreamPipeline) ProcessPacket(data []byte, pts, dts int64) ([]OutputFra
 			return append(video, audio...), err
 		}
 		return append(video, audio...), nil
+	}
+
+	// AV-path (RTSP / RTMP / copy / mixer): one ES access unit per call.
+	// Route AAC to the audio path — feeding it to the H.264 decoder was
+	// B-1 (audio silently dropped / decoder crash-loop). Video falls
+	// through to the keyframe-gated decode below, now carrying the real
+	// source PTS so the output timeline tracks the source (B-2).
+	if codec == esCodecAAC {
+		return p.handleAudio([]esFrame{{data: data, pts: pts, dts: dts, codec: esCodecAAC}})
 	}
 
 	if !p.sawKeyframe {
@@ -1164,7 +1173,11 @@ func (p *StreamPipeline) runFramesThroughEncoder(frames []*astiav.Frame) ([]Outp
 func (p *StreamPipeline) encodeOne(f *astiav.Frame) ([]OutputFrame, error) {
 	srcPTS := f.Pts()
 	if srcPTS <= 0 {
-		srcPTS = p.encoders[0].NextPTS()
+		// AV-path frames now carry the real source PTS (B-2); this fallback
+		// only fires for genuinely PTS-less frames. Space them by the
+		// nominal frame duration, not the bare frame index, so the timeline
+		// doesn't collapse to 1 ms/frame (~1000 fps).
+		srcPTS = p.encoders[0].NextPTS() * p.videoFrameDurMs
 	}
 	// Rebase onto the continuous output clock so the encoder emits a
 	// monotonic timeline that survives input switches — the source

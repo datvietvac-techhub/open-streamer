@@ -100,12 +100,12 @@ func (s *Server) dispatch(stream pb.Transcoder_RunServer, p *StreamPipeline, req
 	switch {
 	case req.GetPacket() != nil:
 		pkt := req.GetPacket()
-		// PTS / DTS not yet on the InputPacket proto — decoder uses
-		// in-band PES timing from the Annex-B bytes for B-frame reorder
-		// and the encoder derives its own monotonic output PTS via
-		// NextPTS, so passing 0 is correct for now. Adding wire-level
-		// PTS becomes important when audio joins the pipeline (P6).
-		out, err := p.ProcessPacket(pkt.GetData(), 0, 0)
+		// AV-path packets carry codec + ms PTS/DTS so audio is routed to
+		// the audio path (not fed to the H.264 decoder) and the video
+		// timeline tracks the source instead of collapsing to a frame
+		// counter. Raw-TS chunks carry CODEC_UNSPECIFIED / 0 and recover
+		// in-band PES timing inside the TS-input path.
+		out, err := p.ProcessPacket(pkt.GetData(), codecFromProto(pkt.GetCodec()), pkt.GetPtsMs(), pkt.GetDtsMs())
 		if err != nil {
 			return fmt.Errorf("process packet: %w", err)
 		}
@@ -187,6 +187,23 @@ func protoCodec(c esFrameCodec) pb.Codec {
 		return pb.Codec_CODEC_AAC
 	default:
 		return pb.Codec_CODEC_UNSPECIFIED
+	}
+}
+
+// codecFromProto maps the wire Codec enum onto the pipeline's local
+// esFrameCodec — the inverse of protoCodec — so the AV-path ProcessPacket
+// can route audio vs video. Unknown/unspecified falls through to the
+// video branch (unchanged legacy behaviour).
+func codecFromProto(c pb.Codec) esFrameCodec {
+	switch c { //nolint:exhaustive // default maps CODEC_UNSPECIFIED (and any unmapped codec) to esCodecUnknown
+	case pb.Codec_CODEC_H264:
+		return esCodecH264
+	case pb.Codec_CODEC_H265:
+		return esCodecH265
+	case pb.Codec_CODEC_AAC:
+		return esCodecAAC
+	default:
+		return esCodecUnknown
 	}
 }
 

@@ -116,7 +116,7 @@ func feed(t *testing.T, p *StreamPipeline, enc *Encoder, w, h, nFrames int) int 
 		frame.Free()
 		require.NoError(t, err)
 		for _, pkt := range pkts {
-			out, err := p.ProcessPacket(pkt.Data, int64(i), int64(i))
+			out, err := p.ProcessPacket(pkt.Data, esCodecH264, int64(i), int64(i))
 			require.NoError(t, err)
 			for _, op := range out {
 				outBytes += len(op.Data)
@@ -335,9 +335,26 @@ func TestStreamPipeline_ProcessAfterCloseReturnsError(t *testing.T) {
 	t.Parallel()
 	p := renditionPipeline(t, 25)
 	p.Close()
-	_, err := p.ProcessPacket([]byte{0}, 0, 0)
+	_, err := p.ProcessPacket([]byte{0}, esCodecH264, 0, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "closed")
+}
+
+// Regression for B-1: on the AV-path an AAC packet must be routed to the
+// audio path, never fed to the H.264 decoder. Before the first video IDR
+// it is gated on sawKeyframe (no output) — but it must NOT reach the
+// decoder, which would error / crash-loop the subprocess (the old bug fed
+// every AV packet, audio included, straight to dec.Decode).
+func TestProcessPacket_AVPathAudioNotFedToDecoder(t *testing.T) {
+	t.Parallel()
+	p := renditionPipeline(t, 25)
+	defer p.Close()
+	// ADTS-framed AAC bytes (sync 0xFFF, MPEG-4, AAC-LC) — not a TS chunk,
+	// not Annex-B video; the old code path would hand this to dec.Decode.
+	aac := []byte{0xFF, 0xF1, 0x4C, 0x80, 0x02, 0x1F, 0xFC}
+	out, err := p.ProcessPacket(aac, esCodecAAC, 100, 100)
+	require.NoError(t, err, "AAC must be routed to the audio path, not the H.264 decoder")
+	assert.Empty(t, out, "audio before the first IDR is gated on sawKeyframe")
 }
 
 func TestStreamPipeline_SwitchAfterCloseReturnsError(t *testing.T) {
@@ -369,7 +386,7 @@ func TestStreamPipeline_MultiRenditionFansOutPerTarget(t *testing.T) {
 		frame.Free()
 		require.NoError(t, err)
 		for _, pkt := range pkts {
-			out, err := p.ProcessPacket(pkt.Data, int64(i), int64(i))
+			out, err := p.ProcessPacket(pkt.Data, esCodecH264, int64(i), int64(i))
 			require.NoError(t, err)
 			for _, op := range out {
 				perTarget[op.TargetIndex]++
@@ -428,7 +445,7 @@ func TestStreamPipeline_SwitchInputLatchesSessionStartAndForcedIDR(t *testing.T)
 		frame.Free()
 		require.NoError(t, err)
 		for _, pkt := range pkts {
-			out, err := p.ProcessPacket(pkt.Data, int64(i), int64(i))
+			out, err := p.ProcessPacket(pkt.Data, esCodecH264, int64(i), int64(i))
 			require.NoError(t, err)
 			if len(out) > 0 {
 				firstBatch = out
@@ -453,7 +470,7 @@ func TestStreamPipeline_SwitchInputLatchesSessionStartAndForcedIDR(t *testing.T)
 	frame.Free()
 	require.NoError(t, err)
 	for _, pkt := range pkts {
-		out, err := p.ProcessPacket(pkt.Data, 1000, 1000)
+		out, err := p.ProcessPacket(pkt.Data, esCodecH264, 1000, 1000)
 		require.NoError(t, err)
 		for _, f := range out {
 			assert.False(t, f.SessionStart,
