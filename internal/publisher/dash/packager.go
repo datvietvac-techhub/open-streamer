@@ -674,7 +674,13 @@ func (p *Packager) tryCut(now time.Time) {
 	haveVideo, haveAudio := p.liveTrackPresence(now)
 
 	videoReady := haveVideo && p.queue.VideoLen() > 0
-	audioReady := haveAudio && p.queue.AudioLen() > 0
+	// A shard that doesn't pack audio (an ABR non-primary rendition) has no
+	// audio init and never will, so it must not wait out the pairing window for
+	// audio that can't arrive — it pairs on video alone and emits at the first
+	// IDR, in lockstep with the audio shard. Without this, non-audio shards only
+	// flush at the pairing deadline, anchoring their availStart ~1 s later than
+	// the audio shard and skewing the ladder AST + per-shard pacing (B-4).
+	audioReady := !p.cfg.PackAudio || (haveAudio && p.queue.AudioLen() > 0)
 
 	if !p.state.CanEmitFirstSegment(now, videoReady, audioReady) {
 		return
@@ -758,6 +764,15 @@ func (p *Packager) tryCut(now time.Time) {
 		p.state.OnFirstSegmentFlushed()
 		if p.availStart.IsZero() {
 			p.availStart = now
+			// For an ABR ladder, anchor every shard to ONE shared
+			// availabilityStart (set by whichever shard flushes first) so the
+			// published AST is correct for all renditions, behindPrevSegEnd
+			// paces them against the same origin, and the dynamic-MPD AST never
+			// changes mid-stream regardless of flush order (B-4). Single-
+			// rendition streams have no master and keep their own `now`.
+			if p.cfg.ABRMaster != nil {
+				p.availStart = p.cfg.ABRMaster.SharedAST(now)
+			}
 		}
 		// Safety-net cuts drain the entire video queue without landing
 		// on an IDR boundary, so the next pushed frame could be a P/B

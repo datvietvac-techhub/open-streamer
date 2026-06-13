@@ -213,6 +213,32 @@ func TestCombineSnapshots_FirstNonZeroASTWins(t *testing.T) {
 	}
 }
 
+// TestABRMaster_SharedAST — the ladder AST is set once by the first shard to
+// flush and returned unchanged to every later caller, so all shards anchor to
+// one availabilityStart regardless of flush order (B-4).
+func TestABRMaster_SharedAST(t *testing.T) {
+	m := NewABRMaster(filepath.Join(t.TempDir(), "index.mpd"), "test", 2*time.Second, 6)
+	first := time.Date(2026, 6, 13, 10, 0, 0, 0, time.UTC)
+	later := first.Add(900 * time.Millisecond)
+
+	if got := m.SharedAST(first); !got.Equal(first) {
+		t.Fatalf("first SharedAST = %v, want %v", got, first)
+	}
+	// A shard flushing ~1s later must still receive the FIRST shard's AST.
+	if got := m.SharedAST(later); !got.Equal(first) {
+		t.Errorf("later SharedAST = %v, want %v (AST must not change)", got, first)
+	}
+
+	// A zero candidate never sets the value; the first non-zero one does.
+	m2 := NewABRMaster(filepath.Join(t.TempDir(), "index.mpd"), "test", 2*time.Second, 6)
+	if got := m2.SharedAST(time.Time{}); !got.IsZero() {
+		t.Errorf("zero candidate set AST to %v, want zero", got)
+	}
+	if got := m2.SharedAST(later); !got.Equal(later) {
+		t.Errorf("first non-zero candidate %v should set AST; got %v", later, got)
+	}
+}
+
 // sampleVideoRep returns a baseline TrackManifest for a video rendition.
 func sampleVideoRep(repID string) *TrackManifest {
 	return &TrackManifest{
