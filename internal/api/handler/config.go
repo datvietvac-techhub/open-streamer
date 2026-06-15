@@ -64,13 +64,22 @@ type ConfigHandler struct {
 	rtm          RuntimeConfigManager
 	streamRepo   store.StreamRepository
 	templateRepo store.TemplateRepository
+	policyRepo   store.PolicyRepository
 	hookRepo     store.HookRepository
 	vodRepo      store.VODMountRepository
 	vods         *vod.Registry
 	coord        streamLifecycle
 	autopublish  *autopublish.Service
 	bus          events.Bus
+	// authz hot-reloads the media-auth compiled policy set after a bulk YAML
+	// apply touches policies. Wired post-DI via SetAuthorizer (the authorizer
+	// is built after the publisher). Nil-safe.
+	authz policyAuthorizer
 }
+
+// SetAuthorizer wires the media-auth authorizer so a config-YAML apply that
+// changes policies hot-reloads it. Nil-safe.
+func (h *ConfigHandler) SetAuthorizer(a policyAuthorizer) { h.authz = a }
 
 // NewConfigHandler creates a ConfigHandler from the DI injector.
 // The RuntimeConfigManager is injected later via SetRuntimeManager because it
@@ -79,6 +88,7 @@ func NewConfigHandler(i do.Injector) (*ConfigHandler, error) {
 	h := &ConfigHandler{
 		streamRepo:   do.MustInvoke[store.StreamRepository](i),
 		templateRepo: do.MustInvoke[store.TemplateRepository](i),
+		policyRepo:   do.MustInvoke[store.PolicyRepository](i),
 		hookRepo:     do.MustInvoke[store.HookRepository](i),
 		vodRepo:      do.MustInvoke[store.VODMountRepository](i),
 		vods:         do.MustInvoke[*vod.Registry](i),

@@ -29,10 +29,11 @@ const (
 // all in one round-trip.
 //
 // Order of declaration matches apply order on PUT: GlobalConfig first (ports
-// the publisher will bind), then Templates (so streams referencing them can
-// resolve), then Hooks, then VOD, then Streams.
+// the publisher will bind), then Policies (so streams/templates referencing
+// them resolve), then Templates, then Hooks, then VOD, then Streams.
 type fullConfig struct {
 	GlobalConfig *domain.GlobalConfig `yaml:"global_config"`
+	Policies     []*domain.Policy     `yaml:"policies"`
 	Templates    []*domain.Template   `yaml:"templates"`
 	Streams      []*domain.Stream     `yaml:"streams"`
 	Hooks        []*domain.Hook       `yaml:"hooks"`
@@ -72,6 +73,15 @@ func (h *ConfigHandler) GetConfigYAML(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var policies []*domain.Policy
+	if h.policyRepo != nil {
+		var err error
+		policies, err = h.policyRepo.List(r.Context())
+		if err != nil {
+			serverError(w, r, "LIST_POLICIES_FAILED", "list policies for yaml export", err)
+			return
+		}
+	}
 	hooks, err := h.hookRepo.List(r.Context())
 	if err != nil {
 		serverError(w, r, "LIST_HOOKS_FAILED", "list hooks for yaml export", err)
@@ -85,6 +95,7 @@ func (h *ConfigHandler) GetConfigYAML(w http.ResponseWriter, r *http.Request) {
 
 	full := fullConfig{
 		GlobalConfig: h.rtm.CurrentConfig(),
+		Policies:     policies,
 		Templates:    templates,
 		Streams:      streams,
 		Hooks:        hooks,
@@ -170,6 +181,14 @@ func (h *ConfigHandler) ReplaceConfigYAML(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Policies land BEFORE templates and streams: both can reference a policy
+	// via PlaybackPolicy, so the policy set must exist (and the authorizer must
+	// be reloaded) before those references go live.
+	if err := h.applyPolicies(r.Context(), newCfg.Policies, newCfg.Streams, newCfg.Templates); err != nil {
+		serverError(w, r, "APPLY_POLICIES_FAILED", "apply policies from yaml", err)
+		return
+	}
+
 	// Templates land BEFORE streams: stream.Template references must be able
 	// to resolve when applyStreams calls coord.Start/Update. The autopublish
 	// matcher gets a final refresh after the desired template set is
@@ -204,6 +223,10 @@ func (h *ConfigHandler) ReplaceConfigYAML(w http.ResponseWriter, r *http.Request
 	if h.templateRepo != nil {
 		templatesAfter, _ = h.templateRepo.List(r.Context())
 	}
+	var policiesAfter []*domain.Policy
+	if h.policyRepo != nil {
+		policiesAfter, _ = h.policyRepo.List(r.Context())
+	}
 	hooksAfter, _ := h.hookRepo.List(r.Context())
 	vodAfter, _ := h.vodRepo.List(r.Context())
 
@@ -222,6 +245,7 @@ func (h *ConfigHandler) ReplaceConfigYAML(w http.ResponseWriter, r *http.Request
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"global_config": current,
+		"policies":      policiesAfter,
 		"templates":     templatesAfter,
 		"streams":       streamsAfter,
 		"hooks":         hooksAfter,
@@ -320,6 +344,87 @@ func (h *ConfigHandler) applyTemplates(
 		if err := h.autopublish.RefreshTemplates(ctx); err != nil {
 			return fmt.Errorf("refresh autopublish: %w", err)
 		}
+	}
+	return nil
+}
+
+// applyPolicies diffs the desired media-auth policy list against the store and
+// upserts/deletes accordingly, then hot-reloads the authorizer's compiled set.
+//
+// A policy only present in the store is deleted ONLY when no stream or template
+// in the desired document still references it (via PlaybackPolicy) — otherwise
+// the bulk-replace would leave a dangling reference that fails closed at
+// playback. The desired stream/template lists are passed so the foreign-key
+// check runs against post-replace state, not the pre-replace store.
+func (h *ConfigHandler) applyPolicies(
+	ctx context.Context,
+	desired []*domain.Policy,
+	streamsAfter []*domain.Stream,
+	templatesAfter []*domain.Template,
+) error {
+	// Nil policyRepo means the handler was built without DI (minimal unit
+	// tests). Skip entirely so those tests still pass.
+	if h.policyRepo == nil {
+		return nil
+	}
+	existing, err := h.policyRepo.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list policies: %w", err)
+	}
+
+	desiredByCode := make(map[domain.PolicyCode]*domain.Policy, len(desired))
+	for _, p := range desired {
+		if p != nil {
+			desiredByCode[p.Code] = p
+		}
+	}
+
+	// "What would reference each policy after the replace?" — from the desired
+	// streams AND templates, not the current store.
+	refs := make(map[domain.PolicyCode][]string)
+	for _, s := range streamsAfter {
+		if s != nil && s.PlaybackPolicy != "" {
+			refs[s.PlaybackPolicy] = append(refs[s.PlaybackPolicy], "stream "+string(s.Code))
+		}
+	}
+	for _, t := range templatesAfter {
+		if t != nil && t.PlaybackPolicy != "" {
+			refs[t.PlaybackPolicy] = append(refs[t.PlaybackPolicy], "template "+string(t.Code))
+		}
+	}
+
+	for _, old := range existing {
+		if old == nil {
+			continue
+		}
+		if _, keep := desiredByCode[old.Code]; keep {
+			continue
+		}
+		if blockers := refs[old.Code]; len(blockers) > 0 {
+			return fmt.Errorf("policy %q is referenced by %v — detach them in the same edit", old.Code, blockers)
+		}
+		if err := h.policyRepo.Delete(ctx, old.Code); err != nil {
+			return fmt.Errorf("delete policy %q: %w", old.Code, err)
+		}
+	}
+
+	for _, p := range desired {
+		if p == nil {
+			continue
+		}
+		if err := h.policyRepo.Save(ctx, p); err != nil {
+			return fmt.Errorf("save policy %q: %w", p.Code, err)
+		}
+	}
+
+	// Hot-reload the authorizer's compiled set so the new policies take effect
+	// without a restart. Nil-safe — tests build the handler without it.
+	if h.authz != nil {
+		ps, err := h.policyRepo.List(ctx)
+		if err != nil {
+			return fmt.Errorf("reload policies: %w", err)
+		}
+		h.authz.SetPolicies(ps)
 	}
 	return nil
 }
@@ -529,9 +634,37 @@ func validateFullConfig(c *fullConfig) []fieldError {
 	if c.GlobalConfig != nil {
 		errs = append(errs, validateGlobalConfig(c.GlobalConfig)...)
 	}
+	errs = append(errs, validatePolicies(c.Policies)...)
 	errs = append(errs, validateStreams(c.Streams)...)
 	errs = append(errs, validateHooks(c.Hooks)...)
 	errs = append(errs, validateVOD(c.VOD)...)
+	return errs
+}
+
+// validatePolicies checks each media-auth policy individually (via
+// domain.Policy.Validate) plus enforces unique codes across the document.
+func validatePolicies(policies []*domain.Policy) []fieldError {
+	errs := make([]fieldError, 0, len(policies))
+	seen := make(map[domain.PolicyCode]int, len(policies))
+	for i, p := range policies {
+		base := fmt.Sprintf("policies[%d]", i)
+		if p == nil {
+			errs = append(errs, fieldError{Path: base, Message: "policy entry is null"})
+			continue
+		}
+		if err := p.Validate(); err != nil {
+			errs = append(errs, fieldError{Path: base, Message: err.Error()})
+			continue
+		}
+		if prev, dup := seen[p.Code]; dup {
+			errs = append(errs, fieldError{
+				Path:    base + ".code",
+				Message: fmt.Sprintf("duplicate policy code %q (also at index %d)", p.Code, prev),
+			})
+			continue
+		}
+		seen[p.Code] = i
+	}
 	return errs
 }
 

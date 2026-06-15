@@ -386,8 +386,10 @@ func wireMediaAuth(i do.Injector, _ *domain.GlobalConfig) *mediaauth.Authorizer 
 
 	pub.SetMediaAuthorizer(authz)
 	apiSrv.SetMediaAuthorizer(authz)
-	// Let the policy handler hot-reload the compiled set on CRUD.
+	// Let the policy handler (per-policy CRUD) and the config handler (bulk
+	// YAML apply) hot-reload the compiled set when policies change.
 	do.MustInvoke[*handler.PolicyHandler](i).SetAuthorizer(authz)
+	do.MustInvoke[*handler.ConfigHandler](i).SetAuthorizer(authz)
 	return authz
 }
 
