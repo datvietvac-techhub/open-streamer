@@ -101,6 +101,36 @@ func TestYAMLTemplateRepo_Delete(t *testing.T) {
 	assert.True(t, errors.Is(err, store.ErrNotFound))
 }
 
+// --- PolicyRepository ---
+
+func TestYAMLPolicyRepo_SaveAndFindByCode(t *testing.T) {
+	ctx := context.Background()
+	repo := newStore(t).Policies()
+
+	want := storetest.NewFullPolicy("vip")
+	require.NoError(t, repo.Save(ctx, want))
+
+	got, err := repo.FindByCode(ctx, "vip")
+	require.NoError(t, err)
+	assert.Equal(t, want.Code, got.Code)
+	assert.Equal(t, want.RequireToken, got.RequireToken)
+	assert.Equal(t, want.TokenSecret, got.TokenSecret)
+	assert.Equal(t, want.AllowIPs, got.AllowIPs)
+	assert.Equal(t, want.AllowedDomains, got.AllowedDomains)
+}
+
+func TestYAMLPolicyRepo_Delete(t *testing.T) {
+	ctx := context.Background()
+	repo := newStore(t).Policies()
+
+	require.NoError(t, repo.Save(ctx, storetest.NewFullPolicy("delete_me")))
+	require.NoError(t, repo.Delete(ctx, "delete_me"))
+
+	_, err := repo.FindByCode(ctx, "delete_me")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrNotFound))
+}
+
 // --- RecordingRepository ---
 
 func TestYAMLRecordingRepo_SaveAndFindByID(t *testing.T) {

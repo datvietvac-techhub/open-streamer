@@ -35,6 +35,15 @@ type TemplateRepository interface {
 	Delete(ctx context.Context, code domain.TemplateCode) error
 }
 
+// PolicyRepository persists reusable media-auth Policy configurations
+// referenced by streams via Stream.PlaybackPolicy.
+type PolicyRepository interface {
+	Save(ctx context.Context, policy *domain.Policy) error
+	FindByCode(ctx context.Context, code domain.PolicyCode) (*domain.Policy, error)
+	List(ctx context.Context) ([]*domain.Policy, error)
+	Delete(ctx context.Context, code domain.PolicyCode) error
+}
+
 // RecordingRepository persists DVR recording metadata.
 type RecordingRepository interface {
 	Save(ctx context.Context, rec *domain.Recording) error

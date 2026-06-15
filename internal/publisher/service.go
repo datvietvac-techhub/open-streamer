@@ -25,6 +25,7 @@ import (
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 	"github.com/datvietvac-techhub/open-streamer/internal/events"
+	"github.com/datvietvac-techhub/open-streamer/internal/mediaauth"
 	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
 	"github.com/datvietvac-techhub/open-streamer/internal/sessions"
 )
@@ -80,6 +81,12 @@ type streamState struct {
 	// re-querying the store. Updated atomically with mediaBuf when the stream
 	// config changes (Update path).
 	mpegtsEnabled bool
+
+	// playbackPolicy is the code of the media-auth Policy this stream binds to
+	// ("" = no policy → public). Mirrored here so PlaybackPolicy answers the
+	// authorizer with an O(1) in-memory lookup instead of a store read per
+	// request.
+	playbackPolicy domain.PolicyCode
 }
 
 // Service manages all output workers for active streams.
@@ -99,6 +106,11 @@ type Service struct {
 	// limiter caps concurrent playback connections (per stream + global) for
 	// the long-lived play/push protocols — see conn_limiter.go (A-1).
 	limiter *connLimiter
+
+	// mediaAuth authorizes playback (token / IP / country / UA / referer).
+	// nil = no media-auth (allow all); set via SetMediaAuthorizer. See
+	// internal/mediaauth (B / S-13).
+	mediaAuth *mediaauth.Authorizer
 
 	mu      sync.Mutex
 	streams map[domain.StreamCode]*streamState
@@ -267,12 +279,13 @@ func (s *Service) Start(ctx context.Context, stream *domain.Stream) error {
 
 	baseCtx, baseCancel := context.WithCancel(ctx)
 	ss := &streamState{
-		baseCtx:       baseCtx,
-		baseCancel:    baseCancel,
-		code:          stream.Code,
-		mediaBuf:      buffer.PlaybackBufferID(stream.Code, stream.Transcoder),
-		protocols:     make(map[string]context.CancelFunc),
-		mpegtsEnabled: p.MPEGTS,
+		baseCtx:        baseCtx,
+		baseCancel:     baseCancel,
+		code:           stream.Code,
+		mediaBuf:       buffer.PlaybackBufferID(stream.Code, stream.Transcoder),
+		protocols:      make(map[string]context.CancelFunc),
+		mpegtsEnabled:  p.MPEGTS,
+		playbackPolicy: stream.PlaybackPolicy,
 	}
 	s.streams[stream.Code] = ss
 	s.mediaBuffer[stream.Code] = ss.mediaBuf
@@ -440,6 +453,7 @@ func (s *Service) UpdateProtocols(ctx context.Context, old, new *domain.Stream) 
 			s.mediaBuffer[new.Code] = newBuf
 		}
 		ss.mpegtsEnabled = np.MPEGTS
+		ss.playbackPolicy = new.PlaybackPolicy
 	}
 	s.mu.Unlock()
 	if !ok {

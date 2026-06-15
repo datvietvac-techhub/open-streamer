@@ -16,6 +16,7 @@ import (
 	_ "github.com/datvietvac-techhub/open-streamer/api/docs" // swag Register(SwaggerInfo)
 	"github.com/datvietvac-techhub/open-streamer/config"
 	"github.com/datvietvac-techhub/open-streamer/internal/api/handler"
+	"github.com/datvietvac-techhub/open-streamer/internal/mediaauth"
 	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
 	"github.com/datvietvac-techhub/open-streamer/internal/publisher"
 	"github.com/datvietvac-techhub/open-streamer/internal/sessions"
@@ -40,6 +41,7 @@ type Server struct {
 	vodH       *handler.VODHandler
 	sessionH   *handler.SessionHandler
 	watermarkH *handler.WatermarkHandler
+	policyH    *handler.PolicyHandler
 
 	// sessTracker is the shared play-sessions tracker. Used to wrap the
 	// mediaserve mount with a tracking middleware so HLS / DASH segment
@@ -60,9 +62,17 @@ type Server struct {
 	// Never nil (a disabled authenticator is a pass-through).
 	apiAuth *Auth
 
+	// mediaAuth authorizes HTTP playback (HLS/DASH/MPEGTS) — token / IP /
+	// country / UA / referer. nil = allow all. Set via SetMediaAuthorizer.
+	mediaAuth *mediaauth.Authorizer
+
 	router *chi.Mux
 	http   *http.Server
 }
+
+// SetMediaAuthorizer wires the playback authorizer for HTTP media routes (B /
+// S-13). Called from the runtime wiring after the publisher is constructed.
+func (s *Server) SetMediaAuthorizer(a *mediaauth.Authorizer) { s.mediaAuth = a }
 
 // New creates a Server and registers it with the DI injector.
 // The server is constructed but not started — call StartWithConfig to begin accepting connections.
@@ -85,6 +95,7 @@ func New(i do.Injector) (*Server, error) {
 		vodH:       do.MustInvoke[*handler.VODHandler](i),
 		sessionH:   do.MustInvoke[*handler.SessionHandler](i),
 		watermarkH: do.MustInvoke[*handler.WatermarkHandler](i),
+		policyH:    do.MustInvoke[*handler.PolicyHandler](i),
 	}
 	// Tracker is optional: only wrap mediaserve when the sessions feature is
 	// wired in DI. Treats a missing provider as "feature disabled" rather
@@ -245,6 +256,16 @@ func (s *Server) buildRouter(serverCfg *config.ServerConfig) *chi.Mux {
 				r.Get("/", s.templateH.Get)
 				r.Post("/", s.templateH.Put)
 				r.Delete("/", s.templateH.Delete)
+			})
+		})
+
+		// Media-auth policies. Single-segment codes — same shape as templates.
+		ar.Route("/policies", func(r chi.Router) {
+			r.Get("/", s.policyH.List)
+			r.Route("/{code}", func(r chi.Router) {
+				r.Get("/", s.policyH.Get)
+				r.Post("/", s.policyH.Put)
+				r.Delete("/", s.policyH.Delete)
 			})
 		})
 

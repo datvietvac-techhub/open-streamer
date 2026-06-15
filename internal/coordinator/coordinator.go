@@ -584,6 +584,7 @@ func (c *Coordinator) updateLocked(ctx context.Context, old, new *domain.Stream)
 		"inputs_changed", diff.InputsChanged,
 		"protocols_changed", diff.ProtocolsChanged,
 		"push_changed", diff.PushChanged,
+		"playback_policy_changed", diff.PlaybackPolicyChanged,
 		"dvr_changed", diff.DVRChanged,
 	)
 
@@ -623,7 +624,10 @@ func (c *Coordinator) updateLocked(ctx context.Context, old, new *domain.Stream)
 	}
 
 	// Protocol/push changes: surgically stop/start only affected goroutines.
-	if diff.ProtocolsChanged || diff.PushChanged {
+	// A playback-policy-only change rides the same path: UpdateProtocols is a
+	// no-op for unchanged protocols/push but refreshes the publisher's in-memory
+	// policy binding so the new media-auth policy takes effect without a restart.
+	if diff.ProtocolsChanged || diff.PushChanged || diff.PlaybackPolicyChanged {
 		if err := c.pub.UpdateProtocols(ctx, old, new); err != nil {
 			return fmt.Errorf("coordinator: update protocols: %w", err)
 		}

@@ -63,6 +63,13 @@ const (
 	EventTemplateUpdated EventType = "template.updated"
 	EventTemplateDeleted EventType = "template.deleted"
 
+	// Policies — published by the policy handler on REST CRUD of a media-auth
+	// Policy. The authorizer's compiled rule set is hot-swapped before the
+	// event fires, so consumers can assume the new rules are already live.
+	EventPolicyCreated EventType = "policy.created"
+	EventPolicyUpdated EventType = "policy.updated"
+	EventPolicyDeleted EventType = "policy.deleted"
+
 	// Runtime streams — published by the autopublish service when a
 	// template-prefix match materialises (or expires) a stream that does
 	// NOT exist in the persisted config. Useful for audit logs and the

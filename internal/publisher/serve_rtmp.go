@@ -54,6 +54,13 @@ func (s *Service) HandleRTMPPlay(
 		return fmt.Errorf("stream %q not active", key)
 	}
 
+	// Media-plane authorization (token / IP / country) before any state. RTMP
+	// play carries no query/UA in the handshake, so token/UA rules don't apply
+	// here — IP/country/policy still do (B / S-13).
+	if !s.playAllowed(code, "rtmp", info.RemoteAddr, "", "", "") {
+		return fmt.Errorf("stream %q: playback not authorized", key)
+	}
+
 	// Cap concurrent playback connections before allocating the per-session
 	// demux pipeline + tsBuffer (A-1). Released on every return path via defer.
 	if !s.limiter.acquire(code) {

@@ -31,6 +31,7 @@ import (
 	srt "github.com/datarhei/gosrt"
 
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/sessions"
 	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
 )
 
@@ -114,6 +115,18 @@ func (s *Service) srtHandleSubscribe(ctx context.Context, conn srt.Conn) {
 	bufID, ok2 := s.mediaBufferFor(streamCode)
 	if !ok2 {
 		slog.Warn("publisher: SRT stream no longer active", "stream_code", streamCode)
+		return
+	}
+
+	// Media-plane authorization (token / IP / country) before any state. SRT
+	// carries the token in the streamid query (?streamid=live/code?token=…).
+	srtTok := ""
+	if sid := conn.StreamId(); sid != "" {
+		if i := strings.IndexByte(sid, '?'); i >= 0 {
+			srtTok = sessions.TokenFromQuery(sid[i+1:])
+		}
+	}
+	if !s.playAllowed(streamCode, "srt", conn.RemoteAddr().String(), srtTok, "", "") {
 		return
 	}
 
@@ -239,6 +252,11 @@ func (s *Service) srtHandleSubscribe(ctx context.Context, conn srt.Conn) {
 // by accident from a half-typed URL.
 func srtStreamCode(streamid string) string {
 	streamid = strings.TrimSpace(streamid)
+	// Drop a playback-token query (streamid=live/code?token=…) before deriving
+	// the code, so the token doesn't bleed into the stream-code lookup.
+	if i := strings.IndexByte(streamid, '?'); i >= 0 {
+		streamid = streamid[:i]
+	}
 	hadLivePrefix := strings.HasPrefix(streamid, "live/")
 	code := strings.TrimPrefix(streamid, "live/")
 	if code == "" {

@@ -242,6 +242,10 @@ func (m *Manager) diff(old, new *domain.GlobalConfig) {
 		m.deps.APISrv.SetAuthConfig(new.Auth)
 	}
 
+	// Media-plane (playback) auth is policy-based and store-driven — its
+	// compiled rule set is hot-reloaded by the policy handler on CRUD, not from
+	// this config diff. See cmd/server.wireMediaAuth + handler.PolicyHandler.
+
 	// Push the new listeners snapshot to ingestor + publisher BEFORE
 	// diffService can decide to restart them — each Run() reads the cached
 	// listeners value at startup, so the swap must happen before the new

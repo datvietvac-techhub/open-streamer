@@ -205,6 +205,58 @@ func TestJSONTemplateRepo_Delete(t *testing.T) {
 	assert.True(t, errors.Is(err, store.ErrNotFound))
 }
 
+// --- PolicyRepository ---
+
+func TestJSONPolicyRepo_SaveAndFindByCode(t *testing.T) {
+	ctx := context.Background()
+	repo := newStore(t).Policies()
+
+	want := storetest.NewFullPolicy("vip")
+	require.NoError(t, repo.Save(ctx, want))
+
+	got, err := repo.FindByCode(ctx, "vip")
+	require.NoError(t, err)
+	assert.Equal(t, want.Code, got.Code)
+	assert.Equal(t, want.RequireToken, got.RequireToken)
+	assert.Equal(t, want.TokenSecret, got.TokenSecret)
+	assert.Equal(t, want.AllowIPs, got.AllowIPs)
+	assert.Equal(t, want.DenyCountries, got.DenyCountries)
+	assert.Equal(t, want.AllowedDomains, got.AllowedDomains)
+}
+
+func TestJSONPolicyRepo_FindByCode_NotFound(t *testing.T) {
+	ctx := context.Background()
+	repo := newStore(t).Policies()
+	_, err := repo.FindByCode(ctx, "nope")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, store.ErrNotFound))
+}
+
+func TestJSONPolicyRepo_ListSorted(t *testing.T) {
+	ctx := context.Background()
+	repo := newStore(t).Policies()
+
+	require.NoError(t, repo.Save(ctx, storetest.NewFullPolicy("b_policy")))
+	require.NoError(t, repo.Save(ctx, storetest.NewFullPolicy("a_policy")))
+
+	all, err := repo.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 2)
+	assert.Equal(t, domain.PolicyCode("a_policy"), all[0].Code, "List must be sorted by code asc")
+	assert.Equal(t, domain.PolicyCode("b_policy"), all[1].Code)
+}
+
+func TestJSONPolicyRepo_Delete(t *testing.T) {
+	ctx := context.Background()
+	repo := newStore(t).Policies()
+
+	require.NoError(t, repo.Save(ctx, storetest.NewFullPolicy("delete_me")))
+	require.NoError(t, repo.Delete(ctx, "delete_me"))
+
+	_, err := repo.FindByCode(ctx, "delete_me")
+	assert.True(t, errors.Is(err, store.ErrNotFound))
+}
+
 // --- RecordingRepository ---
 
 func TestJSONRecordingRepo_SaveAndFindByID(t *testing.T) {

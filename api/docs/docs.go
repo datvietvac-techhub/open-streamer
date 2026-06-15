@@ -456,6 +456,166 @@ const docTemplate = `{
                 }
             }
         },
+        "/policies": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policies"
+                ],
+                "summary": "List media-auth policies",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/apidocs.ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/policies/{code}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policies"
+                ],
+                "summary": "Get media-auth policy",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Policy code",
+                        "name": "code",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/apidocs.ErrorBody"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policies"
+                ],
+                "summary": "Create or update media-auth policy",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Policy code",
+                        "name": "code",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Policy configuration",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/domain.Policy"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/apidocs.ErrorBody"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/apidocs.ErrorBody"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "policies"
+                ],
+                "summary": "Delete media-auth policy",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Policy code",
+                        "name": "code",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/apidocs.ErrorBody"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/apidocs.ErrorBody"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/apidocs.ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
         "/readyz": {
             "get": {
                 "description": "Returns 200 when the server accepts traffic (basic check).",
@@ -1941,6 +2101,10 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
+                "playback_policy": {
+                    "description": "PlaybackPolicy binds this stream to a named media-auth Policy by its\ncode (see domain.Policy). Empty means no policy — the stream is public\n(allow-all). The referenced policy carries the full rule set (token\nrequirement + secret, IP/country/UA/domain allow-deny lists). See\ninternal/mediaauth.",
+                    "type": "string"
+                },
                 "protocols": {
                     "description": "Protocols defines which delivery protocols are opened for this stream.\nnil means the field is unset and ResolveStream inherits the template's\nProtocols (or leaves the resolved value nil when no template applies —\npublisher treats nil as \"no protocols enabled\"). An explicit non-nil\npointer — including the zero value \u0026OutputProtocols{} — is an\noperator-asserted override and beats template inheritance.",
                     "allOf": [
@@ -2478,8 +2642,6 @@ const docTemplate = `{
         "domain.EventType": {
             "type": "string",
             "enum": [
-                "session.opened",
-                "session.closed",
                 "stream.created",
                 "stream.updated",
                 "stream.started",
@@ -2512,8 +2674,13 @@ const docTemplate = `{
                 "template.created",
                 "template.updated",
                 "template.deleted",
+                "policy.created",
+                "policy.updated",
+                "policy.deleted",
                 "stream.runtime_created",
-                "stream.runtime_expired"
+                "stream.runtime_expired",
+                "session.opened",
+                "session.closed"
             ],
             "x-enum-comments": {
                 "EventDVRSegmentPruned": "retention loop deleted an aged-out segment",
@@ -2530,8 +2697,6 @@ const docTemplate = `{
                 "EventStreamUpdated": "PUT /streams/{code} on existing record"
             },
             "x-enum-descriptions": [
-                "",
-                "",
                 "",
                 "PUT /streams/{code} on existing record",
                 "",
@@ -2565,11 +2730,14 @@ const docTemplate = `{
                 "",
                 "",
                 "",
+                "",
+                "",
+                "",
+                "",
+                "",
                 ""
             ],
             "x-enum-varnames": [
-                "EventSessionOpened",
-                "EventSessionClosed",
                 "EventStreamCreated",
                 "EventStreamUpdated",
                 "EventStreamStarted",
@@ -2602,8 +2770,13 @@ const docTemplate = `{
                 "EventTemplateCreated",
                 "EventTemplateUpdated",
                 "EventTemplateDeleted",
+                "EventPolicyCreated",
+                "EventPolicyUpdated",
+                "EventPolicyDeleted",
                 "EventStreamRuntimeCreated",
-                "EventStreamRuntimeExpired"
+                "EventStreamRuntimeExpired",
+                "EventSessionOpened",
+                "EventSessionClosed"
             ]
         },
         "domain.GlobalConfig": {
@@ -2995,6 +3168,73 @@ const docTemplate = `{
                 }
             }
         },
+        "domain.Policy": {
+            "type": "object",
+            "properties": {
+                "allow_countries": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "allow_ips": {
+                    "description": "Static allow/deny chain. IPs accept exact addresses or CIDR ranges;\nCountries are ISO 3166-1 alpha-2 codes (need a GeoIP DB — see\nSessionsConfig.GeoIPDBPath); UserAgents match case-insensitive substring;\nAllowedDomains match the Referer host (exact or parent domain).",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "allow_user_agents": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "allowed_domains": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "code": {
+                    "description": "Code is the unique key chosen by the operator.",
+                    "type": "string"
+                },
+                "deny_countries": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "deny_ips": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "deny_user_agents": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "description": "Name and Description are operator-facing metadata.",
+                    "type": "string"
+                },
+                "require_token": {
+                    "description": "RequireToken makes a valid signed playback token mandatory. The server\nonly VERIFIES tokens; clients mint them with TokenSecret — see\ninternal/mediaauth.SignToken for the canonical token format.",
+                    "type": "boolean"
+                },
+                "token_secret": {
+                    "description": "TokenSecret is this policy's HMAC-SHA256 verification key. Required when\nRequireToken is true. Each policy owns its own secret so revoking one\npolicy's key never affects another.",
+                    "type": "string"
+                }
+            }
+        },
         "domain.PushDestination": {
             "type": "object",
             "properties": {
@@ -3240,6 +3480,10 @@ const docTemplate = `{
                 },
                 "name": {
                     "description": "Name and Description are template-level metadata. Name surfaces in\nthe API for human-readable lists; Description carries the rationale\nbehind the template's settings. Streams inheriting this template\nkeep their own Name / Description fields — the template metadata is\nfor operator-facing tooling, not for downstream consumers.",
+                    "type": "string"
+                },
+                "playback_policy": {
+                    "description": "PlaybackPolicy is the media-auth Policy code inherited by streams\nreferencing this template (see domain.Policy). Empty = no policy\n(inheriting streams stay public unless they set their own).",
                     "type": "string"
                 },
                 "prefixes": {

@@ -146,6 +146,25 @@ func NewFullTemplate(code domain.TemplateCode) *domain.Template {
 	}
 }
 
+// NewFullPolicy returns a Policy with every field populated. Useful for
+// round-trip tests that verify nothing is silently dropped by serialisation.
+func NewFullPolicy(code domain.PolicyCode) *domain.Policy {
+	return &domain.Policy{
+		Code:            code,
+		Name:            "Full Policy",
+		Description:     "Full policy fixture",
+		RequireToken:    true,
+		TokenSecret:     "policy-secret-123",
+		AllowIPs:        []string{"203.0.113.10", "10.0.0.0/8"},
+		DenyIPs:         []string{"198.51.100.7"},
+		AllowCountries:  []string{"VN", "SG"},
+		DenyCountries:   []string{"CN"},
+		AllowUserAgents: []string{"exoplayer"},
+		DenyUserAgents:  []string{"badbot"},
+		AllowedDomains:  []string{"example.com"},
+	}
+}
+
 // NewFullHook returns a Hook with every field populated.
 func NewFullHook(id domain.HookID) *domain.Hook {
 	return &domain.Hook{

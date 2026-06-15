@@ -24,6 +24,13 @@ type StreamDiff struct {
 	ProtocolsChanged bool
 	PushChanged      bool
 
+	// PlaybackPolicyChanged is true when the bound media-auth policy code
+	// changed. The publisher mirrors the binding in-memory (streamState.
+	// playbackPolicy) for O(1) authorization lookups, so a live stream must be
+	// told to refresh it — otherwise the new policy only takes effect on the
+	// next restart and playback keeps using the stale binding.
+	PlaybackPolicyChanged bool
+
 	// DVR
 	DVRChanged bool
 
@@ -65,6 +72,7 @@ func ComputeDiff(old, new *domain.Stream) StreamDiff {
 	diffTranscoder(old, new, &d)
 	d.ProtocolsChanged = !protocolsEqual(old.Protocols, new.Protocols)
 	d.PushChanged = !pushSliceEqual(old.Push, new.Push)
+	d.PlaybackPolicyChanged = old.PlaybackPolicy != new.PlaybackPolicy
 	d.DVRChanged = !dvrConfigEqual(old.DVR, new.DVR)
 
 	return d
