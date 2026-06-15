@@ -2,6 +2,7 @@ package autopublish
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -131,6 +132,12 @@ var ErrNoMatch = errors.New("autopublish: no template matches path")
 // dead pipeline.
 var ErrTemplateNoPush = errors.New("autopublish: matching template has no publish:// input")
 
+// ErrUnauthorized is returned when the matching template requires a StreamKey
+// and the pusher's supplied secret does not match (S-8). Checked before any
+// runtime stream is materialised, so an unauthorised push never spins a
+// pipeline.
+var ErrUnauthorized = errors.New("autopublish: stream key mismatch")
+
 // ResolveOrCreate looks up (and, if necessary, creates) the runtime
 // stream whose code is path. Returns the resolved stream code (always
 // equal to the canonical form of path). Concurrent callers racing on
@@ -140,7 +147,7 @@ var ErrTemplateNoPush = errors.New("autopublish: matching template has no publis
 // The returned stream is ready for the push server's registry.Acquire
 // the moment this function returns nil — coordinator.Start spawns the
 // ingestor's push registration synchronously.
-func (s *Service) ResolveOrCreate(ctx context.Context, path string) (domain.StreamCode, error) {
+func (s *Service) ResolveOrCreate(ctx context.Context, path, secret string) (domain.StreamCode, error) {
 	code := domain.StreamCode(canonPath(path))
 	if code == "" {
 		return "", fmt.Errorf("autopublish: empty path")
@@ -167,6 +174,14 @@ func (s *Service) ResolveOrCreate(ctx context.Context, path string) (domain.Stre
 	}
 	if !domain.TemplateAcceptsPush(tpl) {
 		return "", ErrTemplateNoPush
+	}
+	// Push auth (S-8): when the template configures a StreamKey, the pusher
+	// must supply a matching ?key= secret. Empty key = the template opted out.
+	// Checked before coordinator.Start so an unauthorised push never
+	// materialises a runtime stream.
+	if tpl.StreamKey != "" &&
+		subtle.ConstantTimeCompare([]byte(secret), []byte(tpl.StreamKey)) != 1 {
+		return "", ErrUnauthorized
 	}
 
 	// Acquire write lock and re-check to defend against a parallel

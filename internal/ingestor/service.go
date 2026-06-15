@@ -89,6 +89,9 @@ type Service struct {
 	// Run created the RTMP server. Same deferred-wiring pattern as the
 	// PlayFunc / push callbacks above.
 	pendingAutoPublish push.AutoPublishResolver
+	// pendingStreamKeyFn holds the push-auth (StreamKey) resolver registered
+	// before Run created the RTMP server. Same deferred-wiring pattern.
+	pendingStreamKeyFn push.StreamKeyResolver
 }
 
 // New creates a Service and registers it with the DI injector.
@@ -199,6 +202,24 @@ func (s *Service) SetAutoPublishResolver(r push.AutoPublishResolver) {
 	s.mu.Unlock()
 }
 
+// SetPushStreamKeyResolver installs the push-ingest auth resolver (S-8): the
+// RTMP server consults it for the configured StreamKey of a stream before
+// accepting a publisher. Same deferred-wiring semantics as
+// SetAutoPublishResolver — safe to call before or after Run. nil disables
+// push key enforcement.
+func (s *Service) SetPushStreamKeyResolver(fn push.StreamKeyResolver) {
+	s.mu.Lock()
+	srv := s.rtmpSrv
+	s.mu.Unlock()
+	if srv != nil {
+		srv.SetStreamKeyResolver(fn)
+		return
+	}
+	s.mu.Lock()
+	s.pendingStreamKeyFn = fn
+	s.mu.Unlock()
+}
+
 // Run starts the shared push/play listeners (RTMP) and blocks until ctx is
 // cancelled. Other shared listeners (SRT, RTSP) are owned by the publisher and
 // run from runtime.Manager; the same network port serves both ingest and play
@@ -226,6 +247,10 @@ func (s *Service) Run(ctx context.Context) error {
 		if s.pendingAutoPublish != nil {
 			rtmpSrv.SetAutoPublishResolver(s.pendingAutoPublish)
 			s.pendingAutoPublish = nil
+		}
+		if s.pendingStreamKeyFn != nil {
+			rtmpSrv.SetStreamKeyResolver(s.pendingStreamKeyFn)
+			s.pendingStreamKeyFn = nil
 		}
 		// Wire pending push callbacks (deferred from startPushRegistration
 		// when the server didn't exist yet — typical on cold start where

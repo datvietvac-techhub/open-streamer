@@ -87,6 +87,11 @@ type streamState struct {
 	// authorizer with an O(1) in-memory lookup instead of a store read per
 	// request.
 	playbackPolicy domain.PolicyCode
+	// streamKey is the resolved push-ingest secret ("" = push unauthenticated).
+	// Mirrored here so PushStreamKey answers the RTMP server's push-auth
+	// resolver (S-8) with an O(1) in-memory lookup for live streams, including
+	// auto-publish runtime streams not present in the store.
+	streamKey string
 }
 
 // Service manages all output workers for active streams.
@@ -286,6 +291,7 @@ func (s *Service) Start(ctx context.Context, stream *domain.Stream) error {
 		protocols:      make(map[string]context.CancelFunc),
 		mpegtsEnabled:  p.MPEGTS,
 		playbackPolicy: stream.PlaybackPolicy,
+		streamKey:      stream.StreamKey,
 	}
 	s.streams[stream.Code] = ss
 	s.mediaBuffer[stream.Code] = ss.mediaBuf
@@ -454,6 +460,7 @@ func (s *Service) UpdateProtocols(ctx context.Context, old, new *domain.Stream) 
 		}
 		ss.mpegtsEnabled = np.MPEGTS
 		ss.playbackPolicy = new.PlaybackPolicy
+		ss.streamKey = new.StreamKey
 	}
 	s.mu.Unlock()
 	if !ok {
