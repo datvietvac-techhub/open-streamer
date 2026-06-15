@@ -1,5 +1,12 @@
 package domain
 
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+)
+
 // HookID is the unique identifier for a registered hook.
 type HookID string
 
@@ -95,4 +102,37 @@ type Hook struct {
 	// unreachable target. 0 = use HooksConfig default, then
 	// DefaultHookBatchMaxQueueItems.
 	BatchMaxQueueItems int `json:"batch_max_queue_items,omitempty" yaml:"batch_max_queue_items,omitempty"`
+}
+
+// Validate checks the hook's type and target are well-formed (S-2). For a file
+// hook — which writes to the host filesystem — an absolute path alone is not
+// safe, so when allowedFileRoot is non-empty the target is confined inside it
+// (rejecting `..` escape). allowedFileRoot == "" keeps the legacy "absolute
+// path only" behaviour for backward compatibility. Shared by the REST handler,
+// the YAML config path, and the file delivery sink so every entry point that
+// can reach the filesystem applies the same rule.
+func (h *Hook) Validate(allowedFileRoot string) error {
+	target := strings.TrimSpace(h.Target)
+	if target == "" {
+		return errors.New("hook target is required")
+	}
+	switch h.Type {
+	case HookTypeHTTP:
+		if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+			return errors.New("http hook target must be an http(s):// URL")
+		}
+	case HookTypeFile:
+		if !filepath.IsAbs(target) {
+			return errors.New("file hook target must be an absolute path")
+		}
+		if allowedFileRoot != "" {
+			root := filepath.Clean(allowedFileRoot)
+			if clean := filepath.Clean(target); !pathInside(clean, root) {
+				return fmt.Errorf("file hook target %q must be inside the configured hooks.file_root_dir %q", target, root)
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported hook type %q (use http|file)", h.Type)
+	}
+	return nil
 }

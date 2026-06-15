@@ -244,6 +244,13 @@ type HooksConfig struct {
 	// queue cap. Per-hook overrides win; code default is
 	// DefaultHookBatchMaxQueueItems.
 	BatchMaxQueueItems int `mapstructure:"batch_max_queue_items" json:"batch_max_queue_items,omitempty" yaml:"batch_max_queue_items,omitempty"`
+
+	// FileRootDir confines file-type hooks to this directory (S-2). When set,
+	// a file hook's target must resolve inside it — preventing arbitrary
+	// host-file create/append (e.g. clobbering the store, filling disk). Empty
+	// keeps the legacy "any absolute path" behaviour for backward compatibility;
+	// operators are encouraged to set it (e.g. /var/log/open-streamer/hooks).
+	FileRootDir string `mapstructure:"file_root_dir" json:"file_root_dir,omitempty" yaml:"file_root_dir,omitempty"`
 }
 
 // AuthConfig holds authentication settings for the control-plane HTTP API

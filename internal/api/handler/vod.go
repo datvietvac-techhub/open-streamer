@@ -295,6 +295,11 @@ func (h *VODHandler) Raw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !vod.IsVideoFile(abs) {
+		writeError(w, http.StatusNotFound, "FILE_NOT_FOUND", "file not found")
+		return
+	}
+
 	http.ServeFile(w, r, abs)
 }
 

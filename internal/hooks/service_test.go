@@ -75,14 +75,16 @@ func (r *fakeHookRepo) Delete(_ context.Context, id domain.HookID) error {
 }
 
 func newSvc(repo *fakeHookRepo) *Service {
-	return &Service{
-		cfg:       config.HooksConfig{},
+	svc := &Service{
 		hookRepo:  repo,
 		bus:       events.New(1, 16),
 		client:    &http.Client{Timeout: 5 * time.Second},
 		batchers:  make(map[domain.HookID]*httpBatcher),
 		fileLocks: make(map[string]*sync.Mutex),
 	}
+	cfg := config.HooksConfig{}
+	svc.cfgPtr.Store(&cfg)
+	return svc
 }
 
 // fastBatchHook returns an HTTP hook tuned for tests: batch size 1 so
@@ -554,6 +556,26 @@ func TestMergeBatchConfigLayering(t *testing.T) {
 			t.Errorf("code default not used: %+v", got)
 		}
 	})
+}
+
+func TestService_SetConfigHotSwapsFileRoot(t *testing.T) {
+	svc := newSvc(newFakeHookRepo())
+	if svc.FileRootDir() != "" {
+		t.Fatalf("expected empty file root by default, got %q", svc.FileRootDir())
+	}
+
+	svc.SetConfig(config.HooksConfig{FileRootDir: "/var/lib/open-streamer/hooks"})
+	if got := svc.FileRootDir(); got != "/var/lib/open-streamer/hooks" {
+		t.Errorf("SetConfig must hot-swap file_root_dir; got %q", got)
+	}
+}
+
+func TestService_FileRootDirZeroValueWhenUnset(t *testing.T) {
+	// cfgPtr never populated → fall back to zero value, never nil-deref.
+	svc := &Service{}
+	if svc.FileRootDir() != "" {
+		t.Errorf("expected empty file root for unset cfgPtr, got %q", svc.FileRootDir())
+	}
 }
 
 func TestMatchesEventTypeFilter(t *testing.T) {

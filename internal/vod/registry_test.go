@@ -267,3 +267,28 @@ func mustWrite(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestRegistry_ResolvePathRejectsSymlinkEscape(t *testing.T) {
+	t.Parallel()
+	r, dir := newRegistryWithMount(t)
+
+	// A target outside the mount, and a symlink inside the mount pointing at it.
+	outside := filepath.Join(t.TempDir(), "secret.mp4")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "escape.mp4")); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+	if _, err := r.ResolvePath(testMountName, "escape.mp4"); !errors.Is(err, vod.ErrPathEscapesMount) {
+		t.Errorf("ResolvePath via escaping symlink err=%v, want ErrPathEscapesMount", err)
+	}
+
+	// A normal in-mount file still resolves.
+	if err := os.WriteFile(filepath.Join(dir, "ok.mp4"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ResolvePath(testMountName, "ok.mp4"); err != nil {
+		t.Errorf("ResolvePath for in-mount file err=%v, want nil", err)
+	}
+}

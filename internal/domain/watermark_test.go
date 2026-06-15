@@ -148,3 +148,47 @@ func TestWatermarkResolved(t *testing.T) {
 		t.Errorf("Resize toggle dropped by Resolved()")
 	}
 }
+
+func TestValidateFontColor(t *testing.T) {
+	t.Parallel()
+	good := []string{"", "white", "Red", "darkblue", "#FF0000", "#FF0000FF", "0xRRGGBB"[:2] + "FF0000", "white@0.5", "#FF000080", "black@1.0", "red@.5"}
+	for _, c := range good {
+		if err := ValidateFontColor(c); err != nil {
+			t.Errorf("ValidateFontColor(%q) = %v, want nil", c, err)
+		}
+	}
+	// Injection payloads (the S-3 vector) and malformed values must be rejected.
+	bad := []string{
+		"white,drawtext=textfile=/etc/passwd",
+		"red':scale=-1:-1",
+		"white:x=0",
+		"red;rm -rf",
+		"white[a]",
+		"#FF00",     // too short
+		"#GGGGGG",   // non-hex
+		"white@1.5", // opacity out of range
+		"white@2",
+		"@0.5",
+	}
+	for _, c := range bad {
+		if err := ValidateFontColor(c); err == nil {
+			t.Errorf("ValidateFontColor(%q) = nil, want error", c)
+		}
+	}
+}
+
+func TestValidateStorageRejectsSensitive(t *testing.T) {
+	t.Parallel()
+	for _, p := range []string{"/etc", "/etc/secrets", "/proc/1", "/sys", "/root/.ssh", "/dev/null", "/boot"} {
+		m := &VODMount{Name: "m", Storage: p}
+		if err := m.ValidateStorage(); err == nil {
+			t.Errorf("ValidateStorage(%q) = nil, want error (sensitive dir)", p)
+		}
+	}
+	for _, p := range []string{"/srv/media", "/data/vod", "/mnt/library"} {
+		m := &VODMount{Name: "m", Storage: p}
+		if err := m.ValidateStorage(); err != nil {
+			t.Errorf("ValidateStorage(%q) = %v, want nil", p, err)
+		}
+	}
+}

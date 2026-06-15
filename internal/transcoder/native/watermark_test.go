@@ -56,7 +56,7 @@ func TestBuildWatermarkFilter_TextDefaults(t *testing.T) {
 		"drawtext=",
 		"text='Hello'",
 		"fontsize=24",
-		"fontcolor=white",
+		"fontcolor='white'", // S-3: fontcolor is single-quoted to contain injection
 		"x=w-text_w-16",
 		"y=16",
 		"fontfile=",
@@ -80,7 +80,7 @@ func TestBuildWatermarkFilter_TextOpacityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWatermarkFilter: %v", err)
 	}
-	if !strings.Contains(got, "fontcolor=white@0.7") {
+	if !strings.Contains(got, "fontcolor='white@0.7'") {
 		t.Errorf("opacity not embedded in fontcolor: %s", got)
 	}
 }

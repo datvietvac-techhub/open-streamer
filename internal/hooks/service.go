@@ -21,9 +21,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,6 +33,7 @@ import (
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 	"github.com/datvietvac-techhub/open-streamer/internal/events"
 	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
+	"github.com/datvietvac-techhub/open-streamer/internal/netguard"
 	"github.com/datvietvac-techhub/open-streamer/internal/store"
 )
 
@@ -54,7 +55,11 @@ var ErrHookTestUnsupported = errors.New("hooks: test delivery not supported for 
 // File hooks share a per-target write mutex map so concurrent deliveries to
 // the same path serialise without interleaving partial JSON lines.
 type Service struct {
-	cfg      config.HooksConfig
+	// cfgPtr holds the latest HooksConfig, stored atomically so SetConfig can
+	// hot-swap it (e.g. file_root_dir) and the next hook create/update + file
+	// delivery observe the new value without a reboot. Hooks have no listener to
+	// restart, so this atomic store is the entire hot-reload mechanism.
+	cfgPtr   atomic.Pointer[config.HooksConfig]
 	hookRepo store.HookRepository
 	bus      events.Bus
 	client   *http.Client
@@ -79,15 +84,19 @@ func New(i do.Injector) (*Service, error) {
 	bus := do.MustInvoke[events.Bus](i)
 
 	svc := &Service{
-		cfg:      cfg,
 		hookRepo: hookRepo,
 		bus:      bus,
 		// No client-level timeout — each delivery applies its own per-hook
-		// timeout via context.WithTimeout in postOnce / deliverFile.
-		client:    &http.Client{},
+		// timeout via context.WithTimeout in postOnce / deliverFile. The client
+		// carries the SSRF dial guard (S-2): loopback / link-local /
+		// cloud-metadata (169.254.169.254) are blocked so a webhook target can't
+		// pivot to the local admin API or instance metadata. Private RFC1918 is
+		// permitted because internal webhooks are a legitimate use.
+		client:    netguard.NewClient(netguard.Policy{AllowPrivate: true}, 0),
 		batchers:  make(map[domain.HookID]*httpBatcher),
 		fileLocks: make(map[string]*sync.Mutex),
 	}
+	svc.cfgPtr.Store(&cfg)
 	if m, err := do.Invoke[*metrics.Metrics](i); err == nil {
 		svc.m = &metricsHooks{
 			delivery:     m.HooksDeliveryTotal,
@@ -97,6 +106,32 @@ func New(i do.Injector) (*Service, error) {
 		}
 	}
 	return svc, nil
+}
+
+// SetConfig hot-swaps the HooksConfig. The next hook create/update validates
+// against the new file_root_dir and the next file delivery writes under it —
+// no reboot needed. Already-running HTTP batchers keep their batch settings
+// for their lifetime (see batcherFor).
+func (s *Service) SetConfig(cfg config.HooksConfig) {
+	cp := cfg
+	s.cfgPtr.Store(&cp)
+}
+
+// currentCfg returns the latest HooksConfig snapshot. Always non-nil after
+// construction.
+func (s *Service) currentCfg() config.HooksConfig {
+	if p := s.cfgPtr.Load(); p != nil {
+		return *p
+	}
+	return config.HooksConfig{}
+}
+
+// FileRootDir returns the configured containment root for file hooks, read
+// live so a runtime config change applies to the next hook validation. Empty
+// string means "no containment configured" (validation falls back to its
+// default behaviour).
+func (s *Service) FileRootDir() string {
+	return s.currentCfg().FileRootDir
 }
 
 // DeliverTestEvent sends a single synthetic event to the hook using the same
@@ -267,10 +302,11 @@ func (s *Service) batcherFor(_ context.Context, h *domain.Hook) *httpBatcher {
 	if ok {
 		return b
 	}
+	hcfg := s.currentCfg()
 	cfg := mergeBatchConfig(h, batchGlobalDefaults{
-		maxItems:         s.cfg.BatchMaxItems,
-		flushIntervalSec: s.cfg.BatchFlushIntervalSec,
-		maxQueueItems:    s.cfg.BatchMaxQueueItems,
+		maxItems:         hcfg.BatchMaxItems,
+		flushIntervalSec: hcfg.BatchFlushIntervalSec,
+		maxQueueItems:    hcfg.BatchMaxQueueItems,
 	})
 	bctx := s.startCtx
 	if bctx == nil {
@@ -335,13 +371,13 @@ func (s *Service) matches(h *domain.Hook, event domain.Event) bool {
 // either need a custom delimiter (breaking the JSON-lines contract) or
 // chunked writes (defeating the per-line atomicity).
 func (s *Service) deliverFile(h *domain.Hook, event domain.Event) error {
+	// Re-validate at delivery time (S-2): the same containment the REST/YAML
+	// paths enforce, applied here too so a hook loaded straight from the store
+	// (or pre-dating the validation) can't write outside the configured root.
+	if err := h.Validate(s.currentCfg().FileRootDir); err != nil {
+		return fmt.Errorf("file delivery: %w", err)
+	}
 	target := strings.TrimSpace(h.Target)
-	if target == "" {
-		return errors.New("file delivery: empty target path")
-	}
-	if !filepath.IsAbs(target) {
-		return fmt.Errorf("file delivery: target must be an absolute path, got %q", target)
-	}
 
 	body, err := json.Marshal(event)
 	if err != nil {

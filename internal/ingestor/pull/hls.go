@@ -161,7 +161,6 @@ type hlsVariant struct {
 // deferred close does not affect the new one.
 type HLSReader struct {
 	input  domain.Input
-	cfg    config.IngestorConfig
 	maxBuf int
 
 	// plClient: short-timeout client for playlist GETs.
@@ -182,7 +181,6 @@ func NewHLSReader(input domain.Input, cfg config.IngestorConfig) *HLSReader {
 	}
 	return &HLSReader{
 		input:  input,
-		cfg:    cfg,
 		maxBuf: maxBuf,
 	}
 }
@@ -203,7 +201,7 @@ func (r *HLSReader) Open(ctx context.Context) error {
 	// Build a shared transport so playlist + segment clients pick up the
 	// same TLS policy. Default uses Go's secure defaults; the operator can
 	// opt out via input.net.insecure_tls = true (e.g. self-signed source on
-	// a trusted private network — Vietnamese TV CDN often expired certs).
+	// a trusted private network — broadcast CDNs often serve expired certs).
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if r.input.Net.InsecureTLS {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // operator-opted-in for sources on trusted networks
