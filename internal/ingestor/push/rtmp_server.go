@@ -34,9 +34,11 @@ package push
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -142,8 +144,24 @@ type StreamCallbacks struct {
 // publish, in which case any push to an unregistered path is rejected
 // with the existing "stream not registered" semantics.
 type AutoPublishResolver interface {
-	ResolveOrCreate(ctx context.Context, path string) (domain.StreamCode, error)
+	ResolveOrCreate(ctx context.Context, path, secret string) (domain.StreamCode, error)
 }
+
+// StreamKeyResolver returns the configured push-ingest secret for a stream
+// (its resolved `StreamKey`), or "" when the stream has no key set — in which
+// case push is unauthenticated for that stream. Used by OnNewRtmpPubSession to
+// gate a direct push before claiming the registry slot (S-8). nil resolver =
+// push auth disabled (legacy behaviour).
+type StreamKeyResolver func(domain.StreamCode) string
+
+// pushKeyQueryParam is the publish-URL query key an encoder uses to carry the
+// stream secret: rtmp://host/<path>?key=SECRET. lal strips the query from the
+// stream name, so it never affects routing (rtmpRouteKey).
+const pushKeyQueryParam = "key"
+
+// errUnauthorizedPush rejects a publish whose supplied ?key= does not match the
+// stream's configured StreamKey.
+var errUnauthorizedPush = errors.New("rtmp server: unauthorized (missing or wrong stream key)")
 
 // RTMPServer accepts RTMP push connections from encoders, validates them
 // against the push Registry, and writes decoded AVPackets into the Buffer
@@ -153,11 +171,12 @@ type RTMPServer struct {
 	registry      Registry
 	normaliserCfg timeline.Config
 
-	mu       sync.Mutex
-	pubs     map[*rtmp.ServerSession]*pubState
-	subs     map[*rtmp.ServerSession]*subState
-	playFunc PlayFunc
-	resolver AutoPublishResolver
+	mu          sync.Mutex
+	pubs        map[*rtmp.ServerSession]*pubState
+	subs        map[*rtmp.ServerSession]*subState
+	playFunc    PlayFunc
+	resolver    AutoPublishResolver
+	streamKeyFn StreamKeyResolver
 
 	// streamCallbacks: streamID → per-stream callback set. Populated by
 	// the ingestor.Service at startPushRegistration time so the closures
@@ -224,34 +243,81 @@ func (s *RTMPServer) SetAutoPublishResolver(r AutoPublishResolver) {
 	s.mu.Unlock()
 }
 
+// SetStreamKeyResolver installs the push-auth resolver (S-8). Passing nil
+// disables push key enforcement. Safe to call concurrently with Run.
+func (s *RTMPServer) SetStreamKeyResolver(fn StreamKeyResolver) {
+	s.mu.Lock()
+	s.streamKeyFn = fn
+	s.mu.Unlock()
+}
+
+// pushKeyOK reports whether secret authorises a push to streamID. A nil
+// resolver (auth disabled) or an empty configured key (stream opted out) both
+// allow; otherwise the supplied secret must match in constant time.
+func (s *RTMPServer) pushKeyOK(streamID domain.StreamCode, secret string) bool {
+	s.mu.Lock()
+	fn := s.streamKeyFn
+	s.mu.Unlock()
+	if fn == nil {
+		return true
+	}
+	want := fn(streamID)
+	if want == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(secret), []byte(want)) == 1
+}
+
+// pushSecretFromQuery extracts the push secret an encoder supplies as the
+// `key` query parameter on the publish URL (rtmp://host/<path>?key=SECRET).
+func pushSecretFromQuery(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	v, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return ""
+	}
+	return v.Get(pushKeyQueryParam)
+}
+
 // acquireOrAutoPublish tries to claim the registry slot for key. On miss,
 // the auto-publish resolver (when wired) is consulted: it walks template
 // prefixes, materialises a runtime stream if one matches, and registers
 // the slot synchronously. The acquire is then retried. Any non-nil error
 // surfaces as a publish-rejection at the caller.
 func (s *RTMPServer) acquireOrAutoPublish(
-	key, remoteAddr string,
+	key, secret, remoteAddr string,
 ) (domain.StreamCode, domain.StreamCode, *buffer.Service, error) {
-	bufWriteID, streamID, buf, err := s.registry.Acquire(key)
-	if err == nil {
-		return bufWriteID, streamID, buf, nil
+	// Registered slot → direct push. Enforce the stream's configured StreamKey
+	// (S-8) BEFORE claiming the slot, so a bad key never mutates slot state:
+	// a stream with a non-empty key requires a matching ?key= on the publish
+	// URL; an empty key means the stream opted out of push auth.
+	if _, streamID, _, lerr := s.registry.Lookup(key); lerr == nil {
+		if !s.pushKeyOK(streamID, secret) {
+			return "", "", nil, errUnauthorizedPush
+		}
+		return s.registry.Acquire(key)
 	}
+
+	// Not registered → auto-publish. The resolver enforces the matching
+	// template's StreamKey against secret before materialising the stream.
 	s.mu.Lock()
 	resolver := s.resolver
 	s.mu.Unlock()
 	if resolver == nil {
-		return "", "", nil, err
+		return "", "", nil, fmt.Errorf("ingestor: no stream registered for key %q", key)
 	}
 	// Use a fresh background context — the resolver may outlive the
 	// callback (it spawns goroutines for the runtime stream). lal's
 	// OnNewRtmpPubSession blocks until we return, so the timeout is
 	// effectively the publish handshake's own deadline; nothing extra
 	// to enforce here.
-	code, rerr := resolver.ResolveOrCreate(context.Background(), key)
+	code, rerr := resolver.ResolveOrCreate(context.Background(), key, secret)
 	if rerr != nil {
 		slog.Debug("rtmp server: auto-publish resolver declined",
 			"key", key, "remote", remoteAddr, "err", rerr)
-		return "", "", nil, err // surface the original "not registered" error
+		return "", "", nil, rerr
 	}
 	return s.registry.Acquire(string(code))
 }
@@ -357,7 +423,8 @@ func (s *RTMPServer) OnNewRtmpPubSession(session *rtmp.ServerSession) error {
 		)
 		return errors.New("rtmp server: invalid stream path")
 	}
-	bufWriteID, streamID, buf, err := s.acquireOrAutoPublish(key, session.GetStat().RemoteAddr)
+	secret := pushSecretFromQuery(session.RawQuery())
+	bufWriteID, streamID, buf, err := s.acquireOrAutoPublish(key, secret, session.GetStat().RemoteAddr)
 	if err != nil {
 		slog.Warn("rtmp server: rejected publisher",
 			"key", key,

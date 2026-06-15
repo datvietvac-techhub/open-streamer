@@ -31,6 +31,22 @@ func (s *Service) PlaybackPolicy(code domain.StreamCode) (policy domain.PolicyCo
 	return "", false
 }
 
+// PushStreamKey returns a RUNNING stream's configured push-ingest secret
+// (its resolved StreamKey; "" = no secret → push unauthenticated for that
+// stream) and whether the stream is currently running. O(1) in-memory lookup,
+// the first tier of the RTMP server's push-auth resolver (S-8) so the connect
+// path avoids a store read for live streams — including auto-publish runtime
+// streams that have no on-disk record. The `running` flag lets the caller fall
+// back to the store + template for a stopped/configured stream.
+func (s *Service) PushStreamKey(code domain.StreamCode) (streamKey string, running bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ss, ok := s.streams[code]; ok {
+		return ss.streamKey, true
+	}
+	return "", false
+}
+
 // playAllowed runs the media-auth chain for one playback request. Returns true
 // (allow) when no authorizer is wired or media auth is disabled. Denials are
 // logged with the (non-leaky) reason.

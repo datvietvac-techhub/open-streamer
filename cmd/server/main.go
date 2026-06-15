@@ -165,6 +165,10 @@ func run() error {
 	// avoid the ingestor package depending on the store layer.
 	wireCopyLookup(injector)
 
+	// 7c. Wire the push-ingest auth resolver (S-8) so the RTMP server enforces
+	// each stream's configured StreamKey before accepting a publisher.
+	wirePushAuth(injector)
+
 	// 8. Hydrate VOD registry from the store so ingestor workers started in
 	//    bootstrap can resolve file:// URLs against the user's mount table.
 	if err := hydrateVODRegistry(ctx, injector); err != nil {
@@ -412,6 +416,34 @@ func wireCopyLookup(i do.Injector) {
 			}
 		}
 		return s, true
+	})
+}
+
+// wirePushAuth hands the ingestor's RTMP push server a resolver for a stream's
+// configured push secret (StreamKey), enforced before a publisher is accepted
+// (S-8). Live streams hit the publisher's in-memory table (O(1), and covers
+// auto-publish runtime streams with no store record); a stopped/configured
+// stream falls back to the store + template merge so an inherited StreamKey is
+// honoured. "" = the stream opted out of push auth.
+func wirePushAuth(i do.Injector) {
+	ing := do.MustInvoke[*ingestor.Service](i)
+	pub := do.MustInvoke[*publisher.Service](i)
+	streamRepo := do.MustInvoke[store.StreamRepository](i)
+	templateRepo := do.MustInvoke[store.TemplateRepository](i)
+	ing.SetPushStreamKeyResolver(func(code domain.StreamCode) string {
+		if sk, running := pub.PushStreamKey(code); running {
+			return sk
+		}
+		s, err := streamRepo.FindByCode(context.Background(), code)
+		if err != nil {
+			return ""
+		}
+		if s.Template != nil {
+			if tpl, terr := templateRepo.FindByCode(context.Background(), *s.Template); terr == nil {
+				s = domain.ResolveStream(s, tpl)
+			}
+		}
+		return s.StreamKey
 	})
 }
 

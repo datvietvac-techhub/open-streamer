@@ -33,7 +33,6 @@ import (
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 	"github.com/datvietvac-techhub/open-streamer/internal/events"
 	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
-	"github.com/datvietvac-techhub/open-streamer/internal/netguard"
 	"github.com/datvietvac-techhub/open-streamer/internal/store"
 )
 
@@ -87,12 +86,11 @@ func New(i do.Injector) (*Service, error) {
 		hookRepo: hookRepo,
 		bus:      bus,
 		// No client-level timeout — each delivery applies its own per-hook
-		// timeout via context.WithTimeout in postOnce / deliverFile. The client
-		// carries the SSRF dial guard (S-2): loopback / link-local /
-		// cloud-metadata (169.254.169.254) are blocked so a webhook target can't
-		// pivot to the local admin API or instance metadata. Private RFC1918 is
-		// permitted because internal webhooks are a legitimate use.
-		client:    netguard.NewClient(netguard.Policy{AllowPrivate: true}, 0),
+		// timeout via context.WithTimeout in postOnce / deliverFile. Webhook
+		// targets are operator-configured (admin-authenticated) and frequently
+		// point at private / local endpoints (sidecar collectors, internal
+		// services), so there is no egress IP guard here.
+		client:    &http.Client{},
 		batchers:  make(map[domain.HookID]*httpBatcher),
 		fileLocks: make(map[string]*sync.Mutex),
 	}

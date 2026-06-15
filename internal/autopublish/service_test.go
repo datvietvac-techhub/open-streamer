@@ -135,7 +135,7 @@ func TestResolveOrCreate_HappyPath(t *testing.T) {
 	})
 	require.NoError(t, s.RefreshTemplates(context.Background()))
 
-	code, err := s.ResolveOrCreate(context.Background(), "live/foo")
+	code, err := s.ResolveOrCreate(context.Background(), "live/foo", "")
 	require.NoError(t, err)
 	assert.Equal(t, domain.StreamCode("live/foo"), code)
 
@@ -168,7 +168,7 @@ func TestResolveOrCreate_DedupsConcurrentCallers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := s.ResolveOrCreate(context.Background(), "live/foo"); err == nil {
+			if _, err := s.ResolveOrCreate(context.Background(), "live/foo", ""); err == nil {
 				ok.Add(1)
 			}
 		}()
@@ -185,7 +185,7 @@ func TestResolveOrCreate_NoMatchReturnsErr(t *testing.T) {
 	s, _, _ := newServiceWithDeps(t)
 	require.NoError(t, s.RefreshTemplates(context.Background()))
 
-	_, err := s.ResolveOrCreate(context.Background(), "unknown/foo")
+	_, err := s.ResolveOrCreate(context.Background(), "unknown/foo", "")
 	require.ErrorIs(t, err, ErrNoMatch)
 }
 
@@ -200,11 +200,40 @@ func TestResolveOrCreate_TemplateWithoutPushRejected(t *testing.T) {
 	})
 	require.NoError(t, s.RefreshTemplates(context.Background()))
 
-	_, err := s.ResolveOrCreate(context.Background(), "live/foo")
+	_, err := s.ResolveOrCreate(context.Background(), "live/foo", "")
 	require.ErrorIs(t, err, ErrTemplateNoPush)
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
 	assert.Empty(t, cd.started)
+}
+
+// A template with a StreamKey requires a matching ?key= secret (S-8): a
+// wrong/absent secret is rejected with ErrUnauthorized and no stream is
+// started; the correct secret materialises the stream.
+func TestResolveOrCreate_StreamKeyEnforced(t *testing.T) {
+	s, tr, cd := newServiceWithDeps(t)
+	tr.put(&domain.Template{
+		Code:      "profile-a",
+		Prefixes:  []string{"live"},
+		Inputs:    []domain.Input{{URL: "publish://"}},
+		StreamKey: "s3cr3t",
+	})
+	require.NoError(t, s.RefreshTemplates(context.Background()))
+
+	_, err := s.ResolveOrCreate(context.Background(), "live/foo", "wrong")
+	require.ErrorIs(t, err, ErrUnauthorized)
+	_, err = s.ResolveOrCreate(context.Background(), "live/foo", "")
+	require.ErrorIs(t, err, ErrUnauthorized)
+	cd.mu.Lock()
+	assert.Empty(t, cd.started, "an unauthorised push must not start a runtime stream")
+	cd.mu.Unlock()
+
+	code, err := s.ResolveOrCreate(context.Background(), "live/foo", "s3cr3t")
+	require.NoError(t, err)
+	assert.Equal(t, domain.StreamCode("live/foo"), code)
+	cd.mu.Lock()
+	assert.Len(t, cd.started, 1, "the correct secret must materialise the stream")
+	cd.mu.Unlock()
 }
 
 // Invalid stream codes (e.g. contain "..") must be rejected at the
@@ -218,7 +247,7 @@ func TestResolveOrCreate_InvalidStreamCodeRejected(t *testing.T) {
 	})
 	require.NoError(t, s.RefreshTemplates(context.Background()))
 
-	_, err := s.ResolveOrCreate(context.Background(), "live/../escape")
+	_, err := s.ResolveOrCreate(context.Background(), "live/../escape", "")
 	require.Error(t, err)
 }
 
@@ -234,7 +263,7 @@ func TestResolveOrCreate_StartFailureLeavesNoEntry(t *testing.T) {
 	})
 	require.NoError(t, s.RefreshTemplates(context.Background()))
 
-	_, err := s.ResolveOrCreate(context.Background(), "live/foo")
+	_, err := s.ResolveOrCreate(context.Background(), "live/foo", "")
 	require.Error(t, err)
 	assert.False(t, s.IsRuntime("live/foo"))
 }
