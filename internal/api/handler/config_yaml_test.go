@@ -791,3 +791,131 @@ func TestValidateHooksNegativeRetriesAndTimeout(t *testing.T) {
 		t.Errorf("missing negative-int errors, got %+v", errs)
 	}
 }
+
+// --- policies (config-yaml round-trip) ----------------------------------------
+
+// fakePolicyRepo is an in-memory store.PolicyRepository for tests.
+type fakePolicyRepo struct {
+	items   map[domain.PolicyCode]*domain.Policy
+	listErr error
+}
+
+func newFakePolicyRepo(seed ...*domain.Policy) *fakePolicyRepo {
+	r := &fakePolicyRepo{items: make(map[domain.PolicyCode]*domain.Policy)}
+	for _, p := range seed {
+		r.items[p.Code] = p
+	}
+	return r
+}
+
+func (r *fakePolicyRepo) Save(_ context.Context, p *domain.Policy) error {
+	r.items[p.Code] = p
+	return nil
+}
+
+func (r *fakePolicyRepo) FindByCode(_ context.Context, code domain.PolicyCode) (*domain.Policy, error) {
+	p, ok := r.items[code]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return p, nil
+}
+
+func (r *fakePolicyRepo) List(_ context.Context) ([]*domain.Policy, error) {
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	out := make([]*domain.Policy, 0, len(r.items))
+	for _, p := range r.items {
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (r *fakePolicyRepo) Delete(_ context.Context, code domain.PolicyCode) error {
+	delete(r.items, code)
+	return nil
+}
+
+// fakeAuthz records SetPolicies calls so tests can assert the hot-reload fired.
+type fakeAuthz struct{ lastSet []*domain.Policy }
+
+func (a *fakeAuthz) SetPolicies(ps []*domain.Policy) { a.lastSet = ps }
+
+func TestGetConfigYAMLBundlesPolicies(t *testing.T) {
+	rtm := &fakeRuntimeManager{cfg: &domain.GlobalConfig{Server: &config.ServerConfig{HTTPAddr: ":8080"}}}
+	h := newTestHandler(rtm, newFakeStreamRepo(), newFakeHookRepo(), newFakeCoord())
+	h.policyRepo = newFakePolicyRepo(&domain.Policy{Code: "only_us", AllowCountries: []string{"US"}})
+
+	w := httptest.NewRecorder()
+	h.GetConfigYAML(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, yamlPath, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var back fullConfig
+	if err := yaml.Unmarshal(w.Body.Bytes(), &back); err != nil {
+		t.Fatalf("response not valid YAML: %v", err)
+	}
+	if len(back.Policies) != 1 || back.Policies[0].Code != "only_us" {
+		t.Errorf("policies not bundled: %+v", back.Policies)
+	}
+}
+
+func TestReplaceConfigYAMLAppliesPoliciesAndReloads(t *testing.T) {
+	rtm := &fakeRuntimeManager{cfg: &domain.GlobalConfig{Server: &config.ServerConfig{HTTPAddr: ":8080"}}}
+	h := newTestHandler(rtm, newFakeStreamRepo(), newFakeHookRepo(), newFakeCoord())
+	pol := newFakePolicyRepo()
+	authz := &fakeAuthz{}
+	h.policyRepo = pol
+	h.authz = authz
+
+	body := "" +
+		"global_config:\n  server:\n    http_addr: \":8080\"\n" +
+		"policies:\n  - code: vip\n    require_token: true\n    token_secret: sk\n    allow_countries: [US, VN]\n"
+	w := httptest.NewRecorder()
+	h.ReplaceConfigYAML(w, putYAML(t, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if _, ok := pol.items["vip"]; !ok {
+		t.Error("policy 'vip' not persisted by config-yaml apply")
+	}
+	if len(authz.lastSet) != 1 || authz.lastSet[0].Code != "vip" {
+		t.Errorf("authorizer not hot-reloaded with the new policy set: %+v", authz.lastSet)
+	}
+}
+
+func TestReplaceConfigYAMLRejectsInvalidPolicy(t *testing.T) {
+	rtm := &fakeRuntimeManager{cfg: &domain.GlobalConfig{Server: &config.ServerConfig{HTTPAddr: ":8080"}}}
+	h := newTestHandler(rtm, newFakeStreamRepo(), newFakeHookRepo(), newFakeCoord())
+	h.policyRepo = newFakePolicyRepo()
+
+	// require_token with no secret must fail validation (422), nothing applied.
+	body := "global_config:\n  server:\n    http_addr: \":8080\"\n" +
+		"policies:\n  - code: bad\n    require_token: true\n"
+	w := httptest.NewRecorder()
+	h.ReplaceConfigYAML(w, putYAML(t, body))
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for invalid policy, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestReplaceConfigYAMLRefusesDeletingReferencedPolicy(t *testing.T) {
+	rtm := &fakeRuntimeManager{cfg: &domain.GlobalConfig{Server: &config.ServerConfig{HTTPAddr: ":8080"}}}
+	// A stream in the desired doc still references 'keep'.
+	streams := newFakeStreamRepo()
+	h := newTestHandler(rtm, streams, newFakeHookRepo(), newFakeCoord())
+	h.policyRepo = newFakePolicyRepo(&domain.Policy{Code: "keep", AllowCountries: []string{"US"}})
+
+	body := "global_config:\n  server:\n    http_addr: \":8080\"\n" +
+		"policies: []\n" + // omit 'keep' → would delete it
+		"streams:\n  - code: s1\n    playback_policy: keep\n    inputs:\n      - url: " + srcRTMPURL + "\n"
+	w := httptest.NewRecorder()
+	h.ReplaceConfigYAML(w, putYAML(t, body))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected refusal (500 APPLY_POLICIES_FAILED) when deleting a referenced policy, got %d body=%s", w.Code, w.Body.String())
+	}
+	if _, ok := h.policyRepo.(*fakePolicyRepo).items["keep"]; !ok {
+		t.Error("referenced policy 'keep' must not be deleted")
+	}
+}
