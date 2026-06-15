@@ -34,6 +34,7 @@ const dbFile = "open_streamer.json"
 type db struct {
 	Streams    map[string]*domain.Stream    `json:"streams"`
 	Templates  map[string]*domain.Template  `json:"templates,omitempty"`
+	Policies   map[string]*domain.Policy    `json:"policies,omitempty"`
 	Recordings map[string]*domain.Recording `json:"recordings"`
 	Hooks      map[string]*domain.Hook      `json:"hooks"`
 	VOD        map[string]*domain.VODMount  `json:"vod,omitempty"`
@@ -60,6 +61,9 @@ func (s *Store) Streams() store.StreamRepository { return &streamRepo{s} }
 
 // Templates returns a TemplateRepository backed by this Store.
 func (s *Store) Templates() store.TemplateRepository { return &templateRepo{s} }
+
+// Policies returns a PolicyRepository backed by this Store.
+func (s *Store) Policies() store.PolicyRepository { return &policyRepo{s} }
 
 // Recordings returns a RecordingRepository backed by this Store.
 func (s *Store) Recordings() store.RecordingRepository { return &recordingRepo{s} }
@@ -94,6 +98,9 @@ func (s *Store) readDB() (db, error) {
 	}
 	if d.Templates == nil {
 		d.Templates = make(map[string]*domain.Template)
+	}
+	if d.Policies == nil {
+		d.Policies = make(map[string]*domain.Policy)
 	}
 	if d.Recordings == nil {
 		d.Recordings = make(map[string]*domain.Recording)
@@ -153,6 +160,7 @@ func emptyDB() db {
 	return db{
 		Streams:    make(map[string]*domain.Stream),
 		Templates:  make(map[string]*domain.Template),
+		Policies:   make(map[string]*domain.Policy),
 		Recordings: make(map[string]*domain.Recording),
 		Hooks:      make(map[string]*domain.Hook),
 		VOD:        make(map[string]*domain.VODMount),
@@ -267,6 +275,62 @@ func (r *templateRepo) List(_ context.Context) ([]*domain.Template, error) {
 func (r *templateRepo) Delete(_ context.Context, code domain.TemplateCode) error {
 	return r.s.modify(func(d *db) error {
 		delete(d.Templates, string(code))
+		return nil
+	})
+}
+
+// --- PolicyRepository ---
+
+type policyRepo struct{ s *Store }
+
+// Save implements store.PolicyRepository.
+func (r *policyRepo) Save(_ context.Context, policy *domain.Policy) error {
+	return r.s.modify(func(d *db) error {
+		d.Policies[string(policy.Code)] = policy
+		return nil
+	})
+}
+
+// FindByCode implements store.PolicyRepository.
+func (r *policyRepo) FindByCode(_ context.Context, code domain.PolicyCode) (*domain.Policy, error) {
+	var result *domain.Policy
+	err := r.s.readAll(func(d db) error {
+		p, ok := d.Policies[string(code)]
+		if !ok {
+			return fmt.Errorf("policy %s: %w", code, store.ErrNotFound)
+		}
+		result = p
+		return nil
+	})
+	return result, err
+}
+
+// List implements store.PolicyRepository.
+func (r *policyRepo) List(_ context.Context) ([]*domain.Policy, error) {
+	var result []*domain.Policy
+	err := r.s.readAll(func(d db) error {
+		result = make([]*domain.Policy, 0, len(d.Policies))
+		for _, p := range d.Policies {
+			result = append(result, p)
+		}
+		slices.SortFunc(result, func(a, b *domain.Policy) int {
+			if a.Code < b.Code {
+				return -1
+			}
+			if a.Code > b.Code {
+				return 1
+			}
+			return 0
+		})
+		return nil
+	})
+	return result, err
+}
+
+// Delete implements store.PolicyRepository.
+func (r *policyRepo) Delete(_ context.Context, code domain.PolicyCode) error {
+	return r.s.modify(func(d *db) error {
+		delete(d.Policies, string(code))
 		return nil
 	})
 }

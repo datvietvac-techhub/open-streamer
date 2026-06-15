@@ -246,8 +246,9 @@ type HooksConfig struct {
 	BatchMaxQueueItems int `mapstructure:"batch_max_queue_items" json:"batch_max_queue_items,omitempty" yaml:"batch_max_queue_items,omitempty"`
 }
 
-// AuthConfig holds authentication settings. Today it covers only the
-// control-plane HTTP API (admin); media/playback auth is a separate plane.
+// AuthConfig holds authentication settings for the control-plane HTTP API
+// (admin). Media/playback-plane authorization is policy-based and lives in the
+// store as domain.Policy entities (managed via /policies), not in this config.
 type AuthConfig struct {
 	API APIAuthConfig `mapstructure:"api" json:"api" yaml:"api"`
 }

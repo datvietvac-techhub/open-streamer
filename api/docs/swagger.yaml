@@ -213,6 +213,14 @@ definitions:
         type: array
       name:
         type: string
+      playback_policy:
+        description: |-
+          PlaybackPolicy binds this stream to a named media-auth Policy by its
+          code (see domain.Policy). Empty means no policy — the stream is public
+          (allow-all). The referenced policy carries the full rule set (token
+          requirement + secret, IP/country/UA/domain allow-deny lists). See
+          internal/mediaauth.
+        type: string
       protocols:
         allOf:
         - $ref: '#/definitions/domain.OutputProtocols'
@@ -662,8 +670,6 @@ definitions:
     type: object
   domain.EventType:
     enum:
-    - session.opened
-    - session.closed
     - stream.created
     - stream.updated
     - stream.started
@@ -696,8 +702,13 @@ definitions:
     - template.created
     - template.updated
     - template.deleted
+    - policy.created
+    - policy.updated
+    - policy.deleted
     - stream.runtime_created
     - stream.runtime_expired
+    - session.opened
+    - session.closed
     type: string
     x-enum-comments:
       EventDVRSegmentPruned: retention loop deleted an aged-out segment
@@ -714,8 +725,6 @@ definitions:
       EventPushStarted: dialing target, pre-handshake
       EventStreamUpdated: PUT /streams/{code} on existing record
     x-enum-descriptions:
-    - ""
-    - ""
     - ""
     - PUT /streams/{code} on existing record
     - ""
@@ -750,9 +759,12 @@ definitions:
     - ""
     - ""
     - ""
+    - ""
+    - ""
+    - ""
+    - ""
+    - ""
     x-enum-varnames:
-    - EventSessionOpened
-    - EventSessionClosed
     - EventStreamCreated
     - EventStreamUpdated
     - EventStreamStarted
@@ -785,8 +797,13 @@ definitions:
     - EventTemplateCreated
     - EventTemplateUpdated
     - EventTemplateDeleted
+    - EventPolicyCreated
+    - EventPolicyUpdated
+    - EventPolicyDeleted
     - EventStreamRuntimeCreated
     - EventStreamRuntimeExpired
+    - EventSessionOpened
+    - EventSessionClosed
   domain.GlobalConfig:
     properties:
       auth:
@@ -1190,6 +1207,62 @@ definitions:
           be resolved.
         type: string
     type: object
+  domain.Policy:
+    properties:
+      allow_countries:
+        items:
+          type: string
+        type: array
+      allow_ips:
+        description: |-
+          Static allow/deny chain. IPs accept exact addresses or CIDR ranges;
+          Countries are ISO 3166-1 alpha-2 codes (need a GeoIP DB — see
+          SessionsConfig.GeoIPDBPath); UserAgents match case-insensitive substring;
+          AllowedDomains match the Referer host (exact or parent domain).
+        items:
+          type: string
+        type: array
+      allow_user_agents:
+        items:
+          type: string
+        type: array
+      allowed_domains:
+        items:
+          type: string
+        type: array
+      code:
+        description: Code is the unique key chosen by the operator.
+        type: string
+      deny_countries:
+        items:
+          type: string
+        type: array
+      deny_ips:
+        items:
+          type: string
+        type: array
+      deny_user_agents:
+        items:
+          type: string
+        type: array
+      description:
+        type: string
+      name:
+        description: Name and Description are operator-facing metadata.
+        type: string
+      require_token:
+        description: |-
+          RequireToken makes a valid signed playback token mandatory. The server
+          only VERIFIES tokens; clients mint them with TokenSecret — see
+          internal/mediaauth.SignToken for the canonical token format.
+        type: boolean
+      token_secret:
+        description: |-
+          TokenSecret is this policy's HMAC-SHA256 verification key. Required when
+          RequireToken is true. Each policy owns its own secret so revoking one
+          policy's key never affects another.
+        type: string
+    type: object
   domain.PushDestination:
     properties:
       comment:
@@ -1404,6 +1477,12 @@ definitions:
           behind the template's settings. Streams inheriting this template
           keep their own Name / Description fields — the template metadata is
           for operator-facing tooling, not for downstream consumers.
+        type: string
+      playback_policy:
+        description: |-
+          PlaybackPolicy is the media-auth Policy code inherited by streams
+          referencing this template (see domain.Policy). Empty = no policy
+          (inheriting streams stay public unless they set their own).
         type: string
       prefixes:
         description: |-
@@ -2436,6 +2515,112 @@ paths:
       summary: Test hook delivery
       tags:
       - hooks
+  /policies:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/apidocs.ErrorBody'
+      summary: List media-auth policies
+      tags:
+      - policies
+  /policies/{code}:
+    delete:
+      parameters:
+      - description: Policy code
+        in: path
+        name: code
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apidocs.ErrorBody'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/apidocs.ErrorBody'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/apidocs.ErrorBody'
+      summary: Delete media-auth policy
+      tags:
+      - policies
+    get:
+      parameters:
+      - description: Policy code
+        in: path
+        name: code
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/apidocs.ErrorBody'
+      summary: Get media-auth policy
+      tags:
+      - policies
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Policy code
+        in: path
+        name: code
+        required: true
+        type: string
+      - description: Policy configuration
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/domain.Policy'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "201":
+          description: Created
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/apidocs.ErrorBody'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/apidocs.ErrorBody'
+      summary: Create or update media-auth policy
+      tags:
+      - policies
   /readyz:
     get:
       description: Returns 200 when the server accepts traffic (basic check).

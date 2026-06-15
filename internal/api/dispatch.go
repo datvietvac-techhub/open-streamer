@@ -1,6 +1,8 @@
 package api
 
 import (
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 
@@ -8,8 +10,61 @@ import (
 
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 	"github.com/datvietvac-techhub/open-streamer/internal/dvr/blob"
+	"github.com/datvietvac-techhub/open-streamer/internal/mediaauth"
 	"github.com/datvietvac-techhub/open-streamer/internal/mediaserve"
 )
+
+// mediaAllowed runs the media-plane authorization chain for an HTTP playback
+// request (HLS/DASH/MPEGTS). Returns true (allow) when no authorizer is wired
+// or media auth is disabled. The client IP comes from r.RemoteAddr, which the
+// RealIP middleware has already set from the trusted proxy's forwarded header.
+func (s *Server) mediaAllowed(r *http.Request, code domain.StreamCode) bool {
+	if s.mediaAuth == nil {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	d := s.mediaAuth.Authorize(mediaauth.AuthRequest{
+		// Key auth on the parent stream: ABR renditions live under
+		// /<code>/track_<N>/… so a token minted for <code> must cover them.
+		Code:      stripABRTrackSlug(code),
+		ClientIP:  net.ParseIP(host),
+		Token:     r.URL.Query().Get("token"),
+		UserAgent: r.UserAgent(),
+		Referer:   r.Referer(),
+	})
+	if !d.Allow {
+		slog.Info("api: playback denied", "stream_code", code, "reason", d.Reason, "remote", r.RemoteAddr)
+	}
+	return d.Allow
+}
+
+// stripABRTrackSlug removes a trailing "/track_<N>" rendition segment so media
+// auth keys on the parent stream code — a token minted for <code> covers all
+// of its ABR renditions (served at /<code>/track_<N>/…). Mirrors the sessions
+// tracker's path handling; the slug is a closed internal namespace.
+func stripABRTrackSlug(code domain.StreamCode) domain.StreamCode {
+	s := string(code)
+	if i := strings.LastIndexByte(s, '/'); i > 0 && isABRTrackSlug(s[i+1:]) {
+		return domain.StreamCode(s[:i])
+	}
+	return code
+}
+
+func isABRTrackSlug(s string) bool {
+	const prefix = "track_"
+	if !strings.HasPrefix(s, prefix) || len(s) == len(prefix) {
+		return false
+	}
+	for _, c := range s[len(prefix):] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // dispatchStreamsSubpath handles every URL under /streams/<...>. The chi
 // catch-all captures the suffix after /streams/ in the "*" URL param.
@@ -101,6 +156,13 @@ func (s *Server) dispatchMedia() http.HandlerFunc {
 		}
 		if err := domain.ValidateStreamCode(code); err != nil {
 			http.NotFound(w, r)
+			return
+		}
+		// Media-plane authorization (token / IP / country / UA / referer) for
+		// all HTTP playback (HLS / DASH / MPEGTS) — B / S-13. No-op when media
+		// auth is disabled.
+		if !s.mediaAllowed(r, domain.StreamCode(code)) {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		r = setURLParam(r, "code", code)

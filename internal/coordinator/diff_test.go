@@ -116,6 +116,32 @@ func TestComputeDiff_MetadataOnly(t *testing.T) {
 	assert.False(t, d.NowDisabled)
 }
 
+func TestComputeDiff_PlaybackPolicyOnly(t *testing.T) {
+	old := baseStream()
+	new := baseStream()
+	new.PlaybackPolicy = "only_us"
+
+	d := ComputeDiff(old, new)
+
+	assert.True(t, d.PlaybackPolicyChanged, "policy code change must be detected")
+	// A policy-only change must NOT look like a protocol/push/transcoder change.
+	assert.False(t, d.ProtocolsChanged)
+	assert.False(t, d.PushChanged)
+	assert.False(t, d.TranscoderChanged)
+	assert.False(t, d.DVRChanged)
+	assert.False(t, d.InputsChanged)
+}
+
+func TestComputeDiff_PlaybackPolicyUnchanged(t *testing.T) {
+	old := baseStream()
+	old.PlaybackPolicy = "p1"
+	new := baseStream()
+	new.PlaybackPolicy = "p1"
+
+	d := ComputeDiff(old, new)
+	assert.False(t, d.PlaybackPolicyChanged)
+}
+
 func TestComputeDiff_InputAdded(t *testing.T) {
 	old := baseStream()
 	new := baseStream()

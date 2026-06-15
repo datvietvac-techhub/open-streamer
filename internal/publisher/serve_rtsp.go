@@ -58,6 +58,7 @@ import (
 
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
+	"github.com/datvietvac-techhub/open-streamer/internal/sessions"
 	"github.com/datvietvac-techhub/open-streamer/internal/tsdemux"
 	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
 )
@@ -236,6 +237,23 @@ func (h *rtspHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respo
 		return &base.Response{StatusCode: base.StatusOK}, nil
 	}
 
+	ua := ""
+	if ctx.Request != nil {
+		if v, ok := ctx.Request.Header["User-Agent"]; ok && len(v) > 0 {
+			ua = v[0]
+		}
+	}
+
+	// Media-plane authorization (token / IP / country / UA) before allocating.
+	// RTSP carries the token in the URL query (rtsp://h/live/code?token=…).
+	remote := ""
+	if c := ctx.Conn.NetConn().RemoteAddr(); c != nil {
+		remote = c.String()
+	}
+	if !h.svc.playAllowed(code, "rtsp", remote, sessions.TokenFromQuery(ctx.Query), ua, "") {
+		return &base.Response{StatusCode: base.StatusUnauthorized}, nil
+	}
+
 	// Cap concurrent playback connections before tracking the session (A-1).
 	// The rtspSessions entry (created below on success) is the release marker
 	// OnSessionClose uses, so it is stored even when the tracker is absent.
@@ -244,12 +262,6 @@ func (h *rtspHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respo
 		return &base.Response{StatusCode: base.StatusServiceUnavailable}, nil
 	}
 
-	ua := ""
-	if ctx.Request != nil {
-		if v, ok := ctx.Request.Header["User-Agent"]; ok && len(v) > 0 {
-			ua = v[0]
-		}
-	}
 	sess := openRTSPSession(context.Background(), h.svc.tracker, code, ctx.Conn.NetConn().RemoteAddr(), ua)
 	h.svc.rtspSessionsMu.Lock()
 	h.svc.rtspSessions[ctx.Session] = &rtspClient{ps: sess, code: code}
