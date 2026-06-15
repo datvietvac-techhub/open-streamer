@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/datvietvac-techhub/open-streamer/config"
 	"github.com/datvietvac-techhub/open-streamer/internal/api"
@@ -42,10 +45,44 @@ import (
 )
 
 func main() {
+	// `open-streamer hashpw [password]` prints a bcrypt hash for an API user's
+	// password_hash field, so operators never put plaintext in the config.
+	if len(os.Args) > 1 && os.Args[1] == "hashpw" {
+		if err := runHashPw(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "hashpw:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("server: fatal error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// runHashPw reads a password from the first arg, or from stdin when no arg is
+// given (so it stays out of shell history), and prints its bcrypt hash.
+func runHashPw(args []string) error {
+	var pw string
+	if len(args) > 0 {
+		pw = args[0]
+	} else {
+		fmt.Fprint(os.Stderr, "password: ")
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && line == "" {
+			return fmt.Errorf("read password: %w", err)
+		}
+		pw = strings.TrimRight(line, "\r\n")
+	}
+	if pw == "" {
+		return errors.New("empty password")
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash: %w", err)
+	}
+	fmt.Println(string(h))
+	return nil
 }
 
 func run() error {
@@ -192,6 +229,7 @@ func provideSubConfigs(i *do.RootScope, gcfg *domain.GlobalConfig) {
 	do.ProvideValue(i, deref(gcfg.Sessions))
 	do.ProvideValue(i, deref(gcfg.Watermarks))
 	do.ProvideValue(i, deref(gcfg.Log))
+	do.ProvideValue(i, deref(gcfg.Auth))
 }
 
 func deref[T any](p *T) T {

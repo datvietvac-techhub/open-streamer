@@ -19,4 +19,5 @@ type GlobalConfig struct {
 	Sessions   *config.SessionsConfig   `json:"sessions,omitempty" yaml:"sessions,omitempty"`
 	Watermarks *config.WatermarksConfig `json:"watermarks,omitempty" yaml:"watermarks,omitempty"`
 	Log        *config.LogConfig        `json:"log,omitempty" yaml:"log,omitempty"`
+	Auth       *config.AuthConfig       `json:"auth,omitempty" yaml:"auth,omitempty"`
 }

@@ -2071,6 +2071,42 @@ const docTemplate = `{
                 }
             }
         },
+        "config.APIAuthConfig": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "users": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.APIUser"
+                    }
+                }
+            }
+        },
+        "config.APIUser": {
+            "type": "object",
+            "properties": {
+                "password_hash": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "config.AuthConfig": {
+            "type": "object",
+            "properties": {
+                "api": {
+                    "$ref": "#/definitions/config.APIAuthConfig"
+                }
+            }
+        },
         "config.BufferConfig": {
             "type": "object",
             "properties": {
@@ -2199,6 +2235,13 @@ const docTemplate = `{
                 },
                 "hls": {
                     "$ref": "#/definitions/config.PublisherHLSConfig"
+                },
+                "max_playback_conn_per_stream": {
+                    "description": "MaxPlaybackConnPerStream / MaxPlaybackConnTotal cap concurrent RTSP /\nRTMP / SRT / HTTP-MPEGTS playback connections (per stream and globally)\nto bound the heavyweight per-connection state a flood can allocate (A-1).\nUnset (0) applies a protective default; a negative value means unlimited.\nHLS/DASH viewers go over stateless HTTP and are not counted here.",
+                    "type": "integer"
+                },
+                "max_playback_conn_total": {
+                    "type": "integer"
                 }
             }
         },
@@ -2566,6 +2609,9 @@ const docTemplate = `{
         "domain.GlobalConfig": {
             "type": "object",
             "properties": {
+                "auth": {
+                    "$ref": "#/definitions/config.AuthConfig"
+                },
                 "buffer": {
                     "$ref": "#/definitions/config.BufferConfig"
                 },

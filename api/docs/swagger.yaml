@@ -309,6 +309,29 @@ definitions:
       total:
         type: integer
     type: object
+  config.APIAuthConfig:
+    properties:
+      enabled:
+        type: boolean
+      users:
+        items:
+          $ref: '#/definitions/config.APIUser'
+        type: array
+    type: object
+  config.APIUser:
+    properties:
+      password_hash:
+        type: string
+      role:
+        type: string
+      username:
+        type: string
+    type: object
+  config.AuthConfig:
+    properties:
+      api:
+        $ref: '#/definitions/config.APIAuthConfig'
+    type: object
   config.BufferConfig:
     properties:
       capacity:
@@ -425,6 +448,16 @@ definitions:
         $ref: '#/definitions/config.PublisherDASHConfig'
       hls:
         $ref: '#/definitions/config.PublisherHLSConfig'
+      max_playback_conn_per_stream:
+        description: |-
+          MaxPlaybackConnPerStream / MaxPlaybackConnTotal cap concurrent RTSP /
+          RTMP / SRT / HTTP-MPEGTS playback connections (per stream and globally)
+          to bound the heavyweight per-connection state a flood can allocate (A-1).
+          Unset (0) applies a protective default; a negative value means unlimited.
+          HLS/DASH viewers go over stateless HTTP and are not counted here.
+        type: integer
+      max_playback_conn_total:
+        type: integer
     type: object
   config.PublisherDASHConfig:
     properties:
@@ -756,6 +789,8 @@ definitions:
     - EventStreamRuntimeExpired
   domain.GlobalConfig:
     properties:
+      auth:
+        $ref: '#/definitions/config.AuthConfig'
       buffer:
         $ref: '#/definitions/config.BufferConfig'
       hooks:
