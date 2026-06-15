@@ -56,6 +56,10 @@ type Server struct {
 	// without DI. Used by the request-duration middleware below.
 	m *metrics.Metrics
 
+	// apiAuth enforces Basic auth + read/write roles on the management API.
+	// Never nil (a disabled authenticator is a pass-through).
+	apiAuth *Auth
+
 	router *chi.Mux
 	http   *http.Server
 }
@@ -98,7 +102,25 @@ func New(i do.Injector) (*Server, error) {
 	if m, err := do.Invoke[*metrics.Metrics](i); err == nil {
 		s.m = m
 	}
+	// API auth (Basic, read/write roles). Config is optional — a missing
+	// provider (or Enabled=false) yields a pass-through authenticator, so the
+	// API stays open until an operator turns it on.
+	authCfg, _ := do.Invoke[config.AuthConfig](i)
+	s.apiAuth = newAuth(authCfg)
 	return s, nil
+}
+
+// SetAuthConfig hot-swaps the API auth configuration. Called by the runtime
+// config-reload path so user/role edits take effect without an API restart.
+func (s *Server) SetAuthConfig(cfg *config.AuthConfig) {
+	if s.apiAuth == nil {
+		return
+	}
+	c := config.AuthConfig{}
+	if cfg != nil {
+		c = *cfg
+	}
+	s.apiAuth.SetConfig(c)
 }
 
 // httpDurationMiddleware records request latency into the
@@ -169,77 +191,104 @@ func (s *Server) buildRouter(serverCfg *config.ServerConfig) *chi.Mux {
 	r.Use(s.httpDurationMiddleware)
 	r.Use(middleware.Timeout(120 * time.Second))
 
+	// Public, unauthenticated: liveness/readiness probes and the metrics
+	// scrape endpoint. Everything else (the management API) is gated below.
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz)
 	r.Handle("/metrics", promhttp.Handler())
-	r.Get("/config", s.configH.GetConfig)
-	r.Post("/config", s.configH.UpdateConfig)
-	r.Get("/config/defaults", s.configH.GetConfigDefaults)
-	r.Post("/config/transcoder/probe", s.configH.ProbeTranscoder)
-	r.Get("/config/yaml", s.configH.GetConfigYAML)
-	r.Put("/config/yaml", s.configH.ReplaceConfigYAML)
 
-	r.Get("/swagger/doc.json", serveSwaggerJSON)
-	r.Get("/swagger", http.RedirectHandler("/swagger/", http.StatusMovedPermanently).ServeHTTP)
-	r.Get("/swagger/", serveSwaggerIndex)
+	// Management API: Basic auth (read = safe methods, write = all). The
+	// authenticator is a pass-through when auth is disabled in config, so this
+	// group's routes behave exactly as before until an operator enables it.
+	// All admin routes live INSIDE this group so a newly-added one is protected
+	// by default rather than accidentally left open.
+	r.Group(func(ar chi.Router) {
+		if s.apiAuth != nil {
+			ar.Use(s.apiAuth.Middleware)
+		}
 
-	// Admin: /streams. Stream codes may contain '/' (namespacing) so the
-	// per-code routes are served by a catch-all dispatcher that parses
-	// (code, action) from the suffix. See dispatch.go for the rules.
-	r.Get("/streams", s.streamH.List)
-	r.HandleFunc("/streams/*", s.dispatchStreamsSubpath())
-
-	// Templates. Codes are single-segment (a-zA-Z0-9_-) so the chi
-	// single-param routes are fine — no catch-all dispatcher needed.
-	r.Route("/templates", func(r chi.Router) {
-		r.Get("/", s.templateH.List)
-		r.Route("/{code}", func(r chi.Router) {
-			r.Get("/", s.templateH.Get)
-			r.Post("/", s.templateH.Put)
-			r.Delete("/", s.templateH.Delete)
+		// NOTE: every admin path is registered via a subrouter (ar.Route),
+		// never a flat ar.Get/Post at this level. A subrouter owns its whole
+		// subtree, so an unmatched METHOD returns 405 from inside the auth
+		// group. A flat route would instead let an unregistered method fall
+		// through chi's trie to the public media catch-all `/*` below —
+		// bypassing auth entirely. Keep this invariant when adding routes.
+		ar.Route("/config", func(r chi.Router) {
+			r.Get("/", s.configH.GetConfig)
+			r.Post("/", s.configH.UpdateConfig)
+			r.Get("/defaults", s.configH.GetConfigDefaults)
+			r.Post("/transcoder/probe", s.configH.ProbeTranscoder)
+			r.Get("/yaml", s.configH.GetConfigYAML)
+			r.Put("/yaml", s.configH.ReplaceConfigYAML)
 		})
-	})
 
-	r.Route("/sessions", func(r chi.Router) {
-		r.Get("/", s.sessionH.List)
-		r.Route("/{id}", func(r chi.Router) {
-			r.Get("/", s.sessionH.Get)
-			r.Delete("/", s.sessionH.Delete)
+		// Swagger is GET-only static API docs — flat routes are fine here: an
+		// unmatched method falls through to the media 404 with no mutation or
+		// secret exposed (unlike /config and /streams above).
+		ar.Get("/swagger/doc.json", serveSwaggerJSON)
+		ar.Get("/swagger", http.RedirectHandler("/swagger/", http.StatusMovedPermanently).ServeHTTP)
+		ar.Get("/swagger/", serveSwaggerIndex)
+
+		// Admin: /streams. Stream codes may contain '/' (namespacing) so the
+		// per-code routes are served by a catch-all dispatcher that parses
+		// (code, action) from the suffix. See dispatch.go for the rules.
+		ar.Route("/streams", func(r chi.Router) {
+			r.Get("/", s.streamH.List)
+			r.HandleFunc("/*", s.dispatchStreamsSubpath())
 		})
-	})
 
-	r.Route("/hooks", func(r chi.Router) {
-		r.Get("/", s.hookH.List)
-		r.Post("/", s.hookH.Create)
-		r.Route("/{hid}", func(r chi.Router) {
-			r.Get("/", s.hookH.Get)
-			r.Put("/", s.hookH.Update)
-			r.Delete("/", s.hookH.Delete)
-			r.Post("/test", s.hookH.Test)
+		// Templates. Codes are single-segment (a-zA-Z0-9_-) so the chi
+		// single-param routes are fine — no catch-all dispatcher needed.
+		ar.Route("/templates", func(r chi.Router) {
+			r.Get("/", s.templateH.List)
+			r.Route("/{code}", func(r chi.Router) {
+				r.Get("/", s.templateH.Get)
+				r.Post("/", s.templateH.Put)
+				r.Delete("/", s.templateH.Delete)
+			})
 		})
-	})
 
-	r.Route("/watermarks", func(r chi.Router) {
-		r.Get("/", s.watermarkH.List)
-		r.Post("/", s.watermarkH.Upload)
-		r.Route("/{filename}", func(r chi.Router) {
-			r.Get("/", s.watermarkH.Get)
-			r.Delete("/", s.watermarkH.Delete)
-			r.Get("/raw", s.watermarkH.Raw)
+		ar.Route("/sessions", func(r chi.Router) {
+			r.Get("/", s.sessionH.List)
+			r.Route("/{id}", func(r chi.Router) {
+				r.Get("/", s.sessionH.Get)
+				r.Delete("/", s.sessionH.Delete)
+			})
 		})
-	})
 
-	r.Route("/vod", func(r chi.Router) {
-		r.Get("/", s.vodH.List)
-		r.Post("/", s.vodH.Create)
-		r.Route("/{name}", func(r chi.Router) {
-			r.Get("/", s.vodH.Get)
-			r.Put("/", s.vodH.Update)
-			r.Delete("/", s.vodH.Delete)
-			r.Get("/files", s.vodH.ListFiles)
-			r.Post("/files", s.vodH.UploadFile)
-			r.Delete("/files/*", s.vodH.DeleteFile)
-			r.Get("/raw/*", s.vodH.Raw)
+		ar.Route("/hooks", func(r chi.Router) {
+			r.Get("/", s.hookH.List)
+			r.Post("/", s.hookH.Create)
+			r.Route("/{hid}", func(r chi.Router) {
+				r.Get("/", s.hookH.Get)
+				r.Put("/", s.hookH.Update)
+				r.Delete("/", s.hookH.Delete)
+				r.Post("/test", s.hookH.Test)
+			})
+		})
+
+		ar.Route("/watermarks", func(r chi.Router) {
+			r.Get("/", s.watermarkH.List)
+			r.Post("/", s.watermarkH.Upload)
+			r.Route("/{filename}", func(r chi.Router) {
+				r.Get("/", s.watermarkH.Get)
+				r.Delete("/", s.watermarkH.Delete)
+				r.Get("/raw", s.watermarkH.Raw)
+			})
+		})
+
+		ar.Route("/vod", func(r chi.Router) {
+			r.Get("/", s.vodH.List)
+			r.Post("/", s.vodH.Create)
+			r.Route("/{name}", func(r chi.Router) {
+				r.Get("/", s.vodH.Get)
+				r.Put("/", s.vodH.Update)
+				r.Delete("/", s.vodH.Delete)
+				r.Get("/files", s.vodH.ListFiles)
+				r.Post("/files", s.vodH.UploadFile)
+				r.Delete("/files/*", s.vodH.DeleteFile)
+				r.Get("/raw/*", s.vodH.Raw)
+			})
 		})
 	})
 

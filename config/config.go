@@ -246,6 +246,33 @@ type HooksConfig struct {
 	BatchMaxQueueItems int `mapstructure:"batch_max_queue_items" json:"batch_max_queue_items,omitempty" yaml:"batch_max_queue_items,omitempty"`
 }
 
+// AuthConfig holds authentication settings. Today it covers only the
+// control-plane HTTP API (admin); media/playback auth is a separate plane.
+type AuthConfig struct {
+	API APIAuthConfig `mapstructure:"api" json:"api" yaml:"api"`
+}
+
+// APIAuthConfig configures HTTP Basic auth on the management API. When
+// Enabled is false (default) the API is open, preserving prior behaviour.
+// Users are part of the global config (managed via the config API by a
+// `write` user). On boot, if Enabled is true and Users is empty, an `admin`
+// user with the `write` role is seeded from OPEN_STREAMER_API_ADMIN_PASSWORD
+// when that env var is set — otherwise every request is rejected until users
+// are defined (fail-closed).
+type APIAuthConfig struct {
+	Enabled bool      `mapstructure:"enabled" json:"enabled" yaml:"enabled"`
+	Users   []APIUser `mapstructure:"users" json:"users,omitempty" yaml:"users,omitempty"`
+}
+
+// APIUser is one management-API account. Role is "read" (GET/HEAD/OPTIONS only)
+// or "write" (all methods). PasswordHash is a bcrypt hash — never store a
+// plaintext password here (generate one with `open-streamer hashpw`).
+type APIUser struct {
+	Username     string `mapstructure:"username" json:"username" yaml:"username"`
+	PasswordHash string `mapstructure:"password_hash" json:"password_hash" yaml:"password_hash"`
+	Role         string `mapstructure:"role" json:"role" yaml:"role"`
+}
+
 // LogConfig controls structured logging output.
 type LogConfig struct {
 	Level  string `mapstructure:"level" json:"level" yaml:"level"`    // trace | debug | info | warn | error

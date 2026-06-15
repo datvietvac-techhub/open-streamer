@@ -236,6 +236,12 @@ func (m *Manager) diff(old, new *domain.GlobalConfig) {
 			return m.deps.APISrv.StartWithConfig(ctx, new.Server)
 		})
 
+	// API auth: hot-swap users/roles without restarting the HTTP server. The
+	// middleware reads the new set atomically on its next request.
+	if m.deps.APISrv != nil && configChanged(old.Auth, new.Auth) {
+		m.deps.APISrv.SetAuthConfig(new.Auth)
+	}
+
 	// Push the new listeners snapshot to ingestor + publisher BEFORE
 	// diffService can decide to restart them — each Run() reads the cached
 	// listeners value at startup, so the swap must happen before the new
