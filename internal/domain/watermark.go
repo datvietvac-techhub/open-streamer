@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -163,6 +164,9 @@ func (w *WatermarkConfig) Validate() error {
 				return fmt.Errorf("watermark: font_file: %w", err)
 			}
 		}
+		if err := ValidateFontColor(w.FontColor); err != nil {
+			return fmt.Errorf("watermark: font_color: %w", err)
+		}
 	case WatermarkTypeImage:
 		if strings.TrimSpace(string(w.Filename)) == "" {
 			return fmt.Errorf("watermark: filename is required when type=image")
@@ -189,6 +193,26 @@ func (w *WatermarkConfig) Validate() error {
 		}
 	default:
 		return fmt.Errorf("watermark: unknown position %q", w.Position)
+	}
+	return nil
+}
+
+// fontColorPattern accepts a plain color literal only: a named color (letters),
+// #RRGGBB[AA] or 0xRRGGBB[AA] hex, with an optional @opacity in [0,1]. It
+// deliberately excludes every lavfi metacharacter (colon, comma, quote,
+// bracket, backslash) so a font_color can't chain a second drawtext/movie
+// filter into the graph (S-3).
+var fontColorPattern = regexp.MustCompile(`^([A-Za-z]+|#[0-9A-Fa-f]{6}|#[0-9A-Fa-f]{8}|0x[0-9A-Fa-f]{6}|0x[0-9A-Fa-f]{8})(@(0(\.[0-9]+)?|1(\.0+)?|\.[0-9]+))?$`)
+
+// ValidateFontColor rejects a watermark font_color that is not a plain color
+// literal. Empty is allowed (the transcoder defaults it to "white").
+func ValidateFontColor(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	if !fontColorPattern.MatchString(s) {
+		return fmt.Errorf("invalid color %q; want a named color, #RRGGBB[AA], or 0xRRGGBB[AA] (optionally @<0..1>)", s)
 	}
 	return nil
 }

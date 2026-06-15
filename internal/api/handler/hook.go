@@ -15,11 +15,15 @@ import (
 	"github.com/samber/do/v2"
 )
 
-// hookTester narrows *hooks.Service to the test-delivery method this
-// handler uses, so tests can stub out the hooks service without standing
-// up the full delivery pipeline. *hooks.Service satisfies implicitly.
+// hookTester narrows *hooks.Service to the methods this handler uses, so tests
+// can stub out the hooks service without standing up the full delivery
+// pipeline. DeliverTestEvent drives the /test endpoint; FileRootDir is read
+// live on every Create/Update so a runtime hooks.file_root_dir change applies
+// without a reboot (the value is no longer cached on the handler). *hooks.Service
+// satisfies both implicitly.
 type hookTester interface {
 	DeliverTestEvent(ctx context.Context, id domain.HookID) error
+	FileRootDir() string
 }
 
 // HookHandler handles webhook and hook management REST endpoints.
@@ -87,6 +91,13 @@ func (h *HookHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_BODY", err.Error())
 		return
 	}
+	// S-2: REST Create used to persist a hook with zero validation. Apply the
+	// same type/target + file-containment check as the YAML path. Root read
+	// live so a runtime hooks.file_root_dir change takes effect immediately.
+	if err := hook.Validate(h.hooks.FileRootDir()); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_HOOK", err.Error())
+		return
+	}
 	if err := h.hookRepo.Save(r.Context(), &hook); err != nil {
 		serverError(w, r, "SAVE_FAILED", "create hook", err)
 		return
@@ -138,6 +149,10 @@ func (h *HookHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hook.ID = hid
+	if err := hook.Validate(h.hooks.FileRootDir()); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_HOOK", err.Error())
+		return
+	}
 	if err := h.hookRepo.Save(r.Context(), &hook); err != nil {
 		serverError(w, r, "SAVE_FAILED", "update hook", err)
 		return

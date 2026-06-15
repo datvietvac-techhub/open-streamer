@@ -236,7 +236,10 @@ func buildTextFilter(cfg WatermarkConfig, canvasW, canvasH int) string { //nolin
 		"text='" + text + "'",
 		"fontfile='" + escapeLavfiArg(fontFile) + "'",
 		"fontsize=" + strconv.Itoa(fontSize),
-		"fontcolor=" + fontColor,
+		// S-3: single-quote + escape fontcolor so a value can't terminate the
+		// option list and chain a second drawtext/movie filter. domain.Validate
+		// rejects non-color literals up front; this is defense-in-depth.
+		"fontcolor='" + escapeLavfiArg(fontColor) + "'",
 		"x=" + x,
 		"y=" + y,
 	}
@@ -298,12 +301,15 @@ func resolveOverlayPosition(pos string, offX, offY int) (string, string) {
 	}
 }
 
-// escapeLavfiArg quotes a value safe to embed inside single quotes
-// in a lavfi filter description. lavfi's quoting rules treat
-// backslash and colon as special; full backslash-escaping is enough
-// for paths / fonts which never contain single quotes in practice.
+// escapeLavfiArg escapes a value for safe embedding inside single quotes in a
+// lavfi filter description. lavfi treats backslash and colon as special, and a
+// single quote ends the quoted run — so an unescaped quote in a path/color
+// breaks out of the option. Order matters: backslash first (so later inserts
+// aren't double-escaped), then colon, then single-quote via the standard
+// close/escape/reopen idiom. Callers MUST wrap the result in single quotes.
 func escapeLavfiArg(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `:`, `\:`)
+	s = strings.ReplaceAll(s, `'`, `'\''`) // S-3: contain single-quote breakout
 	return s
 }

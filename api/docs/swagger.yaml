@@ -404,6 +404,14 @@ definitions:
           queue cap. Per-hook overrides win; code default is
           DefaultHookBatchMaxQueueItems.
         type: integer
+      file_root_dir:
+        description: |-
+          FileRootDir confines file-type hooks to this directory (S-2). When set,
+          a file hook's target must resolve inside it — preventing arbitrary
+          host-file create/append (e.g. clobbering the store, filling disk). Empty
+          keeps the legacy "any absolute path" behaviour for backward compatibility;
+          operators are encouraged to set it (e.g. /var/log/open-streamer/hooks).
+        type: string
       worker_count:
         description: |-
           WorkerCount sizes the events.Bus worker pool that fans events out
@@ -670,6 +678,8 @@ definitions:
     type: object
   domain.EventType:
     enum:
+    - session.opened
+    - session.closed
     - stream.created
     - stream.updated
     - stream.started
@@ -707,8 +717,6 @@ definitions:
     - policy.deleted
     - stream.runtime_created
     - stream.runtime_expired
-    - session.opened
-    - session.closed
     type: string
     x-enum-comments:
       EventDVRSegmentPruned: retention loop deleted an aged-out segment
@@ -725,6 +733,8 @@ definitions:
       EventPushStarted: dialing target, pre-handshake
       EventStreamUpdated: PUT /streams/{code} on existing record
     x-enum-descriptions:
+    - ""
+    - ""
     - ""
     - PUT /streams/{code} on existing record
     - ""
@@ -762,9 +772,9 @@ definitions:
     - ""
     - ""
     - ""
-    - ""
-    - ""
     x-enum-varnames:
+    - EventSessionOpened
+    - EventSessionClosed
     - EventStreamCreated
     - EventStreamUpdated
     - EventStreamStarted
@@ -802,8 +812,6 @@ definitions:
     - EventPolicyDeleted
     - EventStreamRuntimeCreated
     - EventStreamRuntimeExpired
-    - EventSessionOpened
-    - EventSessionClosed
   domain.GlobalConfig:
     properties:
       auth:

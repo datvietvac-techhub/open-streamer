@@ -2340,6 +2340,10 @@ const docTemplate = `{
                     "description": "BatchMaxQueueItems is the global default for the per-hook in-memory\nqueue cap. Per-hook overrides win; code default is\nDefaultHookBatchMaxQueueItems.",
                     "type": "integer"
                 },
+                "file_root_dir": {
+                    "description": "FileRootDir confines file-type hooks to this directory (S-2). When set,\na file hook's target must resolve inside it — preventing arbitrary\nhost-file create/append (e.g. clobbering the store, filling disk). Empty\nkeeps the legacy \"any absolute path\" behaviour for backward compatibility;\noperators are encouraged to set it (e.g. /var/log/open-streamer/hooks).",
+                    "type": "string"
+                },
                 "worker_count": {
                     "description": "WorkerCount sizes the events.Bus worker pool that fans events out\nto subscribers. Each worker invokes the registered handler for an\nincoming event; with the batched HTTP delivery, the hook handler\njust enqueues into a per-hook batcher (~µs) so this number rarely\nneeds tuning. 1-4 covers nearly every workload. 0 = use 4.",
                     "type": "integer"
@@ -2642,6 +2646,8 @@ const docTemplate = `{
         "domain.EventType": {
             "type": "string",
             "enum": [
+                "session.opened",
+                "session.closed",
                 "stream.created",
                 "stream.updated",
                 "stream.started",
@@ -2678,9 +2684,7 @@ const docTemplate = `{
                 "policy.updated",
                 "policy.deleted",
                 "stream.runtime_created",
-                "stream.runtime_expired",
-                "session.opened",
-                "session.closed"
+                "stream.runtime_expired"
             ],
             "x-enum-comments": {
                 "EventDVRSegmentPruned": "retention loop deleted an aged-out segment",
@@ -2697,6 +2701,8 @@ const docTemplate = `{
                 "EventStreamUpdated": "PUT /streams/{code} on existing record"
             },
             "x-enum-descriptions": [
+                "",
+                "",
                 "",
                 "PUT /streams/{code} on existing record",
                 "",
@@ -2733,11 +2739,11 @@ const docTemplate = `{
                 "",
                 "",
                 "",
-                "",
-                "",
                 ""
             ],
             "x-enum-varnames": [
+                "EventSessionOpened",
+                "EventSessionClosed",
                 "EventStreamCreated",
                 "EventStreamUpdated",
                 "EventStreamStarted",
@@ -2774,9 +2780,7 @@ const docTemplate = `{
                 "EventPolicyUpdated",
                 "EventPolicyDeleted",
                 "EventStreamRuntimeCreated",
-                "EventStreamRuntimeExpired",
-                "EventSessionOpened",
-                "EventSessionClosed"
+                "EventStreamRuntimeExpired"
             ]
         },
         "domain.GlobalConfig": {

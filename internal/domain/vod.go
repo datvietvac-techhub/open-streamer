@@ -57,5 +57,28 @@ func (m *VODMount) ValidateStorage() error {
 	if !filepath.IsAbs(s) {
 		return errors.New("storage must be an absolute path")
 	}
+	// Defense-in-depth (S-5): refuse to mount a sensitive system directory (or
+	// any ancestor/descendant of one) as a media library — combined with the
+	// raw-serve video allowlist this keeps config/secrets/system files out of
+	// reach even on a misconfiguration.
+	clean := filepath.Clean(s)
+	for _, sys := range []string{"/etc", "/sys", "/proc", "/boot", "/root", "/dev", "/run"} {
+		if pathInside(clean, sys) || pathInside(sys, clean) {
+			return fmt.Errorf("storage %q overlaps sensitive system directory %q", s, sys)
+		}
+	}
 	return nil
+}
+
+// pathInside reports whether child is parent or a descendant of it. Both must be
+// Clean'd absolute paths. Duplicated from internal/vod (a trivial helper) so the
+// domain layer stays import-free of internal packages.
+func pathInside(child, parent string) bool {
+	if child == parent {
+		return true
+	}
+	if !strings.HasSuffix(parent, string(filepath.Separator)) {
+		parent += string(filepath.Separator)
+	}
+	return strings.HasPrefix(child, parent)
 }

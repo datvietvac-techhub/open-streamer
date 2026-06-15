@@ -265,6 +265,18 @@ func (m *Manager) diff(old, new *domain.GlobalConfig) {
 		}
 	}
 
+	// HooksConfig hot-swap (file_root_dir etc.). Hooks have no listener to
+	// restart, so the atomic store is the whole mechanism — the next hook
+	// create/update validates against the new root and the next file delivery
+	// writes under it without a reboot.
+	if configChanged(old.Hooks, new.Hooks) && m.deps.HooksSvc != nil {
+		hookCfg := config.HooksConfig{}
+		if new.Hooks != nil {
+			hookCfg = *new.Hooks
+		}
+		m.deps.HooksSvc.SetConfig(hookCfg)
+	}
+
 	// Ingestor — owns the shared RTMP listener. Restart on changes to either
 	// IngestorConfig or listeners.RTMP, and treat the listener being enabled
 	// as sufficient reason to keep the service running even when IngestorConfig

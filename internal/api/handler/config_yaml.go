@@ -2,12 +2,10 @@ package handler
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -636,7 +634,14 @@ func validateFullConfig(c *fullConfig) []fieldError {
 	}
 	errs = append(errs, validatePolicies(c.Policies)...)
 	errs = append(errs, validateStreams(c.Streams)...)
-	errs = append(errs, validateHooks(c.Hooks)...)
+	// File hooks are confined to hooks.file_root_dir (S-2); validate against the
+	// root declared in THIS document's global_config so a single YAML round-trip
+	// is self-consistent.
+	hookFileRoot := ""
+	if c.GlobalConfig != nil && c.GlobalConfig.Hooks != nil {
+		hookFileRoot = c.GlobalConfig.Hooks.FileRootDir
+	}
+	errs = append(errs, validateHooks(c.Hooks, hookFileRoot)...)
 	errs = append(errs, validateVOD(c.VOD)...)
 	return errs
 }
@@ -852,23 +857,27 @@ func validateStreams(streams []*domain.Stream) []fieldError {
 // validateHooks checks each hook individually plus enforces unique IDs across
 // the list. Type/target combinations are sanity-checked because a malformed
 // hook would silently swallow events at runtime.
-func validateHooks(hooks []*domain.Hook) []fieldError {
+func validateHooks(hooks []*domain.Hook, fileRoot ...string) []fieldError {
+	root := ""
+	if len(fileRoot) > 0 {
+		root = fileRoot[0]
+	}
 	errs := make([]fieldError, 0, len(hooks))
 	seen := make(map[domain.HookID]int, len(hooks))
 	for i, hk := range hooks {
-		errs = append(errs, validateHook(hk, i, seen)...)
+		errs = append(errs, validateHook(hk, i, seen, root)...)
 	}
 	return errs
 }
 
-func validateHook(hk *domain.Hook, i int, seen map[domain.HookID]int) []fieldError {
+func validateHook(hk *domain.Hook, i int, seen map[domain.HookID]int, fileRoot string) []fieldError {
 	base := fmt.Sprintf("hooks[%d]", i)
 	if hk == nil {
 		return []fieldError{{Path: base, Message: "hook entry is null"}}
 	}
 	var errs []fieldError
 	errs = append(errs, validateHookID(hk, i, base, seen)...)
-	if err := validateHookTypeTarget(hk); err != nil {
+	if err := hk.Validate(fileRoot); err != nil {
 		errs = append(errs, fieldError{Path: base + ".target", Message: err.Error()})
 	}
 	if hk.MaxRetries < 0 {
@@ -897,26 +906,6 @@ func validateHookID(hk *domain.Hook, i int, base string, seen map[domain.HookID]
 		}}
 	}
 	seen[hk.ID] = i
-	return nil
-}
-
-func validateHookTypeTarget(hk *domain.Hook) error {
-	target := strings.TrimSpace(hk.Target)
-	if target == "" {
-		return errors.New("required")
-	}
-	switch hk.Type {
-	case domain.HookTypeHTTP:
-		if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
-			return errors.New("http hook target must be an http(s):// URL")
-		}
-	case domain.HookTypeFile:
-		if !filepath.IsAbs(target) {
-			return errors.New("file hook target must be an absolute path")
-		}
-	default:
-		return fmt.Errorf("unsupported hook type %q (use http|file)", hk.Type)
-	}
 	return nil
 }
 

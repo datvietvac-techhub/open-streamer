@@ -55,6 +55,8 @@ type pullWorkerEntry struct {
 //   - Push inputs: stream key is registered in the push server routing table;
 //     the next encoder connection for that key is accepted and routed here.
 type Service struct {
+	// cfg holds the server-level ingestor config (e.g. HLSMaxSegmentBuffer),
+	// captured at construction and read when a reader is built.
 	cfg config.IngestorConfig
 	// listenersPtr holds the latest ListenersConfig. Stored atomically so
 	// SetListeners can hot-swap the value while Run reads it once at

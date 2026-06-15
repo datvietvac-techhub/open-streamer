@@ -390,11 +390,19 @@ func (s *Service) Register(ctx context.Context, stream *domain.Stream, bufferWri
 		monCtx:        monCtx,
 		cancel:        cancel,
 	}
+	regNow := time.Now()
 	for _, inp := range stream.Inputs {
 		state.inputs[inp.Priority] = &InputHealth{
 			Input:  inp,
 			Status: domain.StatusIdle,
-			tracks: newInputTrackStats(),
+			// Stamp a grace window so the packet-timeout monitor gives the
+			// initial active input `timeout` to connect + deliver its first
+			// packet before it can be declared timed-out (see
+			// collectTimeoutIfNeeded — which now fails over an active input
+			// that never reaches StatusActive). commitSwitch re-stamps on every
+			// switch for the same reason.
+			LastPacketAt: regNow,
+			tracks:       newInputTrackStats(),
 		}
 	}
 
@@ -829,7 +837,14 @@ func (s *Service) collectTimeoutIfNeeded(
 	if priority != state.active {
 		return
 	}
-	if h.Status != domain.StatusActive {
+	// Skip inputs already degraded — a failover is in flight / the probe loop is
+	// handling them. Do NOT require StatusActive here: an input only reaches
+	// StatusActive on its FIRST packet (RecordPacket), so a switch/start onto an
+	// input that never connects (e.g. SSRF-blocked, dead source) would otherwise
+	// stay non-Active forever and never time out → permanent freeze with no
+	// failover. LastPacketAt is stamped at Register/commitSwitch, giving every
+	// active input a fair `timeout` grace before this fires (A-5 blind spot).
+	if h.Status == domain.StatusDegraded {
 		return
 	}
 	if now.Sub(h.LastPacketAt) <= timeout {

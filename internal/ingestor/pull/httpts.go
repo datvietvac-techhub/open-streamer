@@ -52,20 +52,21 @@ type HTTPTSReader struct {
 // NewHTTPTSReader constructs a reader for the given input. Connection is
 // deferred to Open so the constructor never blocks.
 func NewHTTPTSReader(input domain.Input) *HTTPTSReader {
+	transport := &http.Transport{
+		// Keep-alives off: every Open is a fresh stream so pooled
+		// connections don't help and may surface stale TCP state.
+		DisableKeepAlives: true,
+		// Force the response to be streamed rather than buffered, so
+		// our Read sees bytes as soon as they arrive on the wire.
+		DisableCompression:    true,
+		ResponseHeaderTimeout: timeoutOr(input.Net.TimeoutSec, httpTSDefaultDialTimeout),
+	}
 	return &HTTPTSReader{
 		input: input,
 		client: &http.Client{
 			// Per-request dial / TLS / headers timeout. Body is unbounded.
-			Timeout: 0,
-			Transport: &http.Transport{
-				// Keep-alives off: every Open is a fresh stream so pooled
-				// connections don't help and may surface stale TCP state.
-				DisableKeepAlives: true,
-				// Force the response to be streamed rather than buffered, so
-				// our Read sees bytes as soon as they arrive on the wire.
-				DisableCompression:    true,
-				ResponseHeaderTimeout: timeoutOr(input.Net.TimeoutSec, httpTSDefaultDialTimeout),
-			},
+			Timeout:   0,
+			Transport: transport,
 		},
 	}
 }

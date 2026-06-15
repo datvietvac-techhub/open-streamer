@@ -201,6 +201,31 @@ func TestCollectTimeoutIfNeeded_AlreadyDegraded(t *testing.T) {
 	assert.Equal(t, -1, timedOut) // already degraded → nothing to do
 }
 
+func TestCollectTimeoutIfNeeded_NeverActiveTimesOut(t *testing.T) {
+	t.Parallel()
+	// The active input never delivered a first packet, so it stays StatusIdle
+	// (only RecordPacket sets StatusActive). Past the grace window it must still
+	// time out → failover — otherwise a switch/start onto an unreachable input
+	// (SSRF-blocked, dead source) freezes the stream forever (A-5 blind spot).
+	state := &streamState{active: 1, degradedAt: make(map[int]time.Time)}
+	h := &InputHealth{Status: domain.StatusIdle, LastPacketAt: time.Now().Add(-60 * time.Second)}
+	timedOut := -1
+	collectTimeoutIfNeeded(state, h, 1, time.Now(), 30*time.Second, &timedOut)
+	assert.Equal(t, 1, timedOut)
+	assert.Equal(t, domain.StatusDegraded, h.Status)
+}
+
+func TestCollectTimeoutIfNeeded_IdleWithinGrace(t *testing.T) {
+	t.Parallel()
+	// A just-switched Idle input is within its connect grace → no failover yet.
+	state := &streamState{active: 1, degradedAt: make(map[int]time.Time)}
+	h := &InputHealth{Status: domain.StatusIdle, LastPacketAt: time.Now().Add(-5 * time.Second)}
+	timedOut := -1
+	collectTimeoutIfNeeded(state, h, 1, time.Now(), 30*time.Second, &timedOut)
+	assert.Equal(t, -1, timedOut)
+	assert.Equal(t, domain.StatusIdle, h.Status)
+}
+
 // ---- collectProbeIfNeeded ----------------------------------------------------
 
 func TestCollectProbeIfNeeded_QueuesDegradedNonActive(t *testing.T) {

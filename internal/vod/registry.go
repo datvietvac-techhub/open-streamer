@@ -148,6 +148,16 @@ func (r *Registry) ResolvePath(name domain.VODName, subPath string) (string, err
 	if !pathInside(resolved, storage) {
 		return "", fmt.Errorf("%w: %q", ErrPathEscapesMount, subPath)
 	}
+
+	if real, evErr := filepath.EvalSymlinks(resolved); evErr == nil {
+		root := storage
+		if rr, rerr := filepath.EvalSymlinks(storage); rerr == nil {
+			root = rr
+		}
+		if !pathInside(real, root) {
+			return "", fmt.Errorf("%w: %q (symlink escape)", ErrPathEscapesMount, subPath)
+		}
+	}
 	return resolved, nil
 }
 
