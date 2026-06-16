@@ -214,6 +214,21 @@ type StreamPipeline struct {
 	lastAudioSrc       int64 // previous audio source PTS (regress-guard conjunct)
 	hasAudioSrc        bool
 
+	// Cross-track startup origin snap. The shared ptsOffset assumes audio and
+	// video ride ONE source clock — true for MPEG-TS (UDP/raw-TS, shared PCR)
+	// but NOT always for AV-path/RTMP, where audio can flow for seconds before
+	// the first video IDR and the two tracks can carry independently-based
+	// timestamps. The first track to emit seeds ptsOffset; when the SECOND
+	// track first emits and its mapped start is skewed from where the first
+	// track's output already sits by more than crossTrackSnapMs, that is a
+	// bogus base skew (not a real intrinsic A/V offset), so the late track gets
+	// a one-time per-track snap correction onto the early track's output line —
+	// V/A start in lockstep. Small skews (< crossTrackSnapMs) are preserved so a
+	// genuine source A/V offset survives. Mirrors the ingest timeline
+	// normaliser's CrossTrackSnapMs; both default to zero in the common case.
+	vSeeded, aSeeded bool
+	vSnap, aSnap     int64
+
 	// audioReenc is non-nil when Audio.Copy is false — AAC frames are
 	// decoded → resampled → re-encoded instead of passed through. nil
 	// keeps the cheap passthrough path.
@@ -250,6 +265,13 @@ const (
 	// switch/loop jump or a stall, not a real inter-frame gap, so it must not
 	// be learned as the pacing step.
 	maxSaneFrameIntervalMs int64 = 200
+
+	// crossTrackSnapMs is the largest startup V/A skew treated as a real
+	// intrinsic audio offset. Beyond it the two source clocks are considered
+	// independently based (AV-path/RTMP audio-before-first-IDR), so the late
+	// track is snapped onto the early track's output line (see vSnap/aSnap).
+	// Matches the ingest timeline normaliser's CrossTrackSnapMs.
+	crossTrackSnapMs int64 = 1000
 )
 
 // NewStreamPipeline constructs the decoder + every rendition's
@@ -512,8 +534,15 @@ func (p *StreamPipeline) reanchorOnRegress(srcPTS int64, track string) {
 // audio ordering.
 func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 	p.anchorRebase(srcPTS)
+	if !p.vSeeded {
+		// Video is the SECOND track to emit (audio already started, typical of
+		// RTMP startup where audio flows before the first IDR): snap onto
+		// audio's output line when the startup skew is bogus. See crossTrackSnap.
+		p.vSnap = crossTrackSnap(srcPTS+p.ptsOffset, p.lastAudioOut, p.aSeeded)
+		p.vSeeded = true
+	}
 	if p.hasVideoSrc && p.lastVideoSrc-srcPTS > rebaseRegressLimitMs &&
-		p.lastVideoOut-(srcPTS+p.ptsOffset) > rebaseRegressLimitMs {
+		p.lastVideoOut-(srcPTS+p.ptsOffset+p.vSnap) > rebaseRegressLimitMs {
 		p.reanchorOnRegress(srcPTS, "video")
 	}
 	// Whether the SOURCE advanced since the previous frame — captured BEFORE
@@ -531,7 +560,7 @@ func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 	}
 	p.lastVideoSrc, p.hasVideoSrc = srcPTS, true
 
-	out := srcPTS + p.ptsOffset
+	out := srcPTS + p.ptsOffset + p.vSnap
 	if out <= p.lastVideoOut {
 		if advancing {
 			// Advancing source whose rebased value merely landed at/under the
@@ -561,17 +590,41 @@ func (p *StreamPipeline) rebaseVideoPTS(srcPTS int64) int64 {
 
 func (p *StreamPipeline) rebaseAudioPTS(srcPTS int64) int64 {
 	p.anchorRebase(srcPTS)
+	if !p.aSeeded {
+		// Audio is the SECOND track to emit (video started first): same snap
+		// onto video's output line when the startup skew is bogus.
+		p.aSnap = crossTrackSnap(srcPTS+p.ptsOffset, p.lastVideoOut, p.vSeeded)
+		p.aSeeded = true
+	}
 	if p.hasAudioSrc && p.lastAudioSrc-srcPTS > rebaseRegressLimitMs &&
-		p.lastAudioOut-(srcPTS+p.ptsOffset) > rebaseRegressLimitMs {
+		p.lastAudioOut-(srcPTS+p.ptsOffset+p.aSnap) > rebaseRegressLimitMs {
 		p.reanchorOnRegress(srcPTS, "audio")
 	}
 	p.lastAudioSrc, p.hasAudioSrc = srcPTS, true
-	out := srcPTS + p.ptsOffset
+	out := srcPTS + p.ptsOffset + p.aSnap
 	if out <= p.lastAudioOut {
 		out = p.lastAudioOut + 1
 	}
 	p.lastAudioOut = out
 	return out
+}
+
+// crossTrackSnap returns the one-time per-track origin correction for the track
+// that emits SECOND. cand is its candidate output PTS (srcPTS+ptsOffset);
+// otherOut is the already-emitting track's current output. Returns 0 when this
+// is the first track (otherSeeded false) or the skew is within crossTrackSnapMs
+// (a real intrinsic A/V offset, preserved); otherwise the correction that lands
+// the late track one tick past the early track's output so they start in
+// lockstep — the fix for AV-path/RTMP startups where audio flows before the
+// first video IDR and the shared offset would otherwise bake a large skew.
+func crossTrackSnap(cand, otherOut int64, otherSeeded bool) int64 {
+	if !otherSeeded {
+		return 0
+	}
+	if cand-otherOut > crossTrackSnapMs || otherOut-cand > crossTrackSnapMs {
+		return otherOut + 1 - cand
+	}
+	return 0
 }
 
 // anchorRebase recomputes ptsOffset from the first frame seen after a
