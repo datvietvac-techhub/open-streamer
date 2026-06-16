@@ -577,6 +577,59 @@ func TestRebaseVideoPTS_MonotonicSourceTracksSource(t *testing.T) {
 	assert.Equal(t, []int64{1, 51, 101, 151}, got)
 }
 
+// crossTrackSnap: first track never snaps; a small skew (intrinsic A/V offset)
+// is preserved; a large skew (independently-based source clocks) snaps the late
+// track one tick past the early track's output.
+func TestCrossTrackSnap(t *testing.T) {
+	// first track to emit: no other seeded → no snap.
+	assert.Equal(t, int64(0), crossTrackSnap(5, 0, false))
+	// small skew (≤ crossTrackSnapMs) preserved.
+	assert.Equal(t, int64(0), crossTrackSnap(20_100, 20_000, true))
+	assert.Equal(t, int64(0), crossTrackSnap(19_900, 20_000, true))
+	// large positive skew (late track far ahead) → snap back onto otherOut+1.
+	assert.Equal(t, int64(20_000+1-25_000), crossTrackSnap(25_000, 20_000, true))
+	// large negative skew (late track far behind, the RTMP startup case:
+	// video src maps to ~1 while audio output already at 20001) → snap forward.
+	assert.Equal(t, int64(20_001+1-1), crossTrackSnap(1, 20_001, true))
+}
+
+// TestRebase_RTMPStartupAudioBeforeVideo_SnapsVideo reproduces the AV-path/RTMP
+// startup: audio flows alone for seconds (output reaches ~20 s) before the first
+// video IDR arrives whose source PTS maps to a low output. Without the snap the
+// shared offset would emit video at ~1 ms while audio sits at ~20 s — a +20 s
+// lip-sync. The snap lands video one tick past audio so both start in lockstep.
+func TestRebase_RTMPStartupAudioBeforeVideo_SnapsVideo(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true}
+
+	// Audio flows first from src 0 → 20000 (≈20 s) while video is stalled.
+	var lastAudioOut int64
+	for s := int64(0); s <= 20_000; s += 1000 {
+		lastAudioOut = p.rebaseAudioPTS(s)
+	}
+	require.Greater(t, lastAudioOut, int64(19_000), "audio should have advanced ~20 s")
+
+	// First video IDR arrives on an independent base (src maps to ~1 ms).
+	vOut := p.rebaseVideoPTS(0)
+
+	// Video must be snapped onto audio's output line, not emitted at ~1 ms.
+	assert.InDelta(t, lastAudioOut, vOut, 50,
+		"video must start in lockstep with audio, not %d s behind", (lastAudioOut-vOut)/1000)
+}
+
+// TestRebase_CoherentStartup_NoSnap confirms the snap is inert on a clean start
+// (video then audio, both ~aligned): a small intrinsic A/V offset is preserved,
+// not zeroed.
+func TestRebase_CoherentStartup_NoSnap(t *testing.T) {
+	p := &StreamPipeline{videoFrameDurMs: 40, pendingRebase: true}
+
+	v0 := p.rebaseVideoPTS(0)   // seeds offset; out=1
+	a0 := p.rebaseAudioPTS(100) // 100 ms intrinsic audio offset, within cap → preserved
+
+	assert.Equal(t, int64(1), v0)
+	assert.Equal(t, int64(101), a0, "small intrinsic A/V offset preserved (no snap)")
+	assert.Zero(t, p.aSnap)
+}
+
 // TestReleaseAudio_HoldsAudioLeadingVideo is the core of the A/V-sync gate:
 // audio whose output PTS leads the video clock by more than audioLeadCapMs is
 // held, then released as video catches up. This is what stops the cheap audio
