@@ -626,6 +626,7 @@ func audioConfigFromTC(tc *domain.TranscoderConfig) *pb.AudioConfig {
 		SampleRate: int32(tc.Audio.SampleRate), //nolint:gosec
 		Channels:   int32(tc.Audio.Channels),   //nolint:gosec
 		Normalize:  tc.Audio.Normalize,
+		Volume:     tc.Audio.Volume,
 	}
 }
 

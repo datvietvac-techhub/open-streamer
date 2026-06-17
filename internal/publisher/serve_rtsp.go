@@ -250,7 +250,7 @@ func (h *rtspHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respo
 	if c := ctx.Conn.NetConn().RemoteAddr(); c != nil {
 		remote = c.String()
 	}
-	if !h.svc.playAllowed(code, "rtsp", remote, sessions.TokenFromQuery(ctx.Query), ua, "") {
+	if !h.svc.playAllowed(code, "rtsp", remote, sessions.TokenFromQuery(ctx.Query), ua) {
 		return &base.Response{StatusCode: base.StatusUnauthorized}, nil
 	}
 

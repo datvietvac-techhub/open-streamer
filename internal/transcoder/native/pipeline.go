@@ -58,6 +58,10 @@ type AudioConfig struct {
 	SampleRate int
 	Channels   int
 	Normalize  bool
+	// Volume is the output gain spec ("2", "0.5", "+9dB", "-6dB"; "" = unity),
+	// parsed via domain.ParseAudioVolume and applied per sample on the
+	// re-encode path. Ignored when Copy is true (no decoded samples to scale).
+	Volume string
 }
 
 // Runner is the public entry point for a per-stream encoder pipeline.

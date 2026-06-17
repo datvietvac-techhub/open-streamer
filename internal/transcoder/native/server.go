@@ -328,6 +328,7 @@ func AudioConfigFromProto(a *pb.AudioConfig) AudioConfig {
 		SampleRate: int(a.GetSampleRate()),
 		Channels:   int(a.GetChannels()),
 		Normalize:  a.GetNormalize(),
+		Volume:     a.GetVolume(),
 	}
 }
 

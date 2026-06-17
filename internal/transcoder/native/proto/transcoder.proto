@@ -104,6 +104,7 @@ message AudioConfig {
   int32  sample_rate = 4;
   int32  channels    = 5;
   bool   normalize   = 6;
+  string volume      = 7;  // gain: linear ("2","0.5") or dB ("+9dB"); "" = unity
 }
 
 message WatermarkConfig {

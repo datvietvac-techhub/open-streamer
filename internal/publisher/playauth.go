@@ -49,8 +49,10 @@ func (s *Service) PushStreamKey(code domain.StreamCode) (streamKey string, runni
 
 // playAllowed runs the media-auth chain for one playback request. Returns true
 // (allow) when no authorizer is wired or media auth is disabled. Denials are
-// logged with the (non-leaky) reason.
-func (s *Service) playAllowed(code domain.StreamCode, proto, addr, token, ua, referer string) bool {
+// logged with the (non-leaky) reason. Referer is left unset: the non-HTTP play
+// protocols (RTMP / SRT / RTSP) carry no Referer, so AllowedDomains rules never
+// apply to them — that gate is enforced only on the HTTP path (see dispatch.go).
+func (s *Service) playAllowed(code domain.StreamCode, proto, addr, token, ua string) bool {
 	if s.mediaAuth == nil {
 		return true
 	}
@@ -59,7 +61,6 @@ func (s *Service) playAllowed(code domain.StreamCode, proto, addr, token, ua, re
 		ClientIP:  ipFromAddr(addr),
 		Token:     token,
 		UserAgent: ua,
-		Referer:   referer,
 	})
 	if !d.Allow {
 		slog.Info("publisher: playback denied", "stream_code", code, "proto", proto, "reason", d.Reason, "remote", addr)
