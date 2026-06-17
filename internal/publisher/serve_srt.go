@@ -126,7 +126,7 @@ func (s *Service) srtHandleSubscribe(ctx context.Context, conn srt.Conn) {
 			srtTok = sessions.TokenFromQuery(sid[i+1:])
 		}
 	}
-	if !s.playAllowed(streamCode, "srt", conn.RemoteAddr().String(), srtTok, "", "") {
+	if !s.playAllowed(streamCode, "srt", conn.RemoteAddr().String(), srtTok, "") {
 		return
 	}
 

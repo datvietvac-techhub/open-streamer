@@ -1,5 +1,12 @@
 package domain
 
+import (
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+)
+
 // HWAccel selects the hardware acceleration backend for encoding/decoding.
 type HWAccel string
 
@@ -135,6 +142,39 @@ type AudioConfig struct {
 	Normalize bool `json:"normalize" yaml:"normalize"`
 }
 
+// ParseAudioVolume converts an AudioConfig.Volume spec into a linear gain
+// factor applied per audio sample (output = factor × input). It accepts the
+// same two forms as the playout volume control:
+//
+//   - a decibel string with a "dB" suffix ("+9dB", "-6dB", "0dB") →
+//     factor = 10^(dB/20); and
+//   - a plain linear multiplier ("2", "0.5", "1") → factor = the value.
+//
+// Empty (or whitespace) returns 1.0 (unity, no change). A linear value must be
+// >= 0; a negative linear multiplier is rejected (it would invert phase rather
+// than attenuate — use a dB value or a fraction to make audio quieter).
+func ParseAudioVolume(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 1, nil
+	}
+	if l := strings.ToLower(s); strings.HasSuffix(l, "db") {
+		db, err := strconv.ParseFloat(strings.TrimSpace(s[:len(s)-2]), 64)
+		if err != nil {
+			return 0, fmt.Errorf("audio volume: invalid dB value %q: %w", s, err)
+		}
+		return math.Pow(10, db/20), nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("audio volume: invalid value %q: %w", s, err)
+	}
+	if f < 0 {
+		return 0, fmt.Errorf("audio volume: linear multiplier must be >= 0, got %q", s)
+	}
+	return f, nil
+}
+
 // DecoderConfig defines decoder behavior.
 type DecoderConfig struct {
 	// Name is the FFmpeg decoder name.
@@ -193,6 +233,14 @@ type AudioTranscodeConfig struct {
 
 	// Normalize applies EBU R128 loudness normalization.
 	Normalize bool `json:"normalize" yaml:"normalize"`
+
+	// Volume sets the output audio gain on the re-encode path
+	// (Copy=false; passthrough audio cannot be gained). The value is either a
+	// plain linear multiplier ("2", "0.5" → output = value × input) or a
+	// decibel string ("+9dB", "-6dB" → output level = input ± dB). Both reduce
+	// to one linear factor via ParseAudioVolume. Empty / "1" / "0dB" = unity
+	// (no change). Boosting can clip; samples are clamped to full scale.
+	Volume string `json:"volume,omitempty" yaml:"volume,omitempty"`
 }
 
 // TranscoderConfig is the complete transcoding configuration for a stream.

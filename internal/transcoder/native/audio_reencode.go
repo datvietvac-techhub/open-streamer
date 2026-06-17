@@ -3,8 +3,12 @@ package native
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"unsafe"
 
 	"github.com/asticode/go-astiav"
+
+	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 )
 
 // audioReencoder decodes the source audio elementary stream, resamples
@@ -78,6 +82,11 @@ type audioReencoder struct {
 	// input timestamps.
 	encInPTS int64
 
+	// volFactor is the linear output gain (1.0 = unity), parsed once from
+	// cfg.Volume. Applied per sample on the FLTP encoder-input frame just
+	// before encode; 1.0 makes applyGain a no-op.
+	volFactor float64
+
 	closed bool
 }
 
@@ -120,6 +129,12 @@ func newAudioReencoder(cfg AudioConfig, srcCodecName string) (*audioReencoder, e
 		outChans:  outChans,
 		outLayout: layout,
 		outFmt:    astiav.SampleFormatFltp, // libavcodec aac wants planar float
+		volFactor: 1,
+	}
+	if f, err := domain.ParseAudioVolume(cfg.Volume); err != nil {
+		slog.Warn("native: invalid audio volume, using unity gain", "volume", cfg.Volume, "err", err)
+	} else {
+		a.volFactor = f
 	}
 
 	enc.SetSampleRate(outRate)
@@ -294,6 +309,38 @@ func (a *audioReencoder) resampleAndEncode(in *astiav.Frame, srcPTS int64) ([]Ou
 	return a.drainEncoder(false)
 }
 
+// applyGain scales every sample of the FLTP encoder-input frame by volFactor
+// (output = factor × input), clamping to full scale [-1, 1] so a boost can't
+// wrap past the float range players expect. Unity (1.0) is a no-op. The frame
+// is freshly FIFO-read here so it is writable; Data().Bytes/SetBytes round-trip
+// all planes regardless of planar/interleaved layout, and the encoder format is
+// always FLTP (float32) so the byte buffer reinterprets cleanly as []float32.
+func (a *audioReencoder) applyGain(f *astiav.Frame) {
+	if a.volFactor == 1 {
+		return
+	}
+	// align=1 → tightly packed buffer (no inter-plane padding) so the bytes
+	// reinterpret cleanly as a flat []float32; SetBytes uses the same align.
+	b, err := f.Data().Bytes(1)
+	if err != nil || len(b) < 4 {
+		return
+	}
+	samples := unsafe.Slice((*float32)(unsafe.Pointer(&b[0])), len(b)/4)
+	for i, v := range samples {
+		s := float64(v) * a.volFactor
+		switch {
+		case s > 1:
+			s = 1
+		case s < -1:
+			s = -1
+		}
+		samples[i] = float32(s)
+	}
+	if err := f.Data().SetBytes(b, 1); err != nil {
+		slog.Debug("native: audio gain SetBytes failed; frame left unscaled", "err", err)
+	}
+}
+
 // drainEncoder pops full frames from the FIFO and encodes them. When
 // flush is true, a final short frame is encoded and the encoder is
 // flushed.
@@ -316,6 +363,7 @@ func (a *audioReencoder) drainEncoder(flush bool) ([]OutputFrame, error) {
 			break
 		}
 		a.encFrame.SetNbSamples(n)
+		a.applyGain(a.encFrame)
 		// Encoder input PTS: a plain monotonic sample counter in the
 		// encoder's 1/outRate time base, so libavcodec doesn't warn
 		// about non-monotonic input. Distinct from the OUTPUT ms PTS.

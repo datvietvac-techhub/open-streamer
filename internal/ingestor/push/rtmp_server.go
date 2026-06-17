@@ -102,6 +102,13 @@ type PlayInfo struct {
 	// RemoteAddr is the peer's "ip:port" string from the underlying TCP
 	// connection. Useful for the play-sessions tracker / abuse mitigation.
 	RemoteAddr string
+
+	// RawQuery is the query string of the play URL (the part after '?' in the
+	// app or stream name), already stripped of the leading '?'. The push server
+	// stays media-auth-agnostic and only forwards it; the publisher's RTMP play
+	// handler extracts the playback token from it (?token=…), mirroring how the
+	// SRT/RTSP play paths carry the token. Empty when the client sent no query.
+	RawQuery string
 }
 
 // StreamCallbacks receives per-publish-session events for a single stream.
@@ -517,7 +524,10 @@ func (s *RTMPServer) OnNewRtmpSubSession(session *rtmp.ServerSession) error {
 		return errors.New("rtmp server: play handler not configured")
 	}
 
-	info := PlayInfo{RemoteAddr: session.GetStat().RemoteAddr}
+	info := PlayInfo{
+		RemoteAddr: session.GetStat().RemoteAddr,
+		RawQuery:   session.RawQuery(),
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()

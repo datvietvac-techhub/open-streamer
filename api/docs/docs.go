@@ -2620,6 +2620,10 @@ const docTemplate = `{
                 "sample_rate": {
                     "description": "SampleRate is output sample rate in Hz.",
                     "type": "integer"
+                },
+                "volume": {
+                    "description": "Volume sets the output audio gain on the re-encode path\n(Copy=false; passthrough audio cannot be gained). The value is either a\nplain linear multiplier (\"2\", \"0.5\" → output = value × input) or a\ndecibel string (\"+9dB\", \"-6dB\" → output level = input ± dB). Both reduce\nto one linear factor via ParseAudioVolume. Empty / \"1\" / \"0dB\" = unity\n(no change). Boosting can clip; samples are clamped to full scale.",
+                    "type": "string"
                 }
             }
         },

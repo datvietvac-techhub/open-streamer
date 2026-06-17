@@ -642,6 +642,7 @@ type AudioConfig struct {
 	SampleRate    int32                  `protobuf:"varint,4,opt,name=sample_rate,json=sampleRate,proto3" json:"sample_rate,omitempty"`
 	Channels      int32                  `protobuf:"varint,5,opt,name=channels,proto3" json:"channels,omitempty"`
 	Normalize     bool                   `protobuf:"varint,6,opt,name=normalize,proto3" json:"normalize,omitempty"`
+	Volume        string                 `protobuf:"bytes,7,opt,name=volume,proto3" json:"volume,omitempty"` // gain: linear ("2","0.5") or dB ("+9dB"); "" = unity
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -716,6 +717,13 @@ func (x *AudioConfig) GetNormalize() bool {
 		return x.Normalize
 	}
 	return false
+}
+
+func (x *AudioConfig) GetVolume() string {
+	if x != nil {
+		return x.Volume
+	}
+	return ""
 }
 
 type WatermarkConfig struct {
@@ -1341,7 +1349,7 @@ const file_transcoder_proto_rawDesc = "" +
 	"\vresize_mode\x18\x10 \x01(\tR\n" +
 	"resizeMode\x12\x1d\n" +
 	"\n" +
-	"gop_frames\x18\x11 \x01(\x05R\tgopFrames\"\xaf\x01\n" +
+	"gop_frames\x18\x11 \x01(\x05R\tgopFrames\"\xc7\x01\n" +
 	"\vAudioConfig\x12\x12\n" +
 	"\x04copy\x18\x01 \x01(\bR\x04copy\x12\x14\n" +
 	"\x05codec\x18\x02 \x01(\tR\x05codec\x12\x1b\n" +
@@ -1349,7 +1357,8 @@ const file_transcoder_proto_rawDesc = "" +
 	"\vsample_rate\x18\x04 \x01(\x05R\n" +
 	"sampleRate\x12\x1a\n" +
 	"\bchannels\x18\x05 \x01(\x05R\bchannels\x12\x1c\n" +
-	"\tnormalize\x18\x06 \x01(\bR\tnormalize\"\xcf\x02\n" +
+	"\tnormalize\x18\x06 \x01(\bR\tnormalize\x12\x16\n" +
+	"\x06volume\x18\a \x01(\tR\x06volume\"\xcf\x02\n" +
 	"\x0fWatermarkConfig\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x12\n" +

@@ -29,6 +29,7 @@ import (
 	"github.com/datvietvac-techhub/open-streamer/internal/buffer"
 	"github.com/datvietvac-techhub/open-streamer/internal/domain"
 	"github.com/datvietvac-techhub/open-streamer/internal/ingestor/push"
+	"github.com/datvietvac-techhub/open-streamer/internal/sessions"
 	"github.com/datvietvac-techhub/open-streamer/internal/tsdemux"
 	"github.com/datvietvac-techhub/open-streamer/internal/tsmux"
 )
@@ -54,10 +55,14 @@ func (s *Service) HandleRTMPPlay(
 		return fmt.Errorf("stream %q not active", key)
 	}
 
-	// Media-plane authorization (token / IP / country) before any state. RTMP
-	// play carries no query/UA in the handshake, so token/UA rules don't apply
-	// here — IP/country/policy still do (B / S-13).
-	if !s.playAllowed(code, "rtmp", info.RemoteAddr, "", "", "") {
+	// Media-plane authorization (token / IP / country) before any state. The
+	// playback token rides the play-URL query (rtmp://host/live/<code>?token=…),
+	// extracted the same way as the SRT/RTSP paths; a token-required policy is
+	// therefore enforceable over RTMP. RTMP has no User-Agent / Referer in the
+	// handshake, so those rules stay inert — IP/country/token/policy apply
+	// (B / S-13).
+	token := sessions.TokenFromQuery(info.RawQuery)
+	if !s.playAllowed(code, "rtmp", info.RemoteAddr, token, "") {
 		return fmt.Errorf("stream %q: playback not authorized", key)
 	}
 
