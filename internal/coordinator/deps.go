@@ -31,8 +31,6 @@ type mgrDep interface {
 type tcDep interface {
 	Start(context.Context, domain.StreamCode, domain.StreamCode, *domain.TranscoderConfig, []transcoder.RenditionTarget) error
 	Stop(domain.StreamCode)
-	StopProfile(domain.StreamCode, int)
-	StartProfile(domain.StreamCode, int, transcoder.RenditionTarget) error
 	SetUnhealthyCallback(func(streamID domain.StreamCode, reason string))
 	SetHealthyCallback(func(streamID domain.StreamCode))
 }

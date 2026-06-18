@@ -47,7 +47,7 @@ const (
 	monitorInterval        = 2 * time.Second
 	failbackProbeCooldown  = 8 * time.Second  // min time after degradation before first probe
 	failbackSwitchCooldown = 12 * time.Second // min time between input switches
-	probeTimeout           = 3 * time.Second
+	probeTimeout           = 5 * time.Second  // must exceed ingestor minProbeSpan (sustained-stream check) + connect time
 )
 
 // InputHealth tracks the runtime health of one input source.

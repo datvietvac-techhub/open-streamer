@@ -8,14 +8,13 @@
 // decodes the source once and fans the decoded frames out to every
 // rendition. Passthrough streams (no transcoder config) never start one.
 //
-// The subprocess owns all renditions, so there is no per-rung lifecycle:
-// StartProfile returns ErrNotImplemented and a ladder change restarts the
-// whole subprocess (see Coordinator.reloadTranscoderFull).
+// The subprocess owns all renditions, so there is no per-rung lifecycle: any
+// ladder or transcoder-config change (audio, profiles, global, decoder)
+// restarts the whole subprocess (see Coordinator.reloadTranscoderFull).
 package transcoder
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -31,11 +30,6 @@ import (
 	"github.com/datvietvac-techhub/open-streamer/internal/metrics"
 	"github.com/samber/do/v2"
 )
-
-// ErrNotImplemented is returned by StartProfile: the subprocess produces
-// every rendition from a single decode, so one rung cannot be started or
-// stopped on its own — callers restart the whole subprocess instead.
-var ErrNotImplemented = errors.New("transcoder: per-profile start is not supported; the subprocess owns all renditions")
 
 // Profile defines a single transcoding output rendition.
 // Rendition label in logs and URLs is track_<n> from ladder order (see buffer.VideoTrackSlug).
@@ -431,29 +425,4 @@ func (s *Service) Stop(streamID domain.StreamCode) {
 		Type:       domain.EventTranscoderStopped,
 		StreamCode: streamID,
 	})
-}
-
-// StopProfile is unsupported: one subprocess produces every rendition, so a
-// single rung can't be stopped on its own — use Stop to tear down the stream's
-// subprocess. Kept as a no-op so the coordinator's per-profile diff path
-// compiles; a ladder change is routed to a full transcoder restart.
-func (s *Service) StopProfile(streamID domain.StreamCode, profileIndex int) {
-	slog.Warn("transcoder: StopProfile is a no-op — the subprocess owns all renditions",
-		"stream_code", streamID,
-		"profile_index", profileIndex,
-	)
-}
-
-// StartProfile starts a single encoder for one profile index.
-//
-// StartProfile is unsupported: the subprocess produces every rendition, so a
-// single rung can't be started on its own. Returns ErrNotImplemented; the
-// coordinator surfaces it and restarts the whole subprocess instead.
-func (s *Service) StartProfile(streamID domain.StreamCode, profileIndex int, target RenditionTarget) error {
-	_ = target
-	slog.Warn("transcoder: StartProfile refused — the subprocess owns all renditions",
-		"stream_code", streamID,
-		"profile_index", profileIndex,
-	)
-	return fmt.Errorf("transcoder: profile %d: %w", profileIndex, ErrNotImplemented)
 }

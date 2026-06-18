@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -361,6 +362,67 @@ func (s *Service) Start(ctx context.Context, streamID domain.StreamCode, input d
 
 // Probe performs a short pull-read health probe for one input.
 // It is used by the manager to verify degraded inputs before failback.
+// Probe sustained-recovery thresholds. A degraded input is only declared
+// recovered when it delivers a *sustained* stream — not a single packet. A
+// source that merely sputters (an intermittent multicast feed emitting an
+// occasional blip while still effectively down) would pass a one-packet check,
+// trigger a failback, then starve to the packet-timeout and degrade again —
+// flapping between the source and its backup every ~timeout seconds. Requiring
+// payload to keep arriving across minProbeSpan kills that blip: a real stream
+// streams continuously, a sputtering one does not.
+const (
+	minProbeSpan    = 1500 * time.Millisecond // payload must keep arriving for at least this long
+	minProbePackets = 10                      // and total at least this many payload packets
+	minProbeBytes   = 16 * 1024               // and this many payload bytes
+)
+
+// sustainedProbeOK reports whether the observed payload constitutes a sustained
+// live stream rather than a transient blip. Pure for testability.
+func sustainedProbeOK(payloadBytes, payloadPackets int, span time.Duration) bool {
+	return payloadPackets >= minProbePackets &&
+		payloadBytes >= minProbeBytes &&
+		span >= minProbeSpan
+}
+
+// probeStats accumulates payload observed during a Probe and decides whether the
+// source looks sustained. Payload "span" is measured by arrival time, so a
+// sputtering feed (a burst then quiet) never reaches minProbeSpan.
+type probeStats struct {
+	bytes, packets  int
+	firstAt, lastAt time.Time
+}
+
+func (a *probeStats) add(batch []domain.AVPacket, now time.Time) {
+	for _, p := range batch {
+		if len(p.Data) == 0 {
+			continue
+		}
+		a.bytes += len(p.Data)
+		a.packets++
+		if a.firstAt.IsZero() {
+			a.firstAt = now
+		}
+		a.lastAt = now
+	}
+}
+
+func (a *probeStats) sustained() bool {
+	return sustainedProbeOK(a.bytes, a.packets, a.lastAt.Sub(a.firstAt))
+}
+
+func (a *probeStats) notSustainedErr(cause error) error {
+	if a.packets == 0 {
+		return fmt.Errorf("ingestor: probe got no payload: %w", cause)
+	}
+	return fmt.Errorf("ingestor: probe source not sustained (%d pkts, %d bytes over %s)",
+		a.packets, a.bytes, a.lastAt.Sub(a.firstAt))
+}
+
+// Probe reports whether a (degraded) input source is deliverable right now.
+// It returns nil only when the source produces a *sustained* stream within ctx;
+// a source that is silent or merely sputtering yields an error so the manager
+// does not fail back to it prematurely. The caller's ctx deadline must exceed
+// minProbeSpan.
 func (s *Service) Probe(ctx context.Context, input domain.Input) error {
 	if protocol.IsPushListen(input.URL) {
 		return fmt.Errorf("ingestor: probe unsupported for push-listen input %q", input.URL)
@@ -374,19 +436,20 @@ func (s *Service) Probe(ctx context.Context, input domain.Input) error {
 	if err := reader.Open(ctx); err != nil {
 		return err
 	}
-	batch, err := reader.ReadPackets(ctx)
-	if err != nil {
-		return err
-	}
-	if len(batch) == 0 {
-		return fmt.Errorf("ingestor: probe got empty batch")
-	}
-	for _, p := range batch {
-		if len(p.Data) > 0 {
+
+	// Read until the source proves it is sustained (success) or ctx expires
+	// (the caller's probe deadline must exceed minProbeSpan).
+	var stats probeStats
+	for {
+		batch, rerr := reader.ReadPackets(ctx)
+		stats.add(batch, time.Now())
+		if stats.sustained() {
 			return nil
 		}
+		if rerr != nil {
+			return stats.notSustainedErr(rerr)
+		}
 	}
-	return fmt.Errorf("ingestor: probe got no payload")
 }
 
 // Stop cancels the pull worker or unregisters the push key for streamID.
