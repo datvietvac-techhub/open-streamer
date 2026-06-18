@@ -593,34 +593,29 @@ func (c *Coordinator) updateLocked(ctx context.Context, old, new *domain.Stream)
 		return nil
 	}
 
-	// Transcoder topology changes (nil↔non-nil, mode change, video.copy change)
-	// require rebuilding the whole buffer layout → full pipeline reload.
-	if diff.TranscoderTopologyChanged {
-		return c.reloadTranscoderFull(ctx, old, new)
-	}
-
-	// Per-profile transcoder changes: reload only the affected profiles.
-	if diff.TranscoderChanged && diff.ProfilesDiff != nil {
-		//nolint:contextcheck // StartProfile derives from streamWorker.baseCtx; by design
-		if err := c.reloadProfiles(new, diff.ProfilesDiff); err != nil {
-			return fmt.Errorf("coordinator: reload profiles: %w", err)
-		}
-		// Push updated profile metadata to the live HLS master playlist writer so
-		// resolution/bandwidth info reflects the new profile without a publisher restart.
-		if len(diff.ProfilesDiff.Updated) > 0 {
-			c.pub.UpdateABRMasterMeta(new.Code, abrMetaFromUpdated(new, diff.ProfilesDiff.Updated))
-		}
-	}
-
+	// Inputs first: reloadTranscoderFull below rebuilds the transcoder +
+	// publisher + DVR but does NOT touch the input set, so a combined
+	// input+transcoder change must apply the input diff here.
 	if diff.InputsChanged {
 		c.mgr.UpdateInputs(new.Code, diff.AddedInputs, diff.RemovedInputs, diff.UpdatedInputs)
 	}
 
-	// Profile add/remove: restart only HLS+DASH (RTSP/SRT viewers unaffected).
-	if diff.ProfilesDiff != nil && diff.ProfilesDiff.HasAddedOrRemoved() {
-		if err := c.pub.RestartHLSDASH(ctx, new); err != nil {
-			return fmt.Errorf("coordinator: restart hls/dash: %w", err)
-		}
+	// Any transcoder change that needs the subprocess → full reload.
+	//
+	// The native transcoder subprocess owns every rendition; there is no
+	// per-profile lifecycle (a single decode fans out to all encoders). So an
+	// audio / global / decoder change, or a per-profile video update / add /
+	// remove, all restart the WHOLE subprocess — the same path as a topology
+	// change. reloadTranscoderFull rebuilds the buffers + transcoder + publisher
+	// (picking up new protocols/policy) + DVR and restarts every output cleanly,
+	// so we return once it succeeds.
+	//
+	// diff.ProfilesDiff != nil is exactly "non-topology transcoder change that
+	// needs the subprocess" — diffTranscoder only builds it when re-encoding is
+	// on. The old per-profile reload (StartProfile/StopProfile) is impossible
+	// with the native subprocess and was removed.
+	if diff.TranscoderTopologyChanged || (diff.TranscoderChanged && diff.ProfilesDiff != nil) {
+		return c.reloadTranscoderFull(ctx, old, new)
 	}
 
 	// Protocol/push changes: surgically stop/start only affected goroutines.
@@ -635,9 +630,6 @@ func (c *Coordinator) updateLocked(ctx context.Context, old, new *domain.Stream)
 
 	if diff.DVRChanged {
 		c.reloadDVR(ctx, new)
-	} else if diff.ProfilesDiff != nil && diff.ProfilesDiff.HasAddedOrRemoved() {
-		// Best rendition may have changed (profile added/removed); re-evaluate DVR buffer.
-		c.reloadDVRIfBufferChanged(ctx, old, new)
 	}
 
 	return nil
@@ -731,96 +723,6 @@ func (c *Coordinator) reloadFailed(ctx context.Context, code domain.StreamCode, 
 	return err
 }
 
-// reloadProfiles applies per-profile transcoder changes without touching unchanged profiles.
-// Updated profiles: stop+start the corresponding rendition.
-// Added profiles: create rendition buffer + start the rendition.
-// Removed profiles: stop the rendition + delete its rendition buffer.
-func (c *Coordinator) reloadProfiles(new *domain.Stream, pd *ProfilesDiff) error {
-	newProfiles := transcoderProfilesFromDomain(&new.Transcoder.Video)
-
-	// Removed: stop encoders and delete their buffers.
-	for _, ch := range pd.Removed {
-		c.tc.StopProfile(new.Code, ch.Index)
-		slug := buffer.VideoTrackSlug(ch.Index)
-		c.buf.Delete(buffer.RenditionBufferID(new.Code, slug))
-
-		c.rendMu.Lock()
-		slugs := c.renditions[new.Code]
-		for i, s := range slugs {
-			if s == slug {
-				c.renditions[new.Code] = append(slugs[:i], slugs[i+1:]...)
-				break
-			}
-		}
-		c.rendMu.Unlock()
-	}
-
-	// Updated: stop + restart each changed encoder.
-	for _, ch := range pd.Updated {
-		if ch.Index >= len(newProfiles) {
-			continue
-		}
-		c.tc.StopProfile(new.Code, ch.Index)
-		slug := buffer.VideoTrackSlug(ch.Index)
-		bid := buffer.RenditionBufferID(new.Code, slug)
-		if err := c.tc.StartProfile(new.Code, ch.Index, transcoder.RenditionTarget{
-			BufferID: bid,
-			Profile:  newProfiles[ch.Index],
-		}); err != nil {
-			return fmt.Errorf("restart profile %d: %w", ch.Index, err)
-		}
-	}
-
-	// Added: create buffer + start new encoder.
-	for _, ch := range pd.Added {
-		if ch.Index >= len(newProfiles) {
-			continue
-		}
-		slug := buffer.VideoTrackSlug(ch.Index)
-		bid := buffer.RenditionBufferID(new.Code, slug)
-		c.buf.Create(bid)
-		if err := c.tc.StartProfile(new.Code, ch.Index, transcoder.RenditionTarget{
-			BufferID: bid,
-			Profile:  newProfiles[ch.Index],
-		}); err != nil {
-			c.buf.Delete(bid)
-			return fmt.Errorf("start added profile %d: %w", ch.Index, err)
-		}
-
-		c.rendMu.Lock()
-		c.renditions[new.Code] = append(c.renditions[new.Code], slug)
-		c.rendMu.Unlock()
-	}
-
-	return nil
-}
-
-// abrMetaFromUpdated converts ProfilesDiff.Updated entries to publisher.ABRRepMeta slices
-// so the live HLS master playlist can be rewritten without restarting the publisher.
-func abrMetaFromUpdated(stream *domain.Stream, updated []ProfileChange) []publisher.ABRRepMeta {
-	profiles := transcoderProfilesFromDomain(&stream.Transcoder.Video)
-	hasAudio := stream.Transcoder.Audio.Copy || stream.Transcoder.Audio.Codec != ""
-	out := make([]publisher.ABRRepMeta, 0, len(updated))
-	for _, ch := range updated {
-		if ch.Index >= len(profiles) {
-			continue
-		}
-		p := profiles[ch.Index]
-		bwBps := 0
-		if ch.New != nil {
-			bwBps = ch.New.Bitrate * 1000
-		}
-		out = append(out, publisher.ABRRepMeta{
-			Slug:     buffer.VideoTrackSlug(ch.Index),
-			BwBps:    bwBps,
-			Width:    p.Width,
-			Height:   p.Height,
-			HasAudio: hasAudio,
-		})
-	}
-	return out
-}
-
 // reloadDVR stops any active recording and starts a new one when DVR is enabled.
 func (c *Coordinator) reloadDVR(ctx context.Context, new *domain.Stream) {
 	c.stopDVR(ctx, new.Code)
@@ -887,16 +789,6 @@ func (c *Coordinator) blobProfiles(stream *domain.Stream) []blob.ProfileSub {
 		})
 	}
 	return out
-}
-
-// reloadDVRIfBufferChanged reloads DVR only when the playback buffer changed
-// (e.g. best rendition shifted when a higher-resolution profile was added/removed).
-func (c *Coordinator) reloadDVRIfBufferChanged(ctx context.Context, old, new *domain.Stream) {
-	oldBuf := buffer.PlaybackBufferID(old.Code, old.Transcoder)
-	newBuf := buffer.PlaybackBufferID(new.Code, new.Transcoder)
-	if oldBuf != newBuf {
-		c.reloadDVR(ctx, new)
-	}
 }
 
 // handleAllInputsExhausted is called by the manager when all inputs are degraded.

@@ -329,7 +329,12 @@ func TestUpdate_TranscoderTopologyChanged_FullReload(t *testing.T) {
 	assert.Contains(t, h.tc.started, old.Code)
 }
 
-func TestUpdate_ProfileUpdated_OnlyAffectedProfileRestarted(t *testing.T) {
+// The native transcoder subprocess owns all renditions (no per-profile
+// lifecycle), so ANY transcoder change — a per-profile video tweak, a profile
+// add/remove, or an audio/global/decoder change — restarts the whole subprocess
+// and the publisher via reloadTranscoderFull.
+
+func TestUpdate_ProfileUpdated_FullSubprocessReload(t *testing.T) {
 	h := newHarness(t)
 	old := baseStream()
 	h.simulateRunning(old)
@@ -341,21 +346,14 @@ func TestUpdate_ProfileUpdated_OnlyAffectedProfileRestarted(t *testing.T) {
 
 	require.NoError(t, h.coord.Update(context.Background(), old, new))
 
-	// Only profile index 1 should be stopped and restarted.
-	assert.Equal(t, []int{1}, h.tc.profilesStopped)
-	assert.Equal(t, []int{1}, h.tc.profilesStarted)
-
-	// Profile 0 (FHD) must not be touched.
-	assert.NotContains(t, h.tc.profilesStopped, 0)
-
-	// Publisher must NOT be restarted (no add/remove, no protocol change).
-	assert.Empty(t, h.pub.stopped)
-
-	// ABR master meta update should be pushed.
-	assert.Contains(t, h.pub.abrMetaUpdated, old.Code)
+	// Full reload: subprocess + publisher restarted.
+	assert.Contains(t, h.tc.stopped, old.Code)
+	assert.Contains(t, h.tc.started, old.Code)
+	assert.Contains(t, h.pub.stopped, old.Code)
+	assert.Contains(t, h.pub.started, old.Code)
 }
 
-func TestUpdate_ProfileAdded_HLSDASHRestartedRTSPUntouched(t *testing.T) {
+func TestUpdate_ProfileAdded_FullReload(t *testing.T) {
 	h := newHarness(t)
 	old := baseStream()
 	h.simulateRunning(old)
@@ -367,17 +365,12 @@ func TestUpdate_ProfileAdded_HLSDASHRestartedRTSPUntouched(t *testing.T) {
 
 	require.NoError(t, h.coord.Update(context.Background(), old, new))
 
-	// New profile encoder started at index 2.
-	assert.Contains(t, h.tc.profilesStarted, 2)
-
-	// HLS+DASH restarted (ABR ladder changed).
-	assert.Contains(t, h.pub.hlsDashRestarted, old.Code)
-
-	// Full publisher stop must NOT be called (RTSP viewers unaffected).
-	assert.Empty(t, h.pub.stopped)
+	assert.Contains(t, h.tc.started, old.Code)
+	assert.Contains(t, h.pub.stopped, old.Code)
+	assert.Contains(t, h.pub.started, old.Code)
 }
 
-func TestUpdate_ProfileRemoved_HLSDASHRestartedRTSPUntouched(t *testing.T) {
+func TestUpdate_ProfileRemoved_FullReload(t *testing.T) {
 	h := newHarness(t)
 	old := baseStream()
 	h.simulateRunning(old)
@@ -387,9 +380,28 @@ func TestUpdate_ProfileRemoved_HLSDASHRestartedRTSPUntouched(t *testing.T) {
 
 	require.NoError(t, h.coord.Update(context.Background(), old, new))
 
-	assert.Contains(t, h.tc.profilesStopped, 1)
-	assert.Contains(t, h.pub.hlsDashRestarted, old.Code)
-	assert.Empty(t, h.pub.stopped)
+	assert.Contains(t, h.tc.started, old.Code)
+	assert.Contains(t, h.pub.stopped, old.Code)
+	assert.Contains(t, h.pub.started, old.Code)
+}
+
+// TestUpdate_AudioChanged_FullReload is the regression for the live-update bug:
+// an audio config change used to route to the per-profile reload (StartProfile)
+// and fail with ErrNotImplemented. It must now restart the whole subprocess.
+func TestUpdate_AudioChanged_FullReload(t *testing.T) {
+	h := newHarness(t)
+	old := baseStream()
+	h.simulateRunning(old)
+
+	new := baseStream()
+	new.Transcoder.Audio.Bitrate = old.Transcoder.Audio.Bitrate + 64 // any audio change
+
+	require.NoError(t, h.coord.Update(context.Background(), old, new))
+
+	assert.Contains(t, h.tc.stopped, old.Code)
+	assert.Contains(t, h.tc.started, old.Code)
+	assert.Contains(t, h.pub.stopped, old.Code)
+	assert.Contains(t, h.pub.started, old.Code)
 }
 
 func TestUpdate_ProtocolChanged_UpdateProtocolsCalled(t *testing.T) {
