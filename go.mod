@@ -3,7 +3,7 @@ module github.com/datvietvac-techhub/open-streamer
 go 1.25.11
 
 require (
-	github.com/Eyevinn/mp4ff v0.52.0
+	github.com/Eyevinn/mp4ff v0.54.0
 	github.com/asticode/go-astiav v0.41.0
 	github.com/asticode/go-astits v1.15.0
 	github.com/bluenviron/gortsplib/v5 v5.5.3
